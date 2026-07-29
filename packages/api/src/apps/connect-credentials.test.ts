@@ -112,7 +112,7 @@ describe("resolveConnectCredentials", () => {
     });
     expect(result).toEqual({
       ok: false,
-      error: 'Provider "cloudy" is only available in OneCLI Cloud',
+      error: 'Provider "cloudy" is not yet available in this build',
     });
   });
 

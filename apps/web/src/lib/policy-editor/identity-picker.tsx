@@ -4,7 +4,7 @@ import type { ProjectionIdentity } from "@/lib/api";
 
 /**
  * The OSS identity-picker seam (step 9.5). Directory identities (users,
- * user-groups) are a OneCLI Cloud capability, and since attach-model step 6
+ * user-groups) are not implemented in this build, and since attach-model step 6
  * the only policy console left is the ORG one — which OSS does not mount at
  * all. So this stub can never render; it exists to keep the shared rule form
  * compiling in an OSS build. The EE editions alias this file to

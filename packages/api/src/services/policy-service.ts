@@ -1,6 +1,5 @@
 import { db, Prisma } from "@onecli/db";
 import { ServiceError } from "./errors";
-import { isOssEdition } from "../lib/policy-flags";
 import { type ResourceScope } from "./resource-scope";
 import { getPolicyValidator, getRuleActionGate } from "../providers";
 import type {
@@ -363,15 +362,12 @@ export const assertIdentitiesValid = async (
   const userIds = idsOf("user");
   const groupIds = idsOf("group");
 
-  // Level restriction. The OSS edition phrases it as the capability lock it
-  // is there (directory identities are a OneCLI Cloud capability); the EE
-  // editions keep the scope-shaped message byte-identical.
+  // Level restriction — the same scope-shaped rule in every edition: a project
+  // rule targets agents, an org rule targets directory identities.
   if (base.scope === "project" && (userIds.length || groupIds.length)) {
     throw new ServiceError(
       "UNPROCESSABLE",
-      isOssEdition()
-        ? "Group and user identities are available on OneCLI Cloud."
-        : "A project rule can target a specific agent or all agents.",
+      "A project rule can target a specific agent or all agents.",
     );
   }
   if (base.scope === "organization" && agentIds.length) {
@@ -561,8 +557,8 @@ export const assertTargetsValid = async (
  * with a connection target — then runs the wired policy validator per
  * connection target. EE deep-checks the shape against the provider (repos
  * exist on the installation, absolute Dropbox paths) and gates the team+
- * entitlement; OSS wires a validator that REJECTS session policies outright
- * (granular scoping is a OneCLI Cloud capability — step 9.5). A no-op for
+ * entitlement; OSS wires no validator — the permissive default accepts
+ * session policies the OSS gateway does not yet enforce (Tier 3). A no-op for
  * behavioral / absent conditions. Same org fence as `assertTargetsValid`.
  *
  * Callers pass the MERGED (post-update) action/targets/conditions, so no PATCH

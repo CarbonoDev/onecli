@@ -4,7 +4,6 @@ import type { ReactNode } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Loader2 } from "lucide-react";
 import { Button } from "@onecli/ui/components/button";
-import { IS_CLOUD } from "@/lib/env";
 import { API_ORIGIN, getAuthToken, getProjectId } from "@/lib/api-fetch";
 import { ConnectLayout } from "./connect-layout";
 import { ConnectSuccess } from "./connect-success";
@@ -279,28 +278,6 @@ export const ConnectFlow = ({
             >
               Use an API key instead
             </Button>
-          )}
-          {!IS_CLOUD && (
-            <>
-              <div className="flex items-center gap-3 pt-1">
-                <div className="bg-border h-px flex-1" />
-                <span className="text-muted-foreground/60 text-[10px] uppercase tracking-widest">
-                  or
-                </span>
-                <div className="bg-border h-px flex-1" />
-              </div>
-              <p className="text-muted-foreground text-xs">
-                Skip setup with{" "}
-                <a
-                  href="https://app.onecli.sh"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="text-foreground underline decoration-foreground/20 underline-offset-2 transition-colors hover:decoration-foreground/60"
-                >
-                  OneCLI Cloud
-                </a>
-              </p>
-            </>
           )}
         </div>
       </ConnectLayout>

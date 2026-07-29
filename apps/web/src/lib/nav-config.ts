@@ -6,6 +6,7 @@ import {
   Activity,
   User,
   Users,
+  UsersRound,
   KeyRound,
   ShieldCheck,
   Globe,
@@ -31,6 +32,10 @@ export const navItems: NavItem[] = [
   // Always visible (D-J): the page itself degrades for non-admins and in
   // local auth mode — hiding the item would require a session role field.
   { title: "Team", url: "/team", icon: Users },
+  // Always visible (D-J): the page itself degrades for non-admins and gates
+  // groups in local auth mode — hiding the item would require a session role
+  // field.
+  { title: "Groups", url: "/groups", icon: UsersRound },
   { title: "Settings", url: "/settings", icon: Settings },
 ];
 

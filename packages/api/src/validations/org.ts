@@ -62,6 +62,42 @@ export const createInvitationSchema = z.object({
 
 export type CreateInvitationInput = z.infer<typeof createInvitationSchema>;
 
+// ── Groups ────────────────────────────────────────────────────────────────
+
+/**
+ * Group provenance — a READ-side filter only. `source` is never accepted on a
+ * write: creates hard-code `"manual"`, and `"scim"` rows (IdP-provisioned in
+ * EE) reject every mutation with 409 so the dashboard can never fight the
+ * IdP over ownership of a provisioned group.
+ */
+export const groupSourceSchema = z.enum(["manual", "scim"]);
+
+/** Group display name — trimmed, 1–100 chars. */
+export const groupNameSchema = z.string().trim().min(1).max(100);
+
+/**
+ * Replace-set ceiling for a single group's membership. Deliberately NOT
+ * `DIRECTORY_LIMIT_MAX` (a page-size bound, 200): the members dialog drains
+ * every page and PUTs the full set back, so the write cap must comfortably
+ * exceed one page while still bounding the request body.
+ */
+export const MAX_GROUP_MEMBERS = 1000;
+
+export const groupListQuerySchema = directoryListQuerySchema.extend({
+  source: groupSourceSchema.optional(),
+});
+
+export type GroupListQuery = z.infer<typeof groupListQuerySchema>;
+
+/** Body `source`/`externalId` are ignored by construction: not in the schema. */
+export const createGroupSchema = z.object({ name: groupNameSchema });
+
+export const renameGroupSchema = z.object({ name: groupNameSchema });
+
+export const setGroupMembersSchema = z.object({
+  userIds: z.array(z.string().min(1)).max(MAX_GROUP_MEMBERS),
+});
+
 /**
  * `PATCH /v1/org/members/:userId` accepts EXACTLY ONE change per request —
  * either a lifecycle change (`status`) or a role change (`role`). A body

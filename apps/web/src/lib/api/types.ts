@@ -187,10 +187,12 @@ export interface OrgSsoEnforcement {
   exemptMemberCount: number;
 }
 
-// PATCH /v1/org/members/:userId — exactly one change per request.
+// PATCH /v1/org/members/:userId — exactly one change per request. `owner` is
+// not assignable here (owner transfer is a separate operation); the `ssoExempt`
+// arm is gone with the SSO feature it belonged to.
 export type UpdateOrgMemberInput =
   | { status: "active" | "suspended" }
-  | { ssoExempt: boolean };
+  | { role: "admin" | "member" };
 
 export interface OrgMemberRow {
   userId: string;
@@ -199,6 +201,14 @@ export interface OrgMemberRow {
   /** Present on status changes: what happened on the Cognito side. */
   revocation?: string;
 }
+
+/**
+ * PATCH /v1/org/members/:userId response. The server echoes back only the
+ * facet it changed, so the response mirrors the request's single-change shape.
+ */
+export type UpdatedOrgMember =
+  | Pick<OrgMemberRow, "userId" | "status" | "ssoExempt">
+  | { userId: string; role: string };
 
 export interface ResourceCounts {
   agents: number;
@@ -291,6 +301,25 @@ export interface OrgMemberListRow {
   status: string;
   ssoExempt: boolean;
   joinedAt: string;
+}
+
+// Link-based org invitations (`/v1/org/invitations`).
+export interface InvitationRow {
+  id: string;
+  email: string;
+  role: string;
+  /** Projected: a stored "pending" past its expiresAt reads "expired". */
+  status: "pending" | "accepted" | "cancelled" | "expired";
+  invitedByEmail: string;
+  expiresAt: string;
+  createdAt: string;
+  /** Raw link token — admin-only surface; the UI composes /join/<token>. */
+  token: string;
+}
+
+export interface CreateInvitationInput {
+  email: string;
+  role: "admin" | "member";
 }
 
 // ── Shared policy identity/condition shapes ──────────────────────────────────

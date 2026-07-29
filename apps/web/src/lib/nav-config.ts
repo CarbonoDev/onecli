@@ -5,6 +5,7 @@ import {
   Plug,
   Activity,
   User,
+  Users,
   KeyRound,
   ShieldCheck,
   Globe,
@@ -27,6 +28,9 @@ export const navItems: NavItem[] = [
   { title: "Agents", url: "/agents", icon: Bot },
   { title: "Connections", url: "/connections", icon: Plug },
   { title: "Activity", url: "/activity", icon: Activity },
+  // Always visible (D-J): the page itself degrades for non-admins and in
+  // local auth mode — hiding the item would require a session role field.
+  { title: "Team", url: "/team", icon: Users },
   { title: "Settings", url: "/settings", icon: Settings },
 ];
 

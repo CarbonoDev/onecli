@@ -7,6 +7,7 @@ import * as projects from "./projects";
 import * as projectAccess from "./project-access";
 import * as domains from "./domains";
 import * as orgMembers from "./org-members";
+import * as invitations from "./invitations";
 import * as groups from "./groups";
 import * as roleMappings from "./role-mappings";
 import * as ssoConnections from "./sso-connections";
@@ -30,6 +31,7 @@ export {
   projectAccess,
   domains,
   orgMembers,
+  invitations,
   groups,
   roleMappings,
   ssoConnections,
@@ -57,7 +59,10 @@ export type {
   OrgDomain,
   OrgSsoEnforcement,
   OrgMemberRow,
+  UpdatedOrgMember,
   UpdateOrgMemberInput,
+  InvitationRow,
+  CreateInvitationInput,
   DirectoryPage,
   DirectoryListParams,
   GroupRow,

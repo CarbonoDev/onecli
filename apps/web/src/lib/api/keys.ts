@@ -40,6 +40,10 @@ export const queryKeys = {
     all: () => ["org-members", ...scope()] as const,
     list: () => [...queryKeys.orgMembers.all(), "list"] as const,
   },
+  invitations: {
+    all: () => ["invitations", ...scope()] as const,
+    list: () => [...queryKeys.invitations.all(), "list"] as const,
+  },
   ssoConnections: {
     all: () => ["sso-connections", ...scope()] as const,
     list: () => [...queryKeys.ssoConnections.all(), "list"] as const,

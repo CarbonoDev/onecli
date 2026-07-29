@@ -25,7 +25,7 @@ import {
   type AppCategory,
 } from "./app-categories";
 import type { AppDefinition } from "@onecli/api/apps/types";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQueryClient } from "@tanstack/react-query";
 import type { PageScope } from "@/lib/api";
 import { queryKeys } from "@/lib/api/keys";
 import { useConnections } from "@/hooks/use-connections";
@@ -40,8 +40,8 @@ import {
   useAppMessages,
   type AppConnectedEvent,
 } from "@/hooks/use-app-connected";
-import { getCurrentPlan } from "@/lib/user-plan";
 import { ProAppDialog } from "@/lib/components/pro-app-dialog";
+import { UnavailableBadge } from "@/lib/components/unavailable-badge";
 import { AppIcon } from "./app-icon";
 import { ConnectAppDialog } from "./connect-app-dialog";
 import { ConfigureCredentialsDialog } from "./configure-credentials-dialog";
@@ -121,10 +121,6 @@ export const AppsTab = ({
   const configuredQuery = useConfiguredProviders(pageScope);
   const envDefaultsQuery = useEnvDefaultProviders();
   const availableQuery = useAvailableApps(pageScope);
-  const planQuery = useQuery({
-    queryKey: queryKeys.userPlan.all(),
-    queryFn: getCurrentPlan,
-  });
 
   const connectionCounts = useMemo(() => {
     const counts = new Map<string, number>();
@@ -143,12 +139,10 @@ export const AppsTab = ({
     () => new Set(envDefaultsQuery.data ?? []),
     [envDefaultsQuery.data],
   );
-  const plan = planQuery.data ?? null;
   const loading =
     connectionsQuery.isPending ||
     configuredQuery.isPending ||
-    envDefaultsQuery.isPending ||
-    planQuery.isPending;
+    envDefaultsQuery.isPending;
 
   const handleConnected = useCallback(
     ({ provider, connectionId }: AppConnectedEvent) => {
@@ -387,10 +381,7 @@ export const AppsTab = ({
         ) : (
           filteredApps.map((app) => {
             const count = connectionCounts.get(app.id) ?? 0;
-            const isLocked =
-              !app.available ||
-              (app.teamOnly === true &&
-                !["team", "scale", "enterprise"].includes(plan ?? ""));
+            const isLocked = !app.available;
             return (
               <AppRow
                 key={app.id}
@@ -525,35 +516,7 @@ const AppRow = ({
       </div>
 
       {cloudOnly ? (
-        <span className="inline-flex items-center gap-1.5 rounded-full border border-brand/20 bg-brand/5 px-2.5 py-0.5">
-          <svg
-            width="11"
-            height="9"
-            viewBox="0 0 44 36"
-            fill="none"
-            className="shrink-0 -mt-px"
-          >
-            <path
-              d="M2 2L16 18L2 34"
-              stroke="currentColor"
-              strokeWidth="5"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              className="text-brand"
-            />
-            <path
-              d="M22 2L36 18L22 34"
-              stroke="currentColor"
-              strokeWidth="5"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              className="text-brand"
-            />
-          </svg>
-          <span className="text-[11px] font-semibold tracking-wide text-brand">
-            Team
-          </span>
-        </span>
+        <UnavailableBadge />
       ) : (
         <div className="flex items-center gap-2 shrink-0">
           {!hideDetails && (

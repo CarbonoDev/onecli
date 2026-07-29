@@ -11,7 +11,7 @@ import {
 } from "@onecli/ui/components/popover";
 import { getApp, getApps } from "@onecli/api/apps/registry";
 import { AppIcon } from "@/app/(dashboard)/connections/_components/app-icon";
-import { TeamBadge } from "@/lib/components/team-badge";
+import { UnavailableBadge } from "@/lib/components/unavailable-badge";
 
 /**
  * True when the registry knows the app but this edition can't connect it —
@@ -96,7 +96,7 @@ export const AppSelect = ({ value, onChange, id, invalid }: AppSelectProps) => {
                   size={18}
                 />
                 <span className="truncate">{selectedApp.name}</span>
-                {!selectedApp.available && <TeamBadge />}
+                {!selectedApp.available && <UnavailableBadge />}
               </>
             ) : (
               <span className="text-muted-foreground">Select an app…</span>
@@ -141,7 +141,7 @@ export const AppSelect = ({ value, onChange, id, invalid }: AppSelectProps) => {
                 <span className="min-w-0 flex-1 truncate text-sm">
                   {a.name}
                 </span>
-                {!a.available && <TeamBadge />}
+                {!a.available && <UnavailableBadge />}
                 {a.id === value && (
                   <Check className="size-4 shrink-0" aria-hidden />
                 )}

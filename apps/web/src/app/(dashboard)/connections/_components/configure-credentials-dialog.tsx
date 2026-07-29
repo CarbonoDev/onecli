@@ -15,7 +15,6 @@ import { SecretInput } from "@/components/secret-input";
 import type { PageScope } from "@/lib/api";
 import { useSaveAppConfig } from "@/hooks/use-app-config";
 import type { OAuthConfigField } from "@onecli/api/apps/types";
-import { IS_CLOUD } from "@/lib/env";
 import { AppIcon } from "./app-icon";
 import { RedirectUri } from "./redirect-uri";
 
@@ -133,21 +132,6 @@ export const ConfigureCredentialsDialog = ({
           >
             {saving ? "Saving..." : "Save & Connect"}
           </Button>
-
-          {!IS_CLOUD && (
-            <p className="text-muted-foreground text-center text-xs">
-              Or use{" "}
-              <a
-                href="https://app.onecli.sh"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-foreground font-medium underline underline-offset-2 transition-colors hover:text-foreground/80"
-              >
-                OneCLI Cloud
-              </a>{" "}
-              for pre-configured connections.
-            </p>
-          )}
         </div>
       </DialogContent>
     </Dialog>

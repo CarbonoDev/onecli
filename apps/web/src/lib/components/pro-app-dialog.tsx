@@ -1,7 +1,5 @@
 "use client";
 
-import { ExternalLink } from "lucide-react";
-import { Button } from "@onecli/ui/components/button";
 import {
   Dialog,
   DialogContent,
@@ -9,6 +7,7 @@ import {
   DialogTitle,
 } from "@onecli/ui/components/dialog";
 import { AppIcon } from "@/app/(dashboard)/connections/_components/app-icon";
+import { UnavailableBadge } from "@/lib/components/unavailable-badge";
 
 interface ProAppDialogProps {
   appName: string;
@@ -19,6 +18,13 @@ interface ProAppDialogProps {
   onOpenChange: (open: boolean) => void;
 }
 
+/**
+ * Shown when the user opens something this build does not implement: an
+ * `available: false` registry app (Connections list) or a capability without an
+ * OSS implementation (granular access). Informational only — the dialog's close
+ * button is the only action. Every EE edition aliases this module away
+ * (`next.config.js` → `@/ee/apps/pro-app-dialog`).
+ */
 export const ProAppDialog = ({
   appName,
   appIcon,
@@ -44,72 +50,16 @@ export const ProAppDialog = ({
             <DialogTitle className="text-lg">{appName}</DialogTitle>
           </DialogHeader>
 
-          <div className="mt-2 inline-flex items-center gap-1.5 rounded-full border border-brand/20 bg-brand/5 px-2.5 py-0.5">
-            <svg
-              width="11"
-              height="9"
-              viewBox="0 0 44 36"
-              fill="none"
-              className="shrink-0 -mt-px"
-            >
-              <path
-                d="M2 2L16 18L2 34"
-                stroke="currentColor"
-                strokeWidth="5"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                className="text-brand"
-              />
-              <path
-                d="M22 2L36 18L22 34"
-                stroke="currentColor"
-                strokeWidth="5"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                className="text-brand"
-              />
-            </svg>
-            <span className="text-[11px] font-semibold tracking-wide text-brand">
-              Team
-            </span>
+          <div className="mt-2">
+            <UnavailableBadge />
           </div>
 
           <p className="mt-4 text-center text-sm leading-relaxed text-muted-foreground text-balance">
             {description}
           </p>
           <p className="mt-1.5 text-center text-xs text-muted-foreground/70 text-balance">
-            Available on OneCLI Cloud and on-prem enterprise plans.
+            Not yet available in this build.
           </p>
-
-          <div className="mt-6 flex w-full flex-col gap-2.5">
-            <Button
-              className="w-full"
-              onClick={() =>
-                window.open(
-                  "https://app.onecli.sh",
-                  "_blank",
-                  "noopener,noreferrer",
-                )
-              }
-            >
-              Try OneCLI Cloud
-              <ExternalLink className="size-3.5" />
-            </Button>
-            <Button
-              variant="outline"
-              className="w-full"
-              onClick={() =>
-                window.open(
-                  "https://cal.com/onecli",
-                  "_blank",
-                  "noopener,noreferrer",
-                )
-              }
-            >
-              Looking for on-prem? Talk to sales
-              <ExternalLink className="size-3.5" />
-            </Button>
-          </div>
         </div>
       </DialogContent>
     </Dialog>

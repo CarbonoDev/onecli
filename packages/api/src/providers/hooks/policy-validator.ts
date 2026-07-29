@@ -10,8 +10,7 @@ export interface PolicyValidator {
   /**
    * Edition gate over a rule's targets, run on create/update (never publish —
    * a pre-existing row must not brick a whole-scope publish). Absent =
-   * permissive (the default); the OSS edition wires an implementation that
-   * rejects app targets for cloud-only providers its gateway can't enforce.
+   * permissive (the default); no edition in this repo wires one.
    */
   validateTargets?(targets: PolicyTargetInput[]): Promise<void>;
 }

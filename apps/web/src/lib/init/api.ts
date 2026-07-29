@@ -1,6 +1,5 @@
 import type { CreateApiAppOptions } from "@onecli/api";
 import { ossNewProjectPolicySeeder } from "@onecli/api/services/policy-oss-cutover";
-import { ossPolicyValidator } from "@onecli/api/services/policy-oss-locks";
 
 /**
  * The OSS edition's API wiring. Every EE edition ALIASES THIS FILE AWAY
@@ -8,11 +7,12 @@ import { ossPolicyValidator } from "@onecli/api/services/policy-oss-locks";
  * here is OSS-only by construction:
  *
  * - the new-project seeder gives fresh projects their published Default Rule —
- *   the per-project enforce signal — pinned to ALLOW since step 6;
- * - the policy validator LOCKS granular resource scoping (a OneCLI Cloud
- *   capability the OSS gateway does not enforce) with a loud 422.
+ *   the per-project enforce signal — pinned to ALLOW since step 6.
+ *
+ * No `policyValidator` is wired: the provider-hook default is permissive, so
+ * granular resource scoping and cloud-only app targets are accepted at the API
+ * layer. The gateway does not yet ENFORCE resource scoping — see Tier 3.
  */
 export const eeOverrides: CreateApiAppOptions | undefined = {
   newOrgPolicySeeder: ossNewProjectPolicySeeder,
-  policyValidator: ossPolicyValidator,
 };

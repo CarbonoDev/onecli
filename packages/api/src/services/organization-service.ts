@@ -14,11 +14,11 @@ export const slugify = (raw: string) =>
 
 /**
  * Membership filter every ACCESS-GRANTING read applies: suspended members are
- * treated as non-members by all authorization checks (the write-side lives in
- * the EE team service; nothing sets "suspended" in OSS, so this is inert
- * there). Deliberately NOT applied to display lists, seat counts, or the
- * provisioning/JIT existence guards — filtering those would re-mint
- * memberships for suspended users.
+ * treated as non-members by all authorization checks. Live in OSS as well as
+ * cloud — `PATCH /v1/org/members/:userId` is the OSS write-side, so a suspended
+ * row is a state this edition really reaches. Deliberately NOT applied to
+ * display lists, seat counts, or the provisioning/JIT existence guards —
+ * filtering those would re-mint memberships for suspended users.
  */
 export const activeMembershipWhere = {
   status: { not: "suspended" },
@@ -30,10 +30,30 @@ export const activeMembershipWhere = {
  *
  * Used by `resolveUser()`, `resolveApiAuth()`, and the session route to map
  * an authenticated user to a project without creating anything.
+ *
+ * Two arms, in order — both scoped to orgs the user is an ACTIVE member of:
+ *  1. the oldest project the user CREATED. Searched across every active
+ *     membership, not just the first one: a user who was invited to someone
+ *     else's org and later bootstrapped their own would otherwise resolve to
+ *     the older foreign org, and their OWN project would be shadowed by a
+ *     project they were merely shared into.
+ *  2. otherwise the oldest project they hold a `ProjectAccess` binding on
+ *     (directly or through a group). Without this an INVITED member — who
+ *     creates nothing — resolves to no project at all: session auth then
+ *     demands an `X-Organization-Id` header that OSS never sends (401
+ *     everywhere) and `resolveProjectContext` throws. The binding is the same
+ *     gate `canAccessProjectAsUser` applies, so this arm can only ever return
+ *     a project the user may actually use.
+ *
+ * Both arms tiebreak on `id` so a `createdAt` collision (two projects seeded in
+ * the same millisecond) resolves deterministically instead of leaving the
+ * caller's project up to the query planner.
  */
 export const findUserDefaultProject = async (
   userId: string,
 ): Promise<{ id: string; organizationId: string } | null> => {
+  // Cheap early-out for the pre-bootstrap user, and the reason both arms below
+  // can assume at least one active membership exists.
   const membership = await db.organizationMember.findFirst({
     where: { userId, ...activeMembershipWhere },
     select: { organizationId: true },
@@ -41,13 +61,28 @@ export const findUserDefaultProject = async (
   });
   if (!membership) return null;
 
+  const inActiveMemberOrg = {
+    organization: { members: { some: { userId, ...activeMembershipWhere } } },
+  };
+
+  const created = await db.project.findFirst({
+    where: { ...inActiveMemberOrg, createdByUserId: userId },
+    select: { id: true, organizationId: true },
+    orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+  });
+  if (created) return created;
+
   return db.project.findFirst({
     where: {
-      organizationId: membership.organizationId,
-      createdByUserId: userId,
+      ...inActiveMemberOrg,
+      accessBindings: {
+        some: {
+          OR: [{ userId }, { group: { members: { some: { userId } } } }],
+        },
+      },
     },
     select: { id: true, organizationId: true },
-    orderBy: { createdAt: "asc" },
+    orderBy: [{ createdAt: "asc" }, { id: "asc" }],
   });
 };
 
@@ -114,8 +149,8 @@ export const bootstrapOrganization = async (
       createdByUserEmail: userEmail,
       ...defaultProjectSeed(userId, userEmail),
       // Creator's ProjectAccess binding (step 13), seeded owner (13c) with the
-      // project. Inert in OSS (nothing reads bindings without RBAC); load-bearing
-      // in cloud.
+      // project. Load-bearing in every rbac edition, OSS included: without it a
+      // non-admin member is denied their own project by `canAccessProjectAsUser`.
       accessBindings: { create: { userId, role: "owner" } },
     },
     select: { id: true, organizationId: true },
@@ -237,7 +272,8 @@ export const joinSharedOrganization = async (
         organizationId: org.id,
         createdByUserId: userId,
         createdByUserEmail: userEmail,
-        // Creator's ProjectAccess binding (step 13), seeded owner (13c). Inert in OSS.
+        // Creator's ProjectAccess binding (step 13), seeded owner (13c) — the
+        // member's own usage gate wherever rbac is on.
         accessBindings: { create: { userId, role: "owner" } },
       },
       select: { id: true, organizationId: true },
@@ -256,6 +292,61 @@ export const joinSharedOrganization = async (
   }
 
   return { project, organization: org };
+};
+
+/**
+ * Give a member their own default project inside an EXISTING organization —
+ * the invited-member counterpart to `bootstrapOrganization` (which creates the
+ * org too). Find-or-create and therefore idempotent.
+ *
+ * The `accessBindings` row is load-bearing, not decoration: with `CAPS.rbac`
+ * on, a plain member reaches a project only as an org admin/owner or through a
+ * ProjectAccess binding (`canAccessProjectAsUser`). Creating the project
+ * without the binding would hand the member a project they are then denied
+ * access to on every request.
+ *
+ * The project slug is unique per org (`@@unique([organizationId, slug])`), and
+ * an existing org already owns the plain `default` slug, so the member's slug
+ * carries their user id.
+ */
+export const ensureMemberDefaultProject = async (
+  organizationId: string,
+  userId: string,
+  userEmail: string,
+) => {
+  const existing = await db.project.findFirst({
+    where: { organizationId, createdByUserId: userId },
+    select: { id: true, organizationId: true },
+    orderBy: { createdAt: "asc" },
+  });
+  if (existing) return existing;
+
+  const project = await db.project.create({
+    data: {
+      id: generateProjectId(),
+      name: "Default",
+      slug: `default-${userId}`,
+      organizationId,
+      createdByUserId: userId,
+      createdByUserEmail: userEmail,
+      ...defaultProjectSeed(userId, userEmail),
+      accessBindings: { create: { userId, role: "owner" } },
+    },
+    select: { id: true, organizationId: true },
+  });
+
+  // Best-effort, exactly as the other provision sites: a seeding hiccup must
+  // not fail the member's first login.
+  try {
+    await getNewOrgPolicySeeder().seed(organizationId, project.id);
+  } catch (err) {
+    logger.warn(
+      { err, organizationId, projectId: project.id },
+      "member project policy seed failed",
+    );
+  }
+
+  return project;
 };
 
 export const validateOrgName = (raw: string): string => {

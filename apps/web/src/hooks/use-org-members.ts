@@ -1,6 +1,6 @@
 "use client";
 
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { orgMembers } from "@/lib/api";
 import type { UpdateOrgMemberInput } from "@/lib/api";
@@ -9,7 +9,7 @@ import { queryKeys } from "@/lib/api/keys";
 
 const PAGE_LIMIT = 200;
 
-/** Org members via the directory API (all pages) — the group member picker's candidates. */
+/** Org members via the directory API (all pages) — the /team members table. */
 export const useOrgMembersList = (enabled: boolean) =>
   useQuery({
     queryKey: queryKeys.orgMembers.list(),
@@ -17,18 +17,20 @@ export const useOrgMembersList = (enabled: boolean) =>
       fetchAllPages((cursor) => orgMembers.list({ limit: PAGE_LIMIT, cursor })),
     enabled,
     // Directory routes are admin-only; a non-admin gets a deterministic 403,
-    // which is expected, not retryable.
+    // which the team page RENDERS (its admin-only notice) rather than
+    // retries — the API is the authority on who is an admin.
     retry: false,
   });
 
 /**
- * Member lifecycle + policy-flag mutations (suspend / reinstate / SSO
- * exemption). The members list is server-rendered on the team page, so
- * there is no query cache to invalidate — callers `router.refresh()` in
- * their own onSuccess to re-render the list.
+ * Member mutations: lifecycle (suspend / reinstate) and org role
+ * (admin / member) — one change per call. The members list is a client query
+ * (`useOrgMembersList` feeds the /team table), so a successful change
+ * invalidates it here.
  */
-export const useUpdateOrgMember = () =>
-  useMutation({
+export const useUpdateOrgMember = () => {
+  const qc = useQueryClient();
+  return useMutation({
     mutationFn: ({
       userId,
       input,
@@ -36,5 +38,9 @@ export const useUpdateOrgMember = () =>
       userId: string;
       input: UpdateOrgMemberInput;
     }) => orgMembers.update(userId, input),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: queryKeys.orgMembers.all() });
+    },
     onError: (err) => toast.error(err.message),
   });
+};

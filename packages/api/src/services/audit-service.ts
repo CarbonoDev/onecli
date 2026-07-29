@@ -59,7 +59,10 @@ export const AUDIT_SERVICES = {
   // ACCEPTANCE is deliberately not here: accepting creates a membership, so it
   // audits as a MEMBER create with `via: "invitation"` metadata.
   INVITATION: "invitation",
-  // EE-only (directory): human groups (manual + SCIM-provisioned)
+  // Directory: human groups. OSS writes them via `/v1/org/groups` (create /
+  // rename / delete; membership changes audit as UPDATE with
+  // `change: "members"` — there is deliberately no GROUP_MEMBER service,
+  // matching the INVITATION→MEMBER precedent); EE adds SCIM-provisioned writes.
   GROUP: "group",
   // EE-only (directory): group→org-role mappings (the mapping config itself;
   // the member role changes it drives are audited under MEMBER).

@@ -2,6 +2,7 @@ import type { Hono } from "hono";
 import type { ApiEnv } from "../../types";
 import { orgMemberRoutes } from "./members";
 import { orgInvitationRoutes } from "./invitations";
+import { orgGroupRoutes } from "./groups";
 
 /**
  * The OSS edition's `/v1/org/*` surface.
@@ -21,4 +22,5 @@ import { orgInvitationRoutes } from "./invitations";
 export const registerOssOrgRoutes = (app: Hono<ApiEnv>) => {
   app.route("/org/members", orgMemberRoutes());
   app.route("/org/invitations", orgInvitationRoutes());
+  app.route("/org/groups", orgGroupRoutes());
 };

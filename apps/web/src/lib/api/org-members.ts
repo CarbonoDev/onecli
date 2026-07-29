@@ -1,6 +1,6 @@
 import { apiGet, apiPatch } from "./client";
 import type {
-  OrgMemberRow,
+  UpdatedOrgMember,
   UpdateOrgMemberInput,
   DirectoryPage,
   DirectoryListParams,
@@ -8,13 +8,13 @@ import type {
   GroupRow,
 } from "./types";
 
-// Member lifecycle (suspend/reinstate) + break-glass SSO exemption, plus the
-// §3.5 directory reads (the members list feeds the group member picker; the
-// team page's own list stays server-rendered).
+// Member lifecycle (suspend/reinstate) and org-role changes, plus the §3.5
+// directory reads (the members list feeds both the group member picker and
+// the /team members table — client-side queries on both surfaces).
 const base = "/v1/org/members";
 
 export const update = (userId: string, input: UpdateOrgMemberInput) =>
-  apiPatch<OrgMemberRow>(`${base}/${userId}`, input);
+  apiPatch<UpdatedOrgMember>(`${base}/${userId}`, input);
 
 export const list = (
   params: DirectoryListParams & { status?: "active" | "suspended" } = {},

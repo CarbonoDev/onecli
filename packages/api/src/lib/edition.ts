@@ -72,7 +72,9 @@ export interface Capabilities {
   /**
    * Role-based access control is active — role enforcement in the access checks
    * (project access, org-admin guard, api-key) AND the member/role management UI
-   * (the Team screen). Cloud only for now; onprem flips it true when it gains RBAC.
+   * (the Team screen). Cloud and oss; onprem flips it true when it gains RBAC.
+   * Requires the edition to register a `RoleResolver` (OSS does so from its init
+   * seam): with rbac on and no resolver every check reads "no role" and denies.
    * Distinct from `multi-org` (how many orgs) and the `tenancy` model.
    */
   rbac: boolean;
@@ -85,7 +87,7 @@ const CAPABILITIES: Record<Edition, Capabilities> = {
     billing: false,
     orgScopedUI: false,
     webSurface: "full",
-    rbac: false,
+    rbac: true,
   },
   cloud: {
     auth: "cognito",

@@ -4,7 +4,11 @@ import "@/lib/init/server";
 import { headers } from "next/headers";
 import { db } from "@onecli/db";
 import { getServerSession } from "@/lib/auth/server";
-import { findUserDefaultProject } from "@onecli/api/services/organization-service";
+import {
+  activeMembershipWhere,
+  findUserDefaultProject,
+} from "@onecli/api/services/organization-service";
+import { canAccessProjectAsUser } from "@onecli/api/middleware/auth/resolve";
 
 export interface UserContext {
   userId: string;
@@ -22,6 +26,13 @@ export interface ResolveOptions {
  * active project. Tries the x-project-id header first (set by proxy.ts from
  * the URL path), then falls back to the user's default project (appropriate
  * for OSS where there is a single org/project).
+ *
+ * The header arm gates exactly like the API's `resolveProjectId`: SUSPENDED
+ * memberships are filtered out (they are non-members to every authorization
+ * check) and the project itself must pass `canAccessProjectAsUser`, so an
+ * org-membership alone never grants a plain member access to a project they
+ * hold no ProjectAccess binding on. Keeping the two surfaces identical is the
+ * point — a header the API rejects must not open a dashboard context.
  */
 export const resolveProjectContext = async (
   options?: ResolveOptions,
@@ -36,6 +47,7 @@ export const resolveProjectContext = async (
       id: true,
       email: true,
       organizationMemberships: {
+        where: activeMembershipWhere,
         select: { organizationId: true },
       },
     },
@@ -57,7 +69,7 @@ export const resolveProjectContext = async (
       },
       select: { id: true, organizationId: true },
     });
-    if (project) {
+    if (project && (await canAccessProjectAsUser(user.id, project))) {
       return {
         userId: user.id,
         userEmail: user.email,

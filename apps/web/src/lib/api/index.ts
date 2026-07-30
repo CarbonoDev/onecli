@@ -16,6 +16,7 @@ import * as appAvailability from "./app-availability";
 import * as appPermissions from "./app-permissions";
 import * as vaults from "./vaults";
 import * as dropbox from "./dropbox";
+import * as budgets from "./budgets";
 
 export {
   agents,
@@ -36,6 +37,7 @@ export {
   appPermissions,
   vaults,
   dropbox,
+  budgets,
 };
 export type {
   Agent,
@@ -81,6 +83,12 @@ export type {
   GrantsSummaryEntry,
 } from "./types";
 export type { CreatePolicyRuleInput, UpdatePolicyRuleInput } from "./policy";
+export type {
+  Budget,
+  BudgetPeriod,
+  CreateBudgetInput,
+  UpdateBudgetInput,
+} from "./budgets";
 export { appsPath } from "./scope";
 export type { PageScope } from "./scope";
 export type { AppConfigStatus } from "./app-config";

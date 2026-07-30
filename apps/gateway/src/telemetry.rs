@@ -23,11 +23,34 @@ pub(crate) use crate::telemetry_core::{on_request, RequestEvent};
 
 /// Initialize the telemetry background flush task.
 /// Must be called once at startup from `main()`.
-pub(crate) fn init(pool: PgPool, _cache: Arc<dyn CacheStore>) {
+pub(crate) fn init(pool: PgPool, cache: Arc<dyn CacheStore>) {
     let (tx, rx) = mpsc::channel::<RequestEvent>(CHANNEL_CAPACITY);
     SENDER.set(tx).ok();
-    crate::telemetry_core::spawn_flush_loop(flush_loop(rx, pool));
+    crate::telemetry_core::spawn_flush_loop(flush_loop(rx, pool, cache));
     info!("telemetry initialized (postgres)");
+}
+
+/// The identity of a spend counter: `(secret_id, organization_id, period_key)`.
+type SpendKey = (String, String, String);
+
+/// Record a metered spend delta for one counter: accumulate the durable
+/// `BudgetSpend` floor and seed the hot counter to the new coherent total. Runs
+/// off the request path (in the flush loop), so no request-path latency. Failures
+/// are logged, never fatal (fail-open on spend).
+async fn record_spend(pool: &PgPool, cache: &dyn CacheStore, key: &SpendKey, delta: i64) {
+    let (secret_id, organization_id, period_key) = key;
+    match crate::db::upsert_budget_spend(pool, secret_id, organization_id, period_key, delta).await
+    {
+        Ok(total) => {
+            let counter = crate::budget::counter_key(secret_id, organization_id, period_key);
+            cache
+                .set_raw(&counter, &total.to_string(), crate::budget::PERIOD_TTL)
+                .await;
+        }
+        Err(e) => {
+            warn!(error = %e, secret_id = %secret_id, "budget: failed to record spend");
+        }
+    }
 }
 
 async fn insert_batch(pool: &PgPool, events: &[RequestEvent]) -> Result<(), sqlx::Error> {
@@ -114,7 +137,11 @@ async fn update_batch(pool: &PgPool, events: &[RequestEvent]) {
     }
 }
 
-async fn flush_loop(mut rx: mpsc::Receiver<RequestEvent>, pool: PgPool) {
+async fn flush_loop(
+    mut rx: mpsc::Receiver<RequestEvent>,
+    pool: PgPool,
+    cache: Arc<dyn CacheStore>,
+) {
     let mut buffer: Vec<RequestEvent> = Vec::with_capacity(FLUSH_BATCH_SIZE);
 
     loop {
@@ -126,14 +153,37 @@ async fn flush_loop(mut rx: mpsc::Receiver<RequestEvent>, pool: PgPool) {
             continue;
         }
 
+        // Sum metered spend per counter across the whole drained batch, so a
+        // busy flush does one upsert per distinct (secret, org, period) rather
+        // than one per request event. Durability boundary: a charge is volatile
+        // in the in-memory channel until this runs — a crash before the upsert
+        // loses at most the unflushed tail (≤FLUSH_INTERVAL_SECS), a fail-open
+        // under-count consistent with the async-telemetry design; flushed spend
+        // survives restart (rehydrated from the durable `BudgetSpend` floor).
+        let mut charges: std::collections::HashMap<SpendKey, i64> =
+            std::collections::HashMap::new();
         let mut updates = Vec::new();
         let mut regular = Vec::new();
         for event in buffer.drain(..) {
+            if let Some(charge) = event.budget_charge.as_ref() {
+                *charges
+                    .entry((
+                        charge.secret_id.clone(),
+                        charge.organization_id.clone(),
+                        charge.period_key.clone(),
+                    ))
+                    .or_default() += charge.cost_nanos;
+            }
             if event.existing_log_id.is_some() {
                 updates.push(event);
             } else {
                 regular.push(event);
             }
+        }
+
+        // Persist the aggregated spend deltas (few keys per flush in practice).
+        for (key, delta) in &charges {
+            record_spend(&pool, cache.as_ref(), key, *delta).await;
         }
 
         if let Err(e) = insert_batch(&pool, &regular).await {

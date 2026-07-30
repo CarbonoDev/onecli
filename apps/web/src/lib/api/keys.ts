@@ -22,10 +22,6 @@ export const queryKeys = {
     lastPublish: (pageScope: PageScope = "project") =>
       [...queryKeys.policy.all(), "last-publish", pageScope] as const,
   },
-  domains: {
-    all: () => ["domains", ...scope()] as const,
-    list: () => [...queryKeys.domains.all(), "list"] as const,
-  },
   groups: {
     all: () => ["groups", ...scope()] as const,
     list: () => [...queryKeys.groups.all(), "list"] as const,
@@ -43,18 +39,6 @@ export const queryKeys = {
   invitations: {
     all: () => ["invitations", ...scope()] as const,
     list: () => [...queryKeys.invitations.all(), "list"] as const,
-  },
-  ssoConnections: {
-    all: () => ["sso-connections", ...scope()] as const,
-    list: () => [...queryKeys.ssoConnections.all(), "list"] as const,
-  },
-  ssoEnforcement: {
-    all: () => ["sso-enforcement", ...scope()] as const,
-    get: () => [...queryKeys.ssoEnforcement.all(), "get"] as const,
-  },
-  scimTokens: {
-    all: () => ["scim-tokens", ...scope()] as const,
-    list: () => [...queryKeys.scimTokens.all(), "list"] as const,
   },
   grants: {
     all: () => ["grants", ...scope()] as const,

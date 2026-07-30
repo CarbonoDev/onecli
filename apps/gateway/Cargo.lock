@@ -2355,6 +2355,7 @@ dependencies = [
  "hyper 1.8.1",
  "hyper-util",
  "jsonwebtoken",
+ "memchr",
  "percent-encoding",
  "rcgen",
  "redis",

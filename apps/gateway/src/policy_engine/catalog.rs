@@ -16,7 +16,7 @@ use std::sync::OnceLock;
 use serde::Deserialize;
 
 use crate::connect::host_matches;
-use crate::policy::{matches_request, PolicyAction, PolicyRule};
+use crate::policy::{matches_request, MatchInput, PolicyAction, PolicyRule};
 
 /// One tool's endpoint fan-out (camelCase JSON keys). An empty `methods` list
 /// means "any method".
@@ -52,19 +52,28 @@ fn single_host_family(provider_tools: &HashMap<String, CatalogTool>) -> bool {
 }
 
 /// A throwaway `policy::PolicyRule` so one path×method variant routes through
-/// the gateway's exact `matches_request` (the action is irrelevant to
-/// matching). Conditions ride from the owning rule — vacuous in OSS, where the
-/// `condition_match` arm is the no-op.
+/// the gateway's exact `matches_request`. Conditions ride from the owning
+/// rule, and so does its BLOCK-ness: `condition_match`'s failure law is
+/// action-aware (an unevaluable condition fails CLOSED only for a Block
+/// rule), so hardcoding Allow here would fail a v2 Block open. The owning
+/// rule's NAME rides along too, so the matcher's unevaluable-condition
+/// warning identifies the broken rule.
 fn variant_rule(
+    name: &str,
     path_pattern: &str,
     method: Option<String>,
     conditions: &Option<serde_json::Value>,
+    is_block: bool,
 ) -> PolicyRule {
     PolicyRule {
-        name: String::new(),
+        name: name.to_string(),
         path_pattern: path_pattern.to_string(),
         method,
-        action: PolicyAction::Allow,
+        action: if is_block {
+            PolicyAction::Block
+        } else {
+            PolicyAction::Allow
+        },
         conditions_raw: conditions.clone(),
     }
 }
@@ -91,23 +100,40 @@ fn variant_rule(
 ///   bleed across sibling services. A truly distinct endpoint host (github
 ///   `raw.githubusercontent.com`, fly.io GraphQL) is a separate catalog tool of
 ///   its own; whole-app rules also cover it.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn app_target_matches(
+    rule_name: &str,
     provider: &str,
     tools: &[String],
     request_host: &str,
     request_method: &str,
     request_path: &str,
-    body: Option<&[u8]>,
+    input: &MatchInput<'_>,
     conditions: &Option<serde_json::Value>,
+    is_block: bool,
 ) -> bool {
     let Some(provider_tools) = catalog().get(provider) else {
         return false;
     };
     if tools.is_empty() {
-        return provider_tools
+        // Behavioral conditions gate the whole-app match too (a wildcard-path
+        // variant carrying the owning rule's Block-ness, so an unevaluable
+        // condition fails closed by action) — otherwise a conditioned
+        // whole-app ALLOW would match on host alone and could shadow a later
+        // Block. A connection target's session-policy OBJECT stays vacuous in
+        // `condition_match::decode_conditions`, so granular connection rules
+        // are unaffected.
+        let host_hit = provider_tools
             .values()
             .any(|tool| host_matches(request_host, &tool.host_pattern))
             || crate::apps::provider_matches_host_and_path(provider, request_host, request_path);
+        return host_hit
+            && matches_request(
+                &variant_rule(rule_name, "*", None, conditions, is_block),
+                request_method,
+                request_path,
+                input,
+            );
     }
     // The host is the app's per-tool catalog host OR an injection MIRROR of the
     // app (tool-independent → computed once): a path-scoped mirror (Gmail's
@@ -139,8 +165,14 @@ pub(super) fn app_target_matches(
         };
         tool.paths.iter().any(|path| {
             methods.iter().any(|method| {
-                let rule = variant_rule(path, method.map(str::to_string), conditions);
-                matches_request(&rule, request_method, request_path, body)
+                let rule = variant_rule(
+                    rule_name,
+                    path,
+                    method.map(str::to_string),
+                    conditions,
+                    is_block,
+                );
+                matches_request(&rule, request_method, request_path, input)
             })
         })
     })
@@ -152,7 +184,98 @@ mod tests {
 
     fn matches(provider: &str, tools: &[&str], host: &str, method: &str, path: &str) -> bool {
         let tools: Vec<String> = tools.iter().map(|s| s.to_string()).collect();
-        app_target_matches(provider, &tools, host, method, path, None, &None)
+        app_target_matches(
+            "test rule",
+            provider,
+            &tools,
+            host,
+            method,
+            path,
+            &MatchInput::empty(),
+            &None,
+            false,
+        )
+    }
+
+    #[test]
+    fn conditions_gate_the_tool_fanout_and_fail_closed_for_block() {
+        // A tool-scoped target honors the owning rule's conditions through the
+        // variant fan-out, and the variant carries the rule's Block-ness so an
+        // unevaluable condition fails closed exactly like a network target.
+        let tools = vec!["create_issue".to_string()];
+        let hit = |input: &MatchInput<'_>, conditions: &str, is_block: bool| {
+            app_target_matches(
+                "test rule",
+                "github",
+                &tools,
+                "api.github.com",
+                "POST",
+                "/repos/o/r/issues",
+                input,
+                &serde_json::from_str(conditions).ok(),
+                is_block,
+            )
+        };
+        let cond = r#"[{"target":"body","operator":"contains","value":"needle"}]"#;
+        let with_needle = MatchInput {
+            body: Some(b"has needle"),
+            body_truncated: false,
+            headers: None,
+        };
+        let without_needle = MatchInput {
+            body: Some(b"nothing"),
+            body_truncated: false,
+            headers: None,
+        };
+        assert!(hit(&with_needle, cond, false));
+        assert!(!hit(&without_needle, cond, false));
+        // Unevaluable (uncompilable regex): matches only when Block-owned.
+        let broken = r#"[{"target":"body","operator":"regex","value":"("}]"#;
+        assert!(hit(&without_needle, broken, true));
+        assert!(!hit(&without_needle, broken, false));
+    }
+
+    #[test]
+    fn conditions_gate_the_whole_app_match_and_fail_closed_for_block() {
+        // The empty-tools branch mirrors the tool fan-out: behavioral
+        // conditions gate the host-wide match, and an unevaluable condition
+        // fails closed only when the owning rule is a Block. Without this a
+        // conditioned whole-app ALLOW would match on host alone and shadow a
+        // later Block.
+        let hit = |input: &MatchInput<'_>, conditions: &str, is_block: bool| {
+            app_target_matches(
+                "test rule",
+                "github",
+                &[],
+                "api.github.com",
+                "DELETE",
+                "/anything",
+                input,
+                &serde_json::from_str(conditions).ok(),
+                is_block,
+            )
+        };
+        let cond = r#"[{"target":"body","operator":"contains","value":"needle"}]"#;
+        let with_needle = MatchInput {
+            body: Some(b"has needle"),
+            body_truncated: false,
+            headers: None,
+        };
+        let without_needle = MatchInput {
+            body: Some(b"nothing"),
+            body_truncated: false,
+            headers: None,
+        };
+        assert!(hit(&with_needle, cond, false));
+        assert!(!hit(&without_needle, cond, false));
+        // Unevaluable (uncompilable regex): matches only when Block-owned.
+        let broken = r#"[{"target":"body","operator":"regex","value":"("}]"#;
+        assert!(hit(&without_needle, broken, true));
+        assert!(!hit(&without_needle, broken, false));
+        // A session-policy OBJECT (granular connection scope) stays vacuous —
+        // the whole-app match is unaffected by it.
+        let session = r#"{"repositories":["o/r"]}"#;
+        assert!(hit(&without_needle, session, false));
     }
 
     #[test]
@@ -344,7 +467,17 @@ mod tests {
                 continue;
             }
             assert!(
-                app_target_matches(provider, &[], &host, "POST", &path, None, &None),
+                app_target_matches(
+                    "test rule",
+                    provider,
+                    &[],
+                    &host,
+                    "POST",
+                    &path,
+                    &MatchInput::empty(),
+                    &None,
+                    false
+                ),
                 "whole-app rule for `{provider}` must cover its injection host `{host}` (path `{path}`)"
             );
         }

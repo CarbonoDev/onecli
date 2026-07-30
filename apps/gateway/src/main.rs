@@ -43,10 +43,11 @@ mod org_routes;
 
 mod connect;
 
-// Body-condition matcher (step 9.5): the real matcher rides with the full EE
-// engine — onprem included, else a v2 `body contains` block rule would never
-// see a body there and fail OPEN. The OSS arm stays the no-op (conditions are
-// carried but never evaluated in OSS, matching its legacy behavior).
+// Body-condition matcher (Tier 3a): the OSS arm evaluates body/header
+// conditions byte-level over the buffered request body and headers, at both
+// org and project scopes, with the fail-closed-by-action failure law (an
+// unevaluable condition over-blocks a Block rule and drops any other). The EE
+// build swaps in the cloud overlay via the `#[path]` module below.
 #[cfg(edition_oss)]
 mod condition_match;
 

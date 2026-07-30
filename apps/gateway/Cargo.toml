@@ -59,6 +59,10 @@ dashmap = "6"
 # catastrophic backtracking (no ReDoS). Compiled patterns are cached in a DashMap.
 regex = "1"
 
+# Linear-time byte-substring search for body condition matching (attacker-
+# controlled request bodies). Already in the tree via `regex`.
+memchr = "2"
+
 # Base64 (for gateway auth)
 base64 = "0.22"
 

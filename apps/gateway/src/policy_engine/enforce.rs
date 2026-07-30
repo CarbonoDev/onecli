@@ -22,17 +22,43 @@ use crate::db::{
     AvailableApps, ConnectionProviders, PolicyRuleV2Row, PolicyV2Rules, PrincipalSet, SecretHosts,
 };
 use crate::gateway::{strip_port, ProxyContext};
-use crate::policy::{check_rate_limit, MatchedRule, PolicyDecision};
+use crate::policy::{check_rate_limit, MatchInput, MatchedRule, PolicyDecision};
 
 use super::assemble::assemble;
 use super::evaluate::evaluate_outcome;
 use super::loaders;
 use super::types::{Action, Outcome, Request, Rule, RuleScope};
 
-/// `false` always: OSS's `condition_match` arm cannot buffer bodies and never
-/// evaluates conditions (they match vacuously), so there is nothing to buffer for.
-pub(crate) fn needs_body_buffer(_v2: &PolicyV2Rules) -> bool {
-    false
+/// True iff a loaded rule (org or project) has a BODY condition on a target
+/// that could govern this `host` — the host-scoped superset that keeps the
+/// buffering as narrow as correctness allows. A network target matches its
+/// own `host_pattern`; app/connection/secret targets buffer unconditionally
+/// (their host resolution lives in the catalog/fenced maps — not worth
+/// duplicating here); unknown kinds never match anything. Header-only
+/// conditions never buffer (headers are always available); equipment rows are
+/// injection-only and skipped; empty slices never buffer.
+///
+/// The superset law: `needs_body_buffer` must be TRUE whenever some body
+/// condition could be consulted for this host, so the matcher only ever sees
+/// `body: None` for a request that genuinely had no body — never for one whose
+/// body was skipped by the streaming path.
+pub(crate) fn needs_body_buffer(v2: &PolicyV2Rules, host: &str) -> bool {
+    let host = strip_port(host);
+    v2.org
+        .iter()
+        .chain(v2.project.iter())
+        .filter(|r| r.source != "equipment")
+        .filter(|r| crate::condition_match::has_body_condition(&r.conditions))
+        .any(|r| {
+            r.targets.0.iter().any(|t| match t.kind.as_str() {
+                "network" => t
+                    .host_pattern
+                    .as_deref()
+                    .is_some_and(|p| crate::connect::host_matches(host, p)),
+                "app" | "connection" | "secret" => true,
+                _ => false,
+            })
+        })
 }
 
 /// True when any loaded rule (org or project) has a target of `kind`, skipping
@@ -155,7 +181,7 @@ pub(crate) async fn evaluate(
     host: &str,
     method: &str,
     path: &str,
-    body: Option<&[u8]>,
+    input: &MatchInput<'_>,
     has_injections: bool,
     is_llm_host: bool,
     winning_connection_id: Option<&str>,
@@ -198,7 +224,7 @@ pub(crate) async fn evaluate(
         name: rule.name.clone(),
         scope: rule.scope.as_str().to_string(),
     };
-    match evaluate_outcome(&org_rules, &project_rules, &request, &v2.principals, body) {
+    match evaluate_outcome(&org_rules, &project_rules, &request, &v2.principals, input) {
         Outcome::Rule(rule) => (
             decision_for_rule(rule, org_id, project_id, agent_token, cache).await,
             Some(matched_of(rule)),
@@ -280,7 +306,7 @@ mod tests {
             "api.example.com",
             "GET",
             "/",
-            None,
+            &MatchInput::empty(),
             false,
             false,
             None,
@@ -336,5 +362,75 @@ mod tests {
             .expect("target row")]);
         })];
         assert!(!has_target_kind(&[&equipment, &project], "secret"));
+    }
+
+    #[test]
+    fn needs_body_buffer_scopes_to_host_and_skips_equipment() {
+        let body_cond: Option<serde_json::Value> =
+            serde_json::from_str(r#"[{"target":"body","operator":"contains","value":"x"}]"#).ok();
+        let network_rule = |conditions: Option<serde_json::Value>| {
+            row(|r| {
+                r.conditions = conditions;
+                r.targets = Json(vec![serde_json::from_value(
+                    json!({"kind": "network", "hostPattern": "api.example.com"}),
+                )
+                .expect("target row")]);
+            })
+        };
+        // Network-target rule with a body condition: only its host buffers
+        // (port-stripped), foreign hosts keep streaming.
+        let v2 = PolicyV2Rules {
+            project: vec![network_rule(body_cond.clone())],
+            ..PolicyV2Rules::default()
+        };
+        assert!(needs_body_buffer(&v2, "api.example.com"));
+        assert!(needs_body_buffer(&v2, "api.example.com:443"));
+        assert!(!needs_body_buffer(&v2, "other.example.com"));
+        // Org-scope rules count too.
+        let v2 = PolicyV2Rules {
+            org: vec![network_rule(body_cond.clone())],
+            ..PolicyV2Rules::default()
+        };
+        assert!(needs_body_buffer(&v2, "api.example.com"));
+        // App-target rule → conservatively buffer everywhere (superset law).
+        let app_rule = row(|r| {
+            r.conditions = body_cond.clone();
+            r.targets = Json(vec![serde_json::from_value(
+                json!({"kind": "app", "appProvider": "github", "appTools": []}),
+            )
+            .expect("target row")]);
+        });
+        let v2 = PolicyV2Rules {
+            project: vec![app_rule],
+            ..PolicyV2Rules::default()
+        };
+        assert!(needs_body_buffer(&v2, "anything.example.com"));
+        // Equipment rows are injection-only — never buffer.
+        let equipment = row(|r| {
+            r.source = "equipment".to_string();
+            r.conditions = body_cond.clone();
+            r.targets = Json(vec![serde_json::from_value(
+                json!({"kind": "network", "hostPattern": "api.example.com"}),
+            )
+            .expect("target row")]);
+        });
+        let v2 = PolicyV2Rules {
+            project: vec![equipment],
+            ..PolicyV2Rules::default()
+        };
+        assert!(!needs_body_buffer(&v2, "api.example.com"));
+        // Header-only conditions never buffer (headers are always available).
+        let header_cond: Option<serde_json::Value> =
+            serde_json::from_str(r#"[{"target":"header","operator":"exists","key":"x-k"}]"#).ok();
+        let v2 = PolicyV2Rules {
+            project: vec![network_rule(header_cond)],
+            ..PolicyV2Rules::default()
+        };
+        assert!(!needs_body_buffer(&v2, "api.example.com"));
+        // Empty bundle never buffers.
+        assert!(!needs_body_buffer(
+            &PolicyV2Rules::default(),
+            "api.example.com"
+        ));
     }
 }

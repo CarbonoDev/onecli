@@ -12,11 +12,13 @@
 //!
 //! Matching routes through the gateway's own `connect::host_matches` +
 //! `policy::matches_request`, so path globs, methods, the git-receive-pack
-//! bridge, and the (no-op in OSS) condition arm are byte-identical to the
-//! legacy path.
+//! bridge, and the body/header condition arm are byte-identical to the shared
+//! matcher. Conditions are evaluated at BOTH scopes: every rule's own
+//! Block-ness rides through the pseudo-rule seam, so an unevaluable condition
+//! fails CLOSED by action (a Block over-blocks, an Allow falls through).
 
 use crate::db::PrincipalSet;
-use crate::policy::{matches_request, PolicyAction, PolicyRule};
+use crate::policy::{matches_request, MatchInput, PolicyAction, PolicyRule};
 
 use super::types::{Action, Identity, Outcome, Request, Rule, Target};
 
@@ -35,22 +37,35 @@ fn identity_matches(rule: &Rule, request: &Request, principals: &PrincipalSet) -
 }
 
 /// A throwaway `policy::PolicyRule` so the network match runs the gateway's
-/// exact `matches_request` (the action is irrelevant to matching).
+/// exact `matches_request`. Conditions ride from the owning rule, and so does
+/// its BLOCK-ness (`is_block`): `condition_match`'s failure law is
+/// action-aware — an unevaluable condition fails CLOSED only for a Block rule
+/// — so hardcoding Allow here would fail a v2 Block rule OPEN on a broken
+/// regex/oversized body. The owning rule's NAME rides along too, so the
+/// matcher's unevaluable-condition warning identifies the broken rule instead
+/// of logging an empty name.
 fn pseudo_rule(
+    name: &str,
     path_pattern: Option<&str>,
     method: Option<String>,
     conditions: &Option<serde_json::Value>,
+    is_block: bool,
 ) -> PolicyRule {
     PolicyRule {
-        name: String::new(),
+        name: name.to_string(),
         path_pattern: path_pattern.unwrap_or("*").to_string(),
         method,
-        action: PolicyAction::Allow,
+        action: if is_block {
+            PolicyAction::Block
+        } else {
+            PolicyAction::Allow
+        },
         conditions_raw: conditions.clone(),
     }
 }
 
-fn target_matches(target: &Target, rule: &Rule, request: &Request, body: Option<&[u8]>) -> bool {
+fn target_matches(target: &Target, rule: &Rule, request: &Request, input: &MatchInput<'_>) -> bool {
+    let is_block = rule.action == Action::Block;
     match target {
         Target::Network {
             host_pattern,
@@ -59,24 +74,33 @@ fn target_matches(target: &Target, rule: &Rule, request: &Request, body: Option<
         } => {
             crate::connect::host_matches(&request.host, host_pattern)
                 && matches_request(
-                    &pseudo_rule(path_pattern.as_deref(), method.clone(), &rule.conditions),
+                    &pseudo_rule(
+                        &rule.name,
+                        path_pattern.as_deref(),
+                        method.clone(),
+                        &rule.conditions,
+                        is_block,
+                    ),
                     &request.method,
                     &request.path,
-                    body,
+                    input,
                 )
         }
         Target::App { provider, tools } => super::catalog::app_target_matches(
+            &rule.name,
             provider,
             tools,
             &request.host,
             &request.method,
             &request.path,
-            body,
+            input,
             &rule.conditions,
+            is_block,
         ),
         // A connection target matches only when it is the request's winning
         // injected connection AND the provider/tools fan-out hits. No winner →
-        // never matches (fail-closed for allow AND block).
+        // never matches (fail-closed for allow AND block). Conditions ride
+        // through the fan-out carrying the owning rule's Block-ness.
         Target::Connection {
             id,
             provider,
@@ -84,20 +108,34 @@ fn target_matches(target: &Target, rule: &Rule, request: &Request, body: Option<
         } => {
             request.winning_connection_id.as_deref() == Some(id.as_str())
                 && super::catalog::app_target_matches(
+                    &rule.name,
                     provider,
                     tools,
                     &request.host,
                     &request.method,
                     &request.path,
-                    body,
+                    input,
                     &rule.conditions,
+                    is_block,
                 )
         }
-        // A secret target gates its resolved host(s), host-only. Empty patterns
-        // (unresolved/deleted secret) never match — fail-closed.
-        Target::Secret { host_patterns } => host_patterns
-            .iter()
-            .any(|h| crate::connect::host_matches(&request.host, h)),
+        // A secret target gates its resolved host(s). Empty patterns
+        // (unresolved/deleted secret) never match — fail-closed. The owning
+        // rule's conditions still narrow the match (wildcard-path pseudo-rule
+        // carrying its Block-ness): without this gate a conditioned ALLOW on a
+        // secret would match unconditionally and could shadow a later Block —
+        // the widening the fail-closed law forbids.
+        Target::Secret { host_patterns } => {
+            host_patterns
+                .iter()
+                .any(|h| crate::connect::host_matches(&request.host, h))
+                && matches_request(
+                    &pseudo_rule(&rule.name, None, None, &rule.conditions, is_block),
+                    &request.method,
+                    &request.path,
+                    input,
+                )
+        }
         Target::Unresolved => false,
     }
 }
@@ -110,14 +148,14 @@ fn rule_matches(
     rule: &Rule,
     request: &Request,
     principals: &PrincipalSet,
-    body: Option<&[u8]>,
+    input: &MatchInput<'_>,
 ) -> bool {
     identity_matches(rule, request, principals)
         && !rule.targets.is_empty()
         && rule
             .targets
             .iter()
-            .any(|t| target_matches(t, rule, request, body))
+            .any(|t| target_matches(t, rule, request, input))
 }
 
 /// Strictness rank, mirroring `strictness.ts::strictnessRank`: block strictest
@@ -151,13 +189,13 @@ fn first_match<'a>(
     rules: &'a [Rule],
     request: &Request,
     principals: &PrincipalSet,
-    body: Option<&[u8]>,
+    input: &MatchInput<'_>,
 ) -> Option<LevelMatch<'a>> {
     let mut ordered: Vec<&'a Rule> = rules.iter().filter(|r| !r.is_default).collect();
     ordered.sort_by(|a, b| a.priority.cmp(&b.priority).then_with(|| a.id.cmp(&b.id)));
     ordered
         .into_iter()
-        .find(|rule| rule_matches(rule, request, principals, body))
+        .find(|rule| rule_matches(rule, request, principals, input))
         .map(|rule| LevelMatch {
             rank: strictness_rank(rule),
             rule,
@@ -183,13 +221,13 @@ pub(super) fn evaluate_outcome<'a>(
     project_rules: &'a [Rule],
     request: &Request,
     principals: &PrincipalSet,
-    body: Option<&[u8]>,
+    input: &MatchInput<'_>,
 ) -> Outcome<'a> {
     let org_default = org_rules.iter().find(|r| r.is_default);
     let project_default = project_rules.iter().find(|r| r.is_default);
 
-    let org_match = first_match(org_rules, request, principals, body);
-    let project_match = first_match(project_rules, request, principals, body);
+    let org_match = first_match(org_rules, request, principals, input);
+    let project_match = first_match(project_rules, request, principals, input);
 
     // A Default-Block is enforced only under the carve (credentialed, non-LLM),
     // at EVERY level.
@@ -344,7 +382,13 @@ mod tests {
     #[test]
     fn first_match_wins_by_priority() {
         let rules = vec![rule("b", 1, Action::Block), rule("a", 0, Action::Allow)];
-        match evaluate_outcome(&[], &rules, &request(), &no_principals(), None) {
+        match evaluate_outcome(
+            &[],
+            &rules,
+            &request(),
+            &no_principals(),
+            &MatchInput::empty(),
+        ) {
             Outcome::Rule(r) => assert_eq!(r.id, "a"),
             _ => panic!("expected a rule match"),
         }
@@ -356,7 +400,13 @@ mod tests {
             vec![rule("a", 5, Action::Allow), rule("b", 5, Action::Block)],
             vec![rule("b", 5, Action::Block), rule("a", 5, Action::Allow)],
         ] {
-            match evaluate_outcome(&[], &rules, &request(), &no_principals(), None) {
+            match evaluate_outcome(
+                &[],
+                &rules,
+                &request(),
+                &no_principals(),
+                &MatchInput::empty(),
+            ) {
                 Outcome::Rule(r) => assert_eq!(r.id, "a", "lower id wins the tie"),
                 _ => panic!("expected a rule match"),
             }
@@ -373,13 +423,25 @@ mod tests {
         let allow = rule("any", 2, Action::Allow);
 
         let rules = vec![agent_scoped, other, allow];
-        match evaluate_outcome(&[], &rules, &request(), &no_principals(), None) {
+        match evaluate_outcome(
+            &[],
+            &rules,
+            &request(),
+            &no_principals(),
+            &MatchInput::empty(),
+        ) {
             Outcome::Rule(r) => assert_eq!(r.id, "scoped"),
             _ => panic!("expected the agent-scoped match"),
         }
         let mut foreign = request();
         foreign.agent_id = "agent-2".to_string();
-        match evaluate_outcome(&[], &rules, &foreign, &no_principals(), None) {
+        match evaluate_outcome(
+            &[],
+            &rules,
+            &foreign,
+            &no_principals(),
+            &MatchInput::empty(),
+        ) {
             // The directory identity must NOT match — the any-agent allow wins.
             Outcome::Rule(r) => assert_eq!(r.id, "any"),
             _ => panic!("expected the any-agent match"),
@@ -392,7 +454,13 @@ mod tests {
         let mut orphan = rule("orphan", 0, Action::Block);
         orphan.targets = Vec::new();
         let control = rule("control", 1, Action::Allow);
-        match evaluate_outcome(&[], &[orphan, control], &request(), &no_principals(), None) {
+        match evaluate_outcome(
+            &[],
+            &[orphan, control],
+            &request(),
+            &no_principals(),
+            &MatchInput::empty(),
+        ) {
             Outcome::Rule(r) => assert_eq!(r.id, "control"),
             _ => panic!("expected the control match"),
         }
@@ -405,11 +473,23 @@ mod tests {
         let rules = vec![default_rule(Action::Block)];
         // Uncredentialed → the carve spares it.
         assert!(matches!(
-            evaluate_outcome(&[], &rules, &request(), &no_principals(), None),
+            evaluate_outcome(
+                &[],
+                &rules,
+                &request(),
+                &no_principals(),
+                &MatchInput::empty()
+            ),
             Outcome::Allow
         ));
         // Credentialed non-LLM → blocked, attributed to the Default Rule.
-        match evaluate_outcome(&[], &rules, &injected_request(), &no_principals(), None) {
+        match evaluate_outcome(
+            &[],
+            &rules,
+            &injected_request(),
+            &no_principals(),
+            &MatchInput::empty(),
+        ) {
             Outcome::DenyDefault(d) => assert!(d.is_default),
             _ => panic!("expected the deny-default"),
         }
@@ -417,7 +497,7 @@ mod tests {
         let mut llm = injected_request();
         llm.is_llm_host = true;
         assert!(matches!(
-            evaluate_outcome(&[], &rules, &llm, &no_principals(), None),
+            evaluate_outcome(&[], &rules, &llm, &no_principals(), &MatchInput::empty()),
             Outcome::Allow
         ));
     }
@@ -425,7 +505,13 @@ mod tests {
     #[test]
     fn explicit_allow_opens_the_same_level_default_block() {
         let rules = vec![rule("open", 0, Action::Allow), default_rule(Action::Block)];
-        match evaluate_outcome(&[], &rules, &injected_request(), &no_principals(), None) {
+        match evaluate_outcome(
+            &[],
+            &rules,
+            &injected_request(),
+            &no_principals(),
+            &MatchInput::empty(),
+        ) {
             Outcome::Rule(r) => assert_eq!(r.id, "open"),
             _ => panic!("expected the allow rule to win over its own default block"),
         }
@@ -435,24 +521,273 @@ mod tests {
     fn default_allow_is_neutral() {
         let rules = vec![default_rule(Action::Allow)];
         assert!(matches!(
-            evaluate_outcome(&[], &rules, &injected_request(), &no_principals(), None),
+            evaluate_outcome(
+                &[],
+                &rules,
+                &injected_request(),
+                &no_principals(),
+                &MatchInput::empty()
+            ),
             Outcome::Allow
         ));
     }
 
-    /// Test #11 (part): the OSS condition arm is the no-op — a conditioned block
-    /// matches vacuously. This pins the Stage-G seam; if OSS ships real
-    /// condition matching this test must flip with it.
+    // ── Stage-G: conditions are evaluated at both scopes ────────────────
+
+    fn conditioned(id: &str, priority: usize, action: Action, conditions: &str) -> Rule {
+        let mut r = rule(id, priority, action);
+        r.conditions = serde_json::from_str(conditions).ok();
+        r
+    }
+
+    fn body_input(body: &[u8]) -> MatchInput<'_> {
+        MatchInput {
+            body: Some(body),
+            body_truncated: false,
+            headers: None,
+        }
+    }
+
     #[test]
-    fn conditioned_rule_matches_with_no_body_in_oss() {
-        let mut conditioned = rule("cond", 0, Action::Block);
-        conditioned.conditions = serde_json::from_str(
-            r#"[{"target":"body","operator":"contains","value":"never-present"}]"#,
-        )
-        .ok();
-        match evaluate_outcome(&[], &[conditioned], &request(), &no_principals(), None) {
+    fn conditioned_block_falls_through_when_body_lacks_the_needle() {
+        // OSS evaluates conditions since Tier 3a (this test used to pin the
+        // opposite no-op posture): a body-conditioned block whose needle is
+        // absent falls through and the next rule wins.
+        let rules = vec![
+            conditioned(
+                "cond",
+                0,
+                Action::Block,
+                r#"[{"target":"body","operator":"contains","value":"needle"}]"#,
+            ),
+            rule("open", 1, Action::Allow),
+        ];
+        match evaluate_outcome(
+            &[],
+            &rules,
+            &request(),
+            &no_principals(),
+            &body_input(b"no match here"),
+        ) {
+            Outcome::Rule(r) => assert_eq!(r.id, "open"),
+            _ => panic!("expected the conditioned block to fall through"),
+        }
+    }
+
+    #[test]
+    fn conditioned_block_matches_when_body_contains_the_needle() {
+        let rules = vec![
+            conditioned(
+                "cond",
+                0,
+                Action::Block,
+                r#"[{"target":"body","operator":"contains","value":"needle"}]"#,
+            ),
+            rule("open", 1, Action::Allow),
+        ];
+        match evaluate_outcome(
+            &[],
+            &rules,
+            &request(),
+            &no_principals(),
+            &body_input(b"the needle is here"),
+        ) {
             Outcome::Rule(r) => assert_eq!(r.id, "cond"),
-            _ => panic!("expected the conditioned rule to match vacuously"),
+            _ => panic!("expected the conditioned block to match"),
+        }
+    }
+
+    #[test]
+    fn invalid_condition_on_a_v2_block_still_blocks() {
+        // Pins the pseudo-rule action mapping: the failure law is action-aware,
+        // so a Block rule with an uncompilable regex must still BLOCK. This
+        // test fails if `pseudo_rule` hardcodes Allow.
+        let rules = vec![
+            conditioned(
+                "broken",
+                0,
+                Action::Block,
+                r#"[{"target":"body","operator":"regex","value":"(?<=x)["}]"#,
+            ),
+            rule("open", 1, Action::Allow),
+        ];
+        match evaluate_outcome(
+            &[],
+            &rules,
+            &request(),
+            &no_principals(),
+            &body_input(b"anything"),
+        ) {
+            Outcome::Rule(r) => assert_eq!(r.id, "broken", "Block must fail CLOSED"),
+            _ => panic!("expected the broken-condition block to match"),
+        }
+        // The symmetric guard: the same broken condition on an ALLOW rule
+        // falls through (it must not shadow a later block).
+        let rules = vec![
+            conditioned(
+                "broken-allow",
+                0,
+                Action::Allow,
+                r#"[{"target":"body","operator":"regex","value":"(?<=x)["}]"#,
+            ),
+            rule("blocker", 1, Action::Block),
+        ];
+        match evaluate_outcome(
+            &[],
+            &rules,
+            &request(),
+            &no_principals(),
+            &body_input(b"anything"),
+        ) {
+            Outcome::Rule(r) => assert_eq!(r.id, "blocker"),
+            _ => panic!("expected the broken-condition allow to fall through"),
+        }
+    }
+
+    #[test]
+    fn conditions_are_enforced_at_the_org_scope_too() {
+        // The fail-closed-by-action law holds at BOTH scopes (F routes org and
+        // project through the same seam): an org-scope Block whose broken regex
+        // is unevaluable fails CLOSED, over-blocking even a project allow.
+        let org = vec![{
+            let mut r = conditioned(
+                "org-broken",
+                0,
+                Action::Block,
+                r#"[{"target":"body","operator":"regex","value":"("}]"#,
+            );
+            r.scope = RuleScope::Organization;
+            r
+        }];
+        let project = vec![rule("proj-allow", 0, Action::Allow)];
+        match evaluate_outcome(
+            &org,
+            &project,
+            &request(),
+            &no_principals(),
+            &body_input(b"anything"),
+        ) {
+            Outcome::Rule(r) => {
+                assert_eq!(r.id, "org-broken", "org Block must fail closed");
+                assert_eq!(r.scope, RuleScope::Organization);
+            }
+            _ => panic!("expected the org broken-condition block"),
+        }
+        // The same org rule as an ALLOW falls through — its broken condition
+        // cannot widen or shadow the project block.
+        let org = vec![{
+            let mut r = conditioned(
+                "org-broken-allow",
+                0,
+                Action::Allow,
+                r#"[{"target":"body","operator":"regex","value":"("}]"#,
+            );
+            r.scope = RuleScope::Organization;
+            r
+        }];
+        let project = vec![rule("proj-block", 0, Action::Block)];
+        match evaluate_outcome(
+            &org,
+            &project,
+            &request(),
+            &no_principals(),
+            &body_input(b"anything"),
+        ) {
+            Outcome::Rule(r) => assert_eq!(r.id, "proj-block"),
+            _ => panic!("the broken org allow must not shadow the project block"),
+        }
+    }
+
+    #[test]
+    fn secret_target_honors_conditions_and_fails_closed_by_action() {
+        let secret_target = || {
+            vec![Target::Secret {
+                host_patterns: vec!["api.example.com".to_string()],
+            }]
+        };
+        let cond = r#"[{"target":"body","operator":"contains","value":"needle"}]"#;
+        // A conditioned ALLOW on a secret must NOT match unconditionally — it
+        // would shadow the later Block (the widening the fail-closed law
+        // forbids).
+        let mut cond_allow = conditioned("sec-allow", 0, Action::Allow, cond);
+        cond_allow.targets = secret_target();
+        let mut blocker = rule("blocker", 1, Action::Block);
+        blocker.targets = secret_target();
+        let rules = vec![cond_allow, blocker];
+        match evaluate_outcome(
+            &[],
+            &rules,
+            &request(),
+            &no_principals(),
+            &body_input(b"no match here"),
+        ) {
+            Outcome::Rule(r) => assert_eq!(r.id, "blocker", "allow must fall through"),
+            _ => panic!("expected the block"),
+        }
+        // With the needle present the conditioned allow matches first.
+        match evaluate_outcome(
+            &[],
+            &rules,
+            &request(),
+            &no_principals(),
+            &body_input(b"has needle"),
+        ) {
+            Outcome::Rule(r) => assert_eq!(r.id, "sec-allow"),
+            _ => panic!("expected the conditioned allow"),
+        }
+        // An unevaluable condition on a secret-target Block fails CLOSED.
+        let mut broken_block = conditioned(
+            "broken",
+            0,
+            Action::Block,
+            r#"[{"target":"body","operator":"regex","value":"("}]"#,
+        );
+        broken_block.targets = secret_target();
+        let rules = vec![broken_block, rule("open", 1, Action::Allow)];
+        match evaluate_outcome(
+            &[],
+            &rules,
+            &request(),
+            &no_principals(),
+            &body_input(b"anything"),
+        ) {
+            Outcome::Rule(r) => assert_eq!(r.id, "broken", "Block must fail closed"),
+            _ => panic!("expected the broken-condition block"),
+        }
+    }
+
+    #[test]
+    fn header_condition_narrows_a_v2_rule() {
+        let rules = vec![
+            conditioned(
+                "hdr",
+                0,
+                Action::Block,
+                r#"[{"target":"header","operator":"equals","key":"X-Env","value":"prod"}]"#,
+            ),
+            rule("open", 1, Action::Allow),
+        ];
+        let mut headers = hyper::HeaderMap::new();
+        headers.insert("x-env", hyper::header::HeaderValue::from_static("prod"));
+        let input = MatchInput {
+            body: None,
+            body_truncated: false,
+            headers: Some(&headers),
+        };
+        match evaluate_outcome(&[], &rules, &request(), &no_principals(), &input) {
+            Outcome::Rule(r) => assert_eq!(r.id, "hdr", "matching header must block"),
+            _ => panic!("expected the header-conditioned block"),
+        }
+        let mut other = hyper::HeaderMap::new();
+        other.insert("x-env", hyper::header::HeaderValue::from_static("dev"));
+        let input = MatchInput {
+            body: None,
+            body_truncated: false,
+            headers: Some(&other),
+        };
+        match evaluate_outcome(&[], &rules, &request(), &no_principals(), &input) {
+            Outcome::Rule(r) => assert_eq!(r.id, "open", "non-matching header falls through"),
+            _ => panic!("expected the allow"),
         }
     }
 
@@ -484,16 +819,28 @@ mod tests {
         // BLOCK: matching winner binds; no winner → no match (fail-closed).
         let blk = vec![conn_rule("c1", Action::Block)];
         assert!(matches!(
-            evaluate_outcome(&[], &blk, &req_via(Some("c1")), &no_principals(), None),
+            evaluate_outcome(&[], &blk, &req_via(Some("c1")), &no_principals(), &MatchInput::empty()),
             Outcome::Rule(r) if r.action == Action::Block
         ));
         assert!(matches!(
-            evaluate_outcome(&[], &blk, &req_via(None), &no_principals(), None),
+            evaluate_outcome(
+                &[],
+                &blk,
+                &req_via(None),
+                &no_principals(),
+                &MatchInput::empty()
+            ),
             Outcome::Allow
         ));
         // A same-provider sibling account → no match.
         assert!(matches!(
-            evaluate_outcome(&[], &blk, &req_via(Some("c2")), &no_principals(), None),
+            evaluate_outcome(
+                &[],
+                &blk,
+                &req_via(Some("c2")),
+                &no_principals(),
+                &MatchInput::empty()
+            ),
             Outcome::Allow
         ));
 
@@ -506,7 +853,7 @@ mod tests {
             &allow_over_block,
             &req_via(Some("c1")),
             &no_principals(),
-            None,
+            &MatchInput::empty(),
         ) {
             Outcome::Rule(r) => assert_eq!(r.action, Action::Allow),
             _ => panic!("winner should open its own connection allow"),
@@ -517,7 +864,7 @@ mod tests {
                 &allow_over_block,
                 &req_via(None),
                 &no_principals(),
-                None
+                &MatchInput::empty()
             ),
             Outcome::DenyDefault(_)
         ));
@@ -528,7 +875,13 @@ mod tests {
     #[test]
     fn org_rule_is_enforced_and_carries_org_scope() {
         let org = vec![org_rule("org-block", 0, Action::Block)];
-        match evaluate_outcome(&org, &[], &request(), &no_principals(), None) {
+        match evaluate_outcome(
+            &org,
+            &[],
+            &request(),
+            &no_principals(),
+            &MatchInput::empty(),
+        ) {
             Outcome::Rule(r) => {
                 assert_eq!(r.id, "org-block");
                 assert_eq!(r.scope, RuleScope::Organization);
@@ -549,13 +902,19 @@ mod tests {
             scoped.identities = vec![identity];
             let org = vec![scoped];
             // Present in the principal set → the rule matches.
-            match evaluate_outcome(&org, &[], &request(), &principals(), None) {
+            match evaluate_outcome(&org, &[], &request(), &principals(), &MatchInput::empty()) {
                 Outcome::Rule(r) => assert_eq!(r.id, id),
                 _ => panic!("expected {id} to match via principals"),
             }
             // Absent (empty/stale set) → the rule narrows to nothing.
             assert!(matches!(
-                evaluate_outcome(&org, &[], &request(), &no_principals(), None),
+                evaluate_outcome(
+                    &org,
+                    &[],
+                    &request(),
+                    &no_principals(),
+                    &MatchInput::empty()
+                ),
                 Outcome::Allow
             ));
         }
@@ -572,7 +931,7 @@ mod tests {
         foreign_group.identities = vec![Identity::Group("g-other".to_string())];
         let org = vec![foreign_user, foreign_group];
         assert!(matches!(
-            evaluate_outcome(&org, &[], &request(), &principals(), None),
+            evaluate_outcome(&org, &[], &request(), &principals(), &MatchInput::empty()),
             Outcome::Allow
         ));
     }
@@ -586,12 +945,24 @@ mod tests {
     fn empty_org_fails_open_not_closed() {
         // No project rules either → plain allow, even credentialed.
         assert!(matches!(
-            evaluate_outcome(&[], &[], &injected_request(), &no_principals(), None),
+            evaluate_outcome(
+                &[],
+                &[],
+                &injected_request(),
+                &no_principals(),
+                &MatchInput::empty()
+            ),
             Outcome::Allow
         ));
         // An empty org slice changes nothing vs the project-only walk.
         let project = vec![rule("open", 0, Action::Allow), default_rule(Action::Block)];
-        match evaluate_outcome(&[], &project, &injected_request(), &no_principals(), None) {
+        match evaluate_outcome(
+            &[],
+            &project,
+            &injected_request(),
+            &no_principals(),
+            &MatchInput::empty(),
+        ) {
             Outcome::Rule(r) => assert_eq!(r.id, "open"),
             _ => panic!("expected the project allow, not a phantom org block"),
         }
@@ -602,7 +973,13 @@ mod tests {
     #[test]
     fn empty_project_lets_the_org_level_decide() {
         let org = vec![org_rule("org-allow", 0, Action::Allow)];
-        match evaluate_outcome(&org, &[], &request(), &no_principals(), None) {
+        match evaluate_outcome(
+            &org,
+            &[],
+            &request(),
+            &no_principals(),
+            &MatchInput::empty(),
+        ) {
             Outcome::Rule(r) => {
                 assert_eq!(r.id, "org-allow");
                 assert_eq!(r.scope, RuleScope::Organization);
@@ -611,7 +988,13 @@ mod tests {
         }
         // An org default-Block over an empty project blocks under the carve.
         let org = vec![org_default(Action::Block)];
-        match evaluate_outcome(&org, &[], &injected_request(), &no_principals(), None) {
+        match evaluate_outcome(
+            &org,
+            &[],
+            &injected_request(),
+            &no_principals(),
+            &MatchInput::empty(),
+        ) {
             Outcome::DenyDefault(d) => assert_eq!(d.scope, RuleScope::Organization),
             _ => panic!("expected the org deny-default"),
         }
@@ -624,14 +1007,26 @@ mod tests {
         // Org guardrail Block beats a project allow…
         let org = vec![org_rule("org-block", 0, Action::Block)];
         let project = vec![rule("proj-allow", 0, Action::Allow)];
-        match evaluate_outcome(&org, &project, &request(), &no_principals(), None) {
+        match evaluate_outcome(
+            &org,
+            &project,
+            &request(),
+            &no_principals(),
+            &MatchInput::empty(),
+        ) {
             Outcome::Rule(r) => assert_eq!(r.id, "org-block"),
             _ => panic!("expected the org block"),
         }
         // …and symmetrically a project Block survives an org allow.
         let org = vec![org_rule("org-allow", 0, Action::Allow)];
         let project = vec![rule("proj-block", 0, Action::Block)];
-        match evaluate_outcome(&org, &project, &request(), &no_principals(), None) {
+        match evaluate_outcome(
+            &org,
+            &project,
+            &request(),
+            &no_principals(),
+            &MatchInput::empty(),
+        ) {
             Outcome::Rule(r) => assert_eq!(r.id, "proj-block"),
             _ => panic!("expected the project block"),
         }
@@ -645,7 +1040,13 @@ mod tests {
             r
         }];
         let project = vec![rate_rule("proj-rate", 0)];
-        match evaluate_outcome(&org, &project, &request(), &no_principals(), None) {
+        match evaluate_outcome(
+            &org,
+            &project,
+            &request(),
+            &no_principals(),
+            &MatchInput::empty(),
+        ) {
             Outcome::Rule(r) => assert_eq!(r.id, "org-approval"),
             _ => panic!("expected the approval to outrank the rate limit"),
         }
@@ -661,7 +1062,13 @@ mod tests {
             r
         }];
         let project = vec![rate_rule("proj-rate", 0)];
-        match evaluate_outcome(&org, &project, &request(), &no_principals(), None) {
+        match evaluate_outcome(
+            &org,
+            &project,
+            &request(),
+            &no_principals(),
+            &MatchInput::empty(),
+        ) {
             Outcome::Rule(r) => {
                 assert_eq!(r.id, "org-rate");
                 assert_eq!(r.scope, RuleScope::Organization);
@@ -678,7 +1085,13 @@ mod tests {
         malformed.identities = vec![Identity::Other];
         let org = vec![malformed, org_rule("org-any", 1, Action::Block)];
         let project = vec![rule("proj-any", 0, Action::Allow)];
-        match evaluate_outcome(&org, &project, &request(), &principals(), None) {
+        match evaluate_outcome(
+            &org,
+            &project,
+            &request(),
+            &principals(),
+            &MatchInput::empty(),
+        ) {
             Outcome::Rule(r) => assert_eq!(r.id, "org-any"),
             _ => panic!("expected the any-identity org block"),
         }
@@ -694,7 +1107,13 @@ mod tests {
         // Direction 1: org default-Block + lone project allow → org deny-default.
         let org = vec![org_default(Action::Block)];
         let project = vec![rule("proj-allow", 0, Action::Allow)];
-        match evaluate_outcome(&org, &project, &injected_request(), &no_principals(), None) {
+        match evaluate_outcome(
+            &org,
+            &project,
+            &injected_request(),
+            &no_principals(),
+            &MatchInput::empty(),
+        ) {
             Outcome::DenyDefault(d) => {
                 assert!(d.is_default);
                 assert_eq!(d.scope, RuleScope::Organization);
@@ -702,7 +1121,13 @@ mod tests {
             _ => panic!("the project allow must not punch the org floor"),
         }
         // Without the carve the org level allows — the project allow wins.
-        match evaluate_outcome(&org, &project, &request(), &no_principals(), None) {
+        match evaluate_outcome(
+            &org,
+            &project,
+            &request(),
+            &no_principals(),
+            &MatchInput::empty(),
+        ) {
             Outcome::Rule(r) => assert_eq!(r.id, "proj-allow"),
             _ => panic!("expected the project allow off the carve"),
         }
@@ -711,7 +1136,13 @@ mod tests {
         // project deny-default.
         let org = vec![org_rule("org-allow", 0, Action::Allow)];
         let project = vec![default_rule(Action::Block)];
-        match evaluate_outcome(&org, &project, &injected_request(), &no_principals(), None) {
+        match evaluate_outcome(
+            &org,
+            &project,
+            &injected_request(),
+            &no_principals(),
+            &MatchInput::empty(),
+        ) {
             Outcome::DenyDefault(d) => {
                 assert!(d.is_default);
                 assert_eq!(d.scope, RuleScope::Project);
@@ -719,7 +1150,13 @@ mod tests {
             _ => panic!("the org allow must not punch the project allowlist floor"),
         }
         // Without the carve the project level allows — the org allow wins.
-        match evaluate_outcome(&org, &project, &request(), &no_principals(), None) {
+        match evaluate_outcome(
+            &org,
+            &project,
+            &request(),
+            &no_principals(),
+            &MatchInput::empty(),
+        ) {
             Outcome::Rule(r) => assert_eq!(r.id, "org-allow"),
             _ => panic!("expected the org allow off the carve"),
         }
@@ -732,13 +1169,25 @@ mod tests {
         // A project BLOCK applies even against an org default-Block…
         let org = vec![org_default(Action::Block)];
         let project = vec![rule("proj-block", 0, Action::Block)];
-        match evaluate_outcome(&org, &project, &injected_request(), &no_principals(), None) {
+        match evaluate_outcome(
+            &org,
+            &project,
+            &injected_request(),
+            &no_principals(),
+            &MatchInput::empty(),
+        ) {
             Outcome::Rule(r) => assert_eq!(r.id, "proj-block"),
             _ => panic!("a block must survive the org floor"),
         }
         // …and with no org default-Block a lone org allow just wins.
         let org = vec![org_rule("org-allow", 0, Action::Allow)];
-        match evaluate_outcome(&org, &[], &injected_request(), &no_principals(), None) {
+        match evaluate_outcome(
+            &org,
+            &[],
+            &injected_request(),
+            &no_principals(),
+            &MatchInput::empty(),
+        ) {
             Outcome::Rule(r) => assert_eq!(r.id, "org-allow"),
             _ => panic!("expected the org allow"),
         }
@@ -751,20 +1200,44 @@ mod tests {
         // Org default-Block: spared off the carve, blocks under it.
         let org = vec![org_default(Action::Block)];
         assert!(matches!(
-            evaluate_outcome(&org, &[], &request(), &no_principals(), None),
+            evaluate_outcome(
+                &org,
+                &[],
+                &request(),
+                &no_principals(),
+                &MatchInput::empty()
+            ),
             Outcome::Allow
         ));
-        match evaluate_outcome(&org, &[], &injected_request(), &no_principals(), None) {
+        match evaluate_outcome(
+            &org,
+            &[],
+            &injected_request(),
+            &no_principals(),
+            &MatchInput::empty(),
+        ) {
             Outcome::DenyDefault(d) => assert_eq!(d.scope, RuleScope::Organization),
             _ => panic!("expected the org deny-default under the carve"),
         }
         // Project default-Block: same carve, independently.
         let project = vec![default_rule(Action::Block)];
         assert!(matches!(
-            evaluate_outcome(&[], &project, &request(), &no_principals(), None),
+            evaluate_outcome(
+                &[],
+                &project,
+                &request(),
+                &no_principals(),
+                &MatchInput::empty()
+            ),
             Outcome::Allow
         ));
-        match evaluate_outcome(&[], &project, &injected_request(), &no_principals(), None) {
+        match evaluate_outcome(
+            &[],
+            &project,
+            &injected_request(),
+            &no_principals(),
+            &MatchInput::empty(),
+        ) {
             Outcome::DenyDefault(d) => assert_eq!(d.scope, RuleScope::Project),
             _ => panic!("expected the project deny-default under the carve"),
         }
@@ -774,7 +1247,13 @@ mod tests {
     fn absent_project_default_with_org_default_allow_is_allow() {
         let org = vec![org_default(Action::Allow)];
         assert!(matches!(
-            evaluate_outcome(&org, &[], &injected_request(), &no_principals(), None),
+            evaluate_outcome(
+                &org,
+                &[],
+                &injected_request(),
+                &no_principals(),
+                &MatchInput::empty()
+            ),
             Outcome::Allow
         ));
     }

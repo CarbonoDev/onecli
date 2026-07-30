@@ -77,6 +77,11 @@ export const HowRulesEvaluated = () => (
         Only one rule ever decides — rate limits and approvals don&rsquo;t
         stack.
       </p>
+      <p className="text-muted-foreground mt-2 text-xs">
+        Conditions further narrow when a rule matches: ALL of a rule&rsquo;s
+        conditions must hold. A condition that can&rsquo;t be evaluated (e.g. an
+        oversized body) makes a Block rule match — it never weakens one.
+      </p>
     </PopoverContent>
   </Popover>
 );

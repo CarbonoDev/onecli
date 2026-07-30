@@ -21,7 +21,7 @@ use tracing::{info, warn};
 
 use crate::cache::CacheStore;
 use crate::inject;
-use crate::policy::{self, PolicyDecision};
+use crate::policy::{self, MatchInput, PolicyDecision};
 
 use super::hooks;
 use super::mitm::ResolvedRules;
@@ -127,6 +127,15 @@ pub(super) async fn handle_websocket(
         ));
     }
 
+    // A WebSocket upgrade is a GET with no inspectable body: header conditions
+    // apply to the handshake, and the absent body is a FACT (a body condition
+    // matches against the empty body, never fails closed on missing bytes).
+    let match_input = MatchInput {
+        body: None,
+        body_truncated: false,
+        headers: Some(req.headers()),
+    };
+
     // The first-match engine over `policy_rules_v2` is authoritative. WebSocket
     // blocks emit no telemetry today, so the matched rule is not attributed here
     // (allow-attribution for ws is out of scope) — only the decision is consumed.
@@ -135,7 +144,7 @@ pub(super) async fn handle_websocket(
         policy_host,
         "GET",
         &path,
-        None,
+        &match_input,
         has_injections,
         policy::is_llm_host(host),
         rules.winning_connection_id.as_deref(),

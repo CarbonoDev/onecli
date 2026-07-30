@@ -98,6 +98,84 @@ export const setGroupMembersSchema = z.object({
   userIds: z.array(z.string().min(1)).max(MAX_GROUP_MEMBERS),
 });
 
+// ── Role mappings ────────────────────────────────────────────────────────
+
+/**
+ * Ceiling on the org's mapping set — enforced on BOTH ends, and it has to be:
+ * `PUT /order` takes the FULL ordered id set, so an org that can hold more
+ * mappings than this body allows would have an unreachable reorder endpoint
+ * (every honest body 422s on `.max()`, every shorter one 409s on the
+ * names-every-mapping-once check) and no way to resolve shadowing. The chosen
+ * invariant is therefore `mappings ≤ MAX_ROLE_MAPPINGS`: `createOrgRoleMapping`
+ * 409s at the cap, so the reorder body can always name the whole set.
+ */
+export const MAX_ROLE_MAPPINGS = 500;
+
+/**
+ * Mappings assign exactly the roles the members surface can — never `owner`.
+ * Owner is bootstrap-only, and `updateOrgMemberRole` already refuses to assign
+ * or overwrite it, so a body carrying `role: "owner"` is a 422 here rather
+ * than a privilege the mapping engine could mint.
+ */
+export const roleMappingRoleSchema = orgMemberRoleSchema;
+
+/**
+ * `priority` is an ASCENDING rank: 0 = highest precedence (evaluated first /
+ * wins). Omitted on create means "append after the current last mapping".
+ *
+ * NOT coerced, unlike `limit`: this field only ever arrives in a JSON body, so
+ * it is already a number when it is one. Coercion would turn `null`, `""`,
+ * `false` and `[]` into `0` — the HIGHEST-precedence slot, the single most
+ * consequential value the field can take — instead of the 422 a body that
+ * meant "no priority" deserves. `.optional()` still short-circuits `undefined`,
+ * so the omitted-priority append path is unaffected.
+ */
+export const roleMappingPrioritySchema = z.number().int().min(0).max(100_000);
+
+export const createRoleMappingSchema = z.object({
+  groupId: z.string().min(1),
+  role: roleMappingRoleSchema,
+  priority: roleMappingPrioritySchema.optional(),
+});
+
+export type CreateRoleMappingInput = z.infer<typeof createRoleMappingSchema>;
+
+export const updateRoleMappingSchema = z.object({
+  role: roleMappingRoleSchema,
+  priority: roleMappingPrioritySchema.optional(),
+});
+
+export type UpdateRoleMappingInput = z.infer<typeof updateRoleMappingSchema>;
+
+/**
+ * The FULL ordered id set, index 0 = highest priority. A body that does not
+ * name every current mapping exactly once is STALE → 409 in the service (the
+ * `reorderPolicyRules` precedent); duplicates are malformed → 422 here.
+ *
+ * Deliberately NOT `.min(1)` (unlike `reorderPolicyRulesSchema`): an org with
+ * zero mappings legitimately reorders to `[]`, and a minimum would 422 that
+ * honest no-op.
+ */
+export const reorderRoleMappingsSchema = z.object({
+  orderedIds: z
+    .array(z.string().min(1))
+    .max(MAX_ROLE_MAPPINGS)
+    .refine((ids) => new Set(ids).size === ids.length, {
+      message: "orderedIds must not contain duplicates.",
+    }),
+});
+
+/**
+ * Dry run. No `priority`: an existing mapping is previewed at its current
+ * slot, a new one as if appended last — exactly what the create button does.
+ */
+export const previewRoleMappingSchema = z.object({
+  groupId: z.string().min(1),
+  role: roleMappingRoleSchema,
+});
+
+export type PreviewRoleMappingInput = z.infer<typeof previewRoleMappingSchema>;
+
 /**
  * `PATCH /v1/org/members/:userId` accepts EXACTLY ONE change per request —
  * either a lifecycle change (`status`) or a role change (`role`). A body

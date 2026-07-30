@@ -7,6 +7,10 @@ import {
   type DirectoryPage,
 } from "../lib/cursor";
 import type { GroupListQuery } from "../validations/org";
+import {
+  applyOrgRoleMappings,
+  applyRoleMappingsForGroup,
+} from "./org-role-mapping-service";
 
 // The org's human-group directory: list/create/rename/delete plus the three
 // membership writers. Scoped to ONE organization on every call — the caller's
@@ -42,6 +46,7 @@ export interface GroupDeleteResult {
   name: string;
   removedMembers: number;
   removedProjectBindings: number;
+  removedRoleMappings: number;
 }
 
 export type ListOrgGroupsParams = Partial<GroupListQuery>;
@@ -283,11 +288,15 @@ export const renameOrgGroup = async (
  * widened to "any principal" (see grants-service). So a group delete needs no
  * explicit orphan-neutralization pass here; the identity rows simply cascade
  * away and the rules that referenced them lose one target. Role automation
- * (group→org-role mappings) is likewise not a live OSS concept, so there is no
- * mapping re-resolution to run. Both integrations belong to later stages.
+ * (group→org-role mappings), re-added in Stage D, IS re-resolved here: the
+ * cascade takes this group's GroupRoleMapping with it, which can unshadow a
+ * lower-priority mapping, so a mapping re-resolution runs after the delete —
+ * guarded on the selected roleMapping, org-wide, trigger "group-deleted", and
+ * raise-only, so it is never a demotion (see below).
  */
 export const deleteOrgGroup = async (
   organizationId: string,
+  actorUserId: string,
   groupId: string,
 ): Promise<GroupDeleteResult> => {
   const group = await db.group.findFirst({
@@ -297,6 +306,7 @@ export const deleteOrgGroup = async (
       name: true,
       source: true,
       _count: { select: { members: true, projectAccess: true } },
+      roleMapping: { select: { id: true } },
     },
   });
   if (!group) throw new ServiceError("NOT_FOUND", "Group not found.");
@@ -316,11 +326,26 @@ export const deleteOrgGroup = async (
   });
   if (count === 0) throw new ServiceError("NOT_FOUND", "Group not found.");
 
+  // The cascade took this group's mapping with it, which can UNSHADOW a
+  // lower-priority mapping (e.g. the deleted group was the priority-0 `member`
+  // mapping suppressing an `admin` one), so the whole org is re-resolved —
+  // group-scoped would be wrong here, the group is gone. Guarded on the
+  // mapping the impact read already selected, so the overwhelmingly common
+  // "delete an unmapped group" path costs nothing extra. Roles are never
+  // REVERTED by a delete: nothing in this system lowers a role (decision C).
+  // The trigger is its own value: the cause is a mapping cascade, not a
+  // membership edit, and the whole point of the discriminator is letting an
+  // operator split those apart in the MEMBER audit rows.
+  if (group.roleMapping) {
+    await applyOrgRoleMappings(organizationId, actorUserId, "group-deleted");
+  }
+
   return {
     id: group.id,
     name: group.name,
     removedMembers: group._count.members,
     removedProjectBindings: group._count.projectAccess,
+    removedRoleMappings: group.roleMapping ? 1 : 0,
   };
 };
 
@@ -401,6 +426,27 @@ const assertOrgMembers = async (organizationId: string, userIds: string[]) => {
   }
 };
 
+// Group→role mappings are re-resolved after every membership write (cloud
+// applies them at SSO login; OSS has no SSO, so the write IS the trigger).
+// They are a FLOOR: a mapping can only ever RAISE a member's org role (see
+// org-role-mapping-service.ts, decision C), so a removal almost never changes
+// a role — but the remove paths call the same hook anyway. Keeping the seam
+// one uniform shape is the point: an edition that flips to two-way sync would
+// otherwise silently skip the path that matters most. The cost is one indexed
+// lookup on `group_role_mappings`.
+//
+// REMOVALS ARE UNSHADOWED. The group-scoped apply resolves the group's members
+// as they are AFTER the write, so the removal paths hand it the ids they just
+// removed (`applyRoleMappingsForGroup(orgId, groupId, actorId, removedIds)`).
+// Without that a user held down by a high-priority `member` mapping on this
+// group, while a lower-priority `admin` mapping also covered them, would stay
+// under-privileged after leaving it — the same unshadow decision E handles
+// org-wide for `deleteOrgGroup`. Adders pass nothing: their ids are already in
+// the group.
+//
+// Each call happens AFTER its own write commits, never inside the
+// transaction — the apply writes member rows and audit rows of its own.
+
 /**
  * Replace the group's member set. Returns the honest delta; a no-delta call
  * returns `{ added: 0, removed: 0 }` WITHOUT opening a transaction (and the
@@ -448,6 +494,13 @@ export const setOrgGroupMembers = async (
     }),
   ]);
 
+  await applyRoleMappingsForGroup(
+    organizationId,
+    groupId,
+    actorUserId,
+    toRemove,
+  );
+
   return { added: toAdd.length, removed: toRemove.length };
 };
 
@@ -475,6 +528,8 @@ export const addOrgGroupMember = async (
     update: {},
   });
 
+  await applyRoleMappingsForGroup(organizationId, groupId, actorUserId);
+
   return { added: !existing };
 };
 
@@ -484,6 +539,7 @@ export const addOrgGroupMember = async (
  */
 export const removeOrgGroupMember = async (
   organizationId: string,
+  actorUserId: string,
   groupId: string,
   userId: string,
 ): Promise<{ removed: boolean }> => {
@@ -492,6 +548,10 @@ export const removeOrgGroupMember = async (
   const { count } = await db.groupMember.deleteMany({
     where: { groupId, userId },
   });
+
+  await applyRoleMappingsForGroup(organizationId, groupId, actorUserId, [
+    userId,
+  ]);
 
   return { removed: count > 0 };
 };

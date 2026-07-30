@@ -7,14 +7,7 @@ import type { ApiEnv } from "../../types";
 // RoleResolver, and `CAPS.rbac` on. Admin callers arrive with an org API key
 // (whose key path re-checks admin through the resolver); the non-admin cases
 // use a session, since a non-admin's org key fails key authentication
-// outright. (Same harness as invitations.test.ts / members.test.ts — cloned,
-// not shared.)
-//
-// Reconciliation Stage C ships USER GROUPS ONLY. Role automation
-// (group→org-role mappings) and policy-rule orphan neutralization are separate
-// later stages and are NOT exercised here — the OSS grants engine already
-// treats a rule identity orphaned by an FK cascade as inert, so a group delete
-// needs no explicit neutralization pass.
+// outright. (Same harness as invitations.test.ts — cloned, not shared.)
 
 const ORG = "org-1";
 const OTHER_ORG = "org-2";
@@ -34,6 +27,7 @@ vi.hoisted(() => {
 interface MemberRow {
   organizationId: string;
   userId: string;
+  userEmail: string;
   role: string;
   status: string;
   ssoExempt: boolean;
@@ -71,6 +65,17 @@ interface ProjectAccessRow {
   groupId: string;
 }
 
+/** Full shape since Slice 5: the membership writers re-resolve these. */
+interface RoleMappingRow {
+  id: string;
+  organizationId: string;
+  groupId: string;
+  role: string;
+  priority: number;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
 interface AuditRow {
   organizationId?: string;
   userId: string;
@@ -86,6 +91,7 @@ const store = vi.hoisted(() => ({
   groups: [] as GroupRow[],
   groupMembers: [] as GroupMemberRow[],
   projectAccess: [] as ProjectAccessRow[],
+  roleMappings: [] as RoleMappingRow[],
   audits: [] as AuditRow[],
   seq: 0,
   txCount: 0,
@@ -126,6 +132,7 @@ vi.mock("@onecli/db", () => {
     createdAt?: boolean;
     updatedAt?: boolean;
     _count?: { select: { members?: boolean; projectAccess?: boolean } };
+    roleMapping?: { select: { id: boolean } };
   }
   interface GroupMemberWhere {
     groupId?: string | { in: string[] };
@@ -134,6 +141,12 @@ vi.mock("@onecli/db", () => {
       OR: { email?: { contains: string }; name?: { contains: string } }[];
     };
     AND?: { OR: KeysetClause[] }[];
+  }
+  /** The role-mapping seam's reads (Slice 5). */
+  interface MappingWhere {
+    id?: string;
+    organizationId?: string;
+    groupId?: string;
   }
   interface OrgMemberWhere {
     organizationId?: string;
@@ -191,8 +204,8 @@ vi.mock("@onecli/db", () => {
       return matchesKeyset(row, where.AND);
     });
 
-  // Mirror Prisma's `select` (incl. `_count`) so a route can't accidentally
-  // leak a column the service didn't ask for.
+  // Mirror Prisma's `select` (incl. `_count` and the roleMapping relation) so
+  // a route can't accidentally leak a column the service didn't ask for.
   const pickGroup = (row: GroupRow, select?: GroupSelect) => {
     if (!select) return { ...row };
     const picked: Record<string, unknown> = {};
@@ -219,6 +232,10 @@ vi.mock("@onecli/db", () => {
         ).length;
       }
       picked._count = count;
+    }
+    if (select.roleMapping) {
+      const mapping = store.roleMappings.find((rm) => rm.groupId === row.id);
+      picked.roleMapping = mapping ? { id: mapping.id } : null;
     }
     return picked;
   };
@@ -297,118 +314,14 @@ vi.mock("@onecli/db", () => {
       return true;
     });
 
-  const dbGroup = {
-    findFirst: async ({
-      where,
-      select,
-    }: {
-      where: GroupWhere;
-      select?: GroupSelect;
-    }) => {
-      // Race simulation: the create pre-check (a name-keyed findFirst)
-      // misses, so the create itself must surface the P2002.
-      if (store.race && where.name !== undefined) return null;
-      const row = filterGroups(where)[0];
-      return row ? pickGroup(row, select) : null;
-    },
-    findMany: async ({
-      where,
-      select,
-      take,
-    }: {
-      where: GroupWhere;
-      select?: GroupSelect;
-      take?: number;
-    }) => {
-      const rows = filterGroups(where)
-        .slice()
-        .sort(
-          (a, b) =>
-            a.createdAt.getTime() - b.createdAt.getTime() ||
-            a.id.localeCompare(b.id),
-        );
-      const limited = take === undefined ? rows : rows.slice(0, take);
-      return limited.map((row) => pickGroup(row, select));
-    },
-    create: async ({
-      data,
-      select,
-    }: {
-      data: {
-        organizationId: string;
-        name: string;
-        source: string;
-        externalId?: string | null;
-      };
-      select?: GroupSelect;
-    }) => {
-      const dupe = store.groups.some(
-        (g) => g.organizationId === data.organizationId && g.name === data.name,
-      );
-      if (dupe) {
-        throw new PrismaClientKnownRequestError(
-          "Unique constraint failed",
-          "P2002",
-        );
-      }
-      const row: GroupRow = {
-        id: `g-${++store.seq}`,
-        organizationId: data.organizationId,
-        name: data.name,
-        source: data.source,
-        externalId: data.externalId ?? null,
-        createdAt: new Date(),
-        updatedAt: new Date(),
-      };
-      store.groups.push(row);
-      return pickGroup(row, select);
-    },
-    // Org-scoped conditional write (the rename path): unique violations
-    // surface as P2002, a filter miss as count 0.
-    updateMany: async ({
-      where,
-      data,
-    }: {
-      where: GroupWhere;
-      data: { name: string };
-    }) => {
-      const rows = filterGroups(where);
-      for (const row of rows) {
-        const dupe = store.groups.some(
-          (g) =>
-            g.organizationId === row.organizationId &&
-            g.name === data.name &&
-            g.id !== row.id,
-        );
-        if (dupe) {
-          throw new PrismaClientKnownRequestError(
-            "Unique constraint failed",
-            "P2002",
-          );
-        }
-        row.name = data.name;
-        row.updatedAt = new Date();
-      }
-      return { count: rows.length };
-    },
-    // Delete applies the DB cascades the shipped migration declares:
-    // GroupMember and ProjectAccess group bindings go with the row (as do
-    // GroupRoleMapping and PolicyRuleIdentity in stages that populate them).
-    deleteMany: async ({ where }: { where: GroupWhere }) => {
-      const rows = filterGroups(where);
-      for (const row of rows) {
-        store.groupMembers = store.groupMembers.filter(
-          (m) => m.groupId !== row.id,
-        );
-        store.projectAccess = store.projectAccess.filter(
-          (pa) => pa.groupId !== row.id,
-        );
-      }
-      const ids = new Set(rows.map((r) => r.id));
-      store.groups = store.groups.filter((g) => !ids.has(g.id));
-      return { count: rows.length };
-    },
-  };
+  const filterMappings = (where: MappingWhere) =>
+    store.roleMappings.filter(
+      (row) =>
+        (where.id === undefined || row.id === where.id) &&
+        (where.organizationId === undefined ||
+          row.organizationId === where.organizationId) &&
+        (where.groupId === undefined || row.groupId === where.groupId),
+    );
 
   return {
     Prisma: { JsonNull: null, PrismaClientKnownRequestError },
@@ -489,24 +402,192 @@ vi.mock("@onecli/db", () => {
                   : where.status.not === undefined ||
                     row.status !== where.status.not)),
           ) ?? null,
-        // THE membership-validation query: { organizationId, userId: { in } }.
+        // THE membership-validation query: { organizationId, userId: { in } }
+        // — plus the role-mapping apply's candidate read, which adds
+        // `role: { not: "owner" }` and selects role/userEmail.
         findMany: async ({
           where,
           select,
         }: {
           where: OrgMemberWhere;
-          select?: { userId?: boolean; role?: boolean };
+          select?: { userId?: boolean; role?: boolean; userEmail?: boolean };
         }) =>
           filterOrgMembers(where).map((row) => {
             if (!select) return { ...row };
             const picked: Record<string, unknown> = {};
             if (select.userId) picked.userId = row.userId;
             if (select.role) picked.role = row.role;
+            if (select.userEmail) picked.userEmail = row.userEmail;
             return picked;
           }),
+        // The apply's role write. The `role: { not: "owner" }` predicate is
+        // honoured, or the "a mapping never demotes an owner" cases would be
+        // testing the mock rather than the service.
+        updateMany: async ({
+          where,
+          data,
+        }: {
+          where: OrgMemberWhere;
+          data: { role: string };
+        }) => {
+          const rows = filterOrgMembers(where);
+          for (const row of rows) row.role = data.role;
+          return { count: rows.length };
+        },
         count: async () => 0,
       },
-      group: dbGroup,
+      // Slice 5: the membership writers re-resolve group→role mappings, so
+      // the seam needs the mapping table to read.
+      groupRoleMapping: {
+        findFirst: async ({ where }: { where: MappingWhere }) =>
+          filterMappings(where)[0] ?? null,
+        findMany: async ({
+          where,
+          select,
+        }: {
+          where: MappingWhere;
+          select?: Record<string, boolean>;
+        }) =>
+          filterMappings(where)
+            .slice()
+            .sort(
+              (a, b) =>
+                a.priority - b.priority ||
+                a.createdAt.getTime() - b.createdAt.getTime() ||
+                a.id.localeCompare(b.id),
+            )
+            .map((row) => {
+              if (!select) return { ...row };
+              const picked: Record<string, unknown> = {};
+              for (const key of [
+                "id",
+                "organizationId",
+                "groupId",
+                "role",
+                "priority",
+                "createdAt",
+                "updatedAt",
+              ] as const) {
+                if (select[key]) picked[key] = row[key];
+              }
+              return picked;
+            }),
+      },
+      group: {
+        findFirst: async ({
+          where,
+          select,
+        }: {
+          where: GroupWhere;
+          select?: GroupSelect;
+        }) => {
+          // Race simulation: the create pre-check (a name-keyed findFirst)
+          // misses, so the create itself must surface the P2002.
+          if (store.race && where.name !== undefined) return null;
+          const row = filterGroups(where)[0];
+          return row ? pickGroup(row, select) : null;
+        },
+        findMany: async ({
+          where,
+          select,
+          take,
+        }: {
+          where: GroupWhere;
+          select?: GroupSelect;
+          take?: number;
+        }) => {
+          const rows = filterGroups(where)
+            .slice()
+            .sort(
+              (a, b) =>
+                a.createdAt.getTime() - b.createdAt.getTime() ||
+                a.id.localeCompare(b.id),
+            );
+          const limited = take === undefined ? rows : rows.slice(0, take);
+          return limited.map((row) => pickGroup(row, select));
+        },
+        create: async ({
+          data,
+          select,
+        }: {
+          data: {
+            organizationId: string;
+            name: string;
+            source: string;
+            externalId?: string | null;
+          };
+          select?: GroupSelect;
+        }) => {
+          const dupe = store.groups.some(
+            (g) =>
+              g.organizationId === data.organizationId && g.name === data.name,
+          );
+          if (dupe) {
+            throw new PrismaClientKnownRequestError(
+              "Unique constraint failed",
+              "P2002",
+            );
+          }
+          const row: GroupRow = {
+            id: `g-${++store.seq}`,
+            organizationId: data.organizationId,
+            name: data.name,
+            source: data.source,
+            externalId: data.externalId ?? null,
+            createdAt: new Date(),
+            updatedAt: new Date(),
+          };
+          store.groups.push(row);
+          return pickGroup(row, select);
+        },
+        // Org-scoped conditional write (the rename path): unique violations
+        // surface as P2002, a filter miss as count 0.
+        updateMany: async ({
+          where,
+          data,
+        }: {
+          where: GroupWhere;
+          data: { name: string };
+        }) => {
+          const rows = filterGroups(where);
+          for (const row of rows) {
+            const dupe = store.groups.some(
+              (g) =>
+                g.organizationId === row.organizationId &&
+                g.name === data.name &&
+                g.id !== row.id,
+            );
+            if (dupe) {
+              throw new PrismaClientKnownRequestError(
+                "Unique constraint failed",
+                "P2002",
+              );
+            }
+            row.name = data.name;
+            row.updatedAt = new Date();
+          }
+          return { count: rows.length };
+        },
+        // Delete applies the DB cascades the shipped migration declares:
+        // GroupMember, ProjectAccess group bindings, GroupRoleMapping.
+        deleteMany: async ({ where }: { where: GroupWhere }) => {
+          const rows = filterGroups(where);
+          for (const row of rows) {
+            store.groupMembers = store.groupMembers.filter(
+              (m) => m.groupId !== row.id,
+            );
+            store.projectAccess = store.projectAccess.filter(
+              (pa) => pa.groupId !== row.id,
+            );
+            store.roleMappings = store.roleMappings.filter(
+              (rm) => rm.groupId !== row.id,
+            );
+          }
+          const ids = new Set(rows.map((r) => r.id));
+          store.groups = store.groups.filter((g) => !ids.has(g.id));
+          return { count: rows.length };
+        },
+      },
       groupMember: {
         findUnique: async ({
           where,
@@ -611,14 +692,9 @@ vi.mock("@onecli/db", () => {
           return data;
         },
       },
-      // The replace-set writer runs its delete+create under ONE array-form
-      // transaction; the delete path is a plain conditional deleteMany.
-      $transaction: async (arg: unknown) => {
+      $transaction: async (ops: Promise<unknown>[]) => {
         store.txCount++;
-        if (typeof arg === "function") {
-          return (arg as (tx: unknown) => Promise<unknown>)({ group: dbGroup });
-        }
-        return Promise.all(arg as Promise<unknown>[]);
+        return Promise.all(ops);
       },
     },
   };
@@ -650,6 +726,7 @@ const member = (
 ): MemberRow => ({
   organizationId,
   userId,
+  userEmail: `${userId}@example.com`,
   role,
   status: "active",
   ssoExempt: false,
@@ -745,6 +822,20 @@ beforeEach(() => {
     },
   ];
   store.projectAccess = [{ id: "pa-1", projectId: "proj-1", groupId: "g-a" }];
+  // A CONVERGED baseline: `member` is the weakest role, so this mapping can
+  // never raise anyone and every existing membership case stays a no-op on
+  // the Slice 5 seam. Cases that need a real apply promote it to "admin".
+  store.roleMappings = [
+    {
+      id: "rm-1",
+      organizationId: ORG,
+      groupId: "g-a",
+      role: "member",
+      priority: 0,
+      createdAt: at(30),
+      updatedAt: at(30),
+    },
+  ];
   store.audits = [];
   store.seq = 100;
   store.txCount = 0;
@@ -1103,11 +1194,14 @@ describe("DELETE /v1/org/groups/:groupId", () => {
       name: "Engineering",
       removedMembers: 2,
       removedProjectBindings: 1,
+      removedRoleMappings: 1,
     });
-    // Cascades applied: membership and project bindings went with the group.
+    // Cascades applied: membership, project bindings, and the role mapping
+    // went with the group.
     expect(groupRow("g-a")).toBeUndefined();
     expect(membersOf("g-a")).toEqual([]);
     expect(store.projectAccess.some((pa) => pa.groupId === "g-a")).toBe(false);
+    expect(store.roleMappings.some((rm) => rm.groupId === "g-a")).toBe(false);
   });
 
   it("audits counts only — never id arrays", async () => {
@@ -1122,6 +1216,7 @@ describe("DELETE /v1/org/groups/:groupId", () => {
         name: "Engineering",
         removedMembers: 2,
         removedProjectBindings: 1,
+        removedRoleMappings: 1,
       },
     });
     for (const value of Object.values(store.audits[0]?.metadata ?? {})) {
@@ -1384,5 +1479,193 @@ describe("DELETE /v1/org/groups/:groupId/members/:userId (single remove)", () =>
     const res = await deleteMember("g-scim", MEMBER);
     expect(res.status).toBe(409);
     expect(membersOf("g-scim")).toEqual([MEMBER]);
+  });
+});
+
+// ── Slice 5 seam: group→role mappings ───────────────────────────────────
+//
+// The membership writers re-resolve mapped org roles after their write. The
+// contract they must honour is decision C: a mapping is a FLOOR — it can
+// RAISE a member's org role and can never lower one.
+describe("the role-mapping seam", () => {
+  const mapGroupToAdmin = (groupId: string) => {
+    store.roleMappings = [
+      {
+        id: "rm-admin",
+        organizationId: ORG,
+        groupId,
+        role: "admin",
+        priority: 0,
+        createdAt: at(30),
+        updatedAt: at(30),
+      },
+    ];
+  };
+
+  const roleOf = (userId: string) =>
+    store.members.find((m) => m.organizationId === ORG && m.userId === userId)
+      ?.role;
+
+  const memberAudits = () => store.audits.filter((a) => a.service === "member");
+
+  it("raises a user added to an admin-mapped group, alongside the GROUP audit", async () => {
+    mapGroupToAdmin("g-a");
+    const res = await putMembers("g-a", { userIds: [OWNER, ADMIN, MEMBER] });
+    expect(res.status).toBe(200);
+    expect(roleOf(MEMBER)).toBe("admin");
+    // The owner is untouchable and the acting admin is skipped.
+    expect(roleOf(OWNER)).toBe("owner");
+
+    expect(memberAudits()).toHaveLength(1);
+    expect(memberAudits()[0]).toMatchObject({
+      organizationId: ORG,
+      userId: ADMIN,
+      action: "update",
+      service: "member",
+      source: "api",
+      metadata: {
+        targetUserId: MEMBER,
+        role: "admin",
+        previousRole: "member",
+        via: "role-mapping",
+        mappingId: "rm-admin",
+        groupId: "g-a",
+        trigger: "membership",
+      },
+    });
+    expect(store.audits.filter((a) => a.service === "group")).toHaveLength(1);
+  });
+
+  it("changes no roles when the group has no mapping of its own", async () => {
+    mapGroupToAdmin("g-a");
+    const res = await putMembers("g-b", { userIds: [MEMBER] });
+    expect(res.status).toBe(200);
+    expect(roleOf(MEMBER)).toBe("member");
+    expect(memberAudits()).toHaveLength(0);
+  });
+
+  it("does NOT demote when a user is removed from an admin-mapped group", async () => {
+    mapGroupToAdmin("g-a");
+    expect((await putMember("g-a", MEMBER)).status).toBe(200);
+    expect(roleOf(MEMBER)).toBe("admin");
+
+    store.audits = [];
+    const res = await deleteMember("g-a", MEMBER);
+    expect(res.status).toBe(200);
+    // The grant sticks: only PATCH /v1/org/members/:userId can lower a role.
+    expect(roleOf(MEMBER)).toBe("admin");
+    expect(memberAudits()).toHaveLength(0);
+  });
+
+  // The removal paths feed the ids they just removed back into the apply, so a
+  // user who was being SHADOWED by this group's mapping is re-resolved against
+  // the mappings that still cover them. Without that they are absent from the
+  // post-write member read and stay under-privileged until some unrelated
+  // write happens to converge them.
+  const shadowThenAdmin = () => {
+    store.roleMappings = [
+      {
+        id: "rm-shadow",
+        organizationId: ORG,
+        groupId: "g-a",
+        role: "member",
+        priority: 0,
+        createdAt: at(30),
+        updatedAt: at(30),
+      },
+      {
+        id: "rm-admin",
+        organizationId: ORG,
+        groupId: "g-b",
+        role: "admin",
+        priority: 1,
+        createdAt: at(31),
+        updatedAt: at(31),
+      },
+    ];
+    store.groupMembers.push(
+      {
+        groupId: "g-a",
+        userId: MEMBER,
+        createdByUserId: ADMIN,
+        createdAt: at(24),
+      },
+      {
+        groupId: "g-b",
+        userId: MEMBER,
+        createdByUserId: ADMIN,
+        createdAt: at(25),
+      },
+    );
+  };
+
+  it("UNSHADOWS a single remove: leaving the member-mapped group raises to admin", async () => {
+    shadowThenAdmin();
+    expect(roleOf(MEMBER)).toBe("member");
+
+    const res = await deleteMember("g-a", MEMBER);
+    expect(res.status).toBe(200);
+    expect(roleOf(MEMBER)).toBe("admin");
+    expect(memberAudits()).toHaveLength(1);
+    expect(memberAudits()[0]).toMatchObject({
+      metadata: {
+        targetUserId: MEMBER,
+        role: "admin",
+        previousRole: "member",
+        via: "role-mapping",
+        mappingId: "rm-admin",
+        groupId: "g-b",
+        trigger: "membership",
+      },
+    });
+  });
+
+  it("UNSHADOWS a replace-set that DROPS a user, down to the last member", async () => {
+    shadowThenAdmin();
+    // g-a keeps OWNER + ADMIN, neither of which the apply may touch — the
+    // dropped MEMBER is the only candidate, and only because the writer hands
+    // their id over.
+    const res = await putMembers("g-a", { userIds: [OWNER, ADMIN] });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ removed: 1 });
+    expect(roleOf(MEMBER)).toBe("admin");
+
+    // Again with the group emptied entirely: the removed ids are what keep the
+    // apply from short-circuiting on "this group has no members left".
+    const row = store.members.find((m) => m.userId === MEMBER);
+    if (row) row.role = "member";
+    store.groupMembers.push({
+      groupId: "g-a",
+      userId: MEMBER,
+      createdByUserId: ADMIN,
+      createdAt: at(26),
+    });
+    const cleared = await putMembers("g-a", { userIds: [] });
+    expect(cleared.status).toBe(200);
+    expect(membersOf("g-a")).toEqual([]);
+    expect(roleOf(MEMBER)).toBe("admin");
+  });
+
+  it("a no-delta replace-set opens no transaction and changes no roles", async () => {
+    mapGroupToAdmin("g-a");
+    const res = await putMembers("g-a", { userIds: [OWNER, ADMIN] });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ added: 0, removed: 0 });
+    expect(store.txCount).toBe(0);
+    expect(memberAudits()).toHaveLength(0);
+  });
+
+  it("deleting a mapped group cascades the mapping but never reverts roles", async () => {
+    mapGroupToAdmin("g-a");
+    expect((await putMember("g-a", MEMBER)).status).toBe(200);
+    expect(roleOf(MEMBER)).toBe("admin");
+
+    store.audits = [];
+    const res = await remove("g-a");
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ removedRoleMappings: 1 });
+    expect(store.roleMappings).toHaveLength(0);
+    expect(roleOf(MEMBER)).toBe("admin");
+    expect(memberAudits()).toHaveLength(0);
   });
 });

@@ -108,4 +108,5 @@ export type {
   AppPermissionDefinitionSummary,
 } from "@onecli/api/apps/app-permissions/types";
 export { apiGet, apiPost, apiPatch, apiPut, apiDelete } from "./client";
+export { ApiError } from "./client";
 export { queryKeys } from "./keys";

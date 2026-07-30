@@ -985,6 +985,8 @@ async fn handle_http_proxy(
     let mut resolved_body_transform: Option<crate::apps::BodyTransform> = None;
     // Granular-access policy of the connection that wins injection (if any).
     let mut resolved_session_policy: Option<serde_json::Value> = None;
+    // Provider of that connection — dispatches the resource-scope gate.
+    let mut resolved_provider: Option<String> = None;
     // Id of the connection that wins injection — same attribution law as
     // `resolved_session_policy`; unlike `connection_label` below, it MUST be
     // threaded (policy decisions bind to it).
@@ -1014,6 +1016,7 @@ async fn handle_http_proxy(
                 finalizer,
                 body_transform,
                 session_policy,
+                provider,
                 connection_id: winning_connection_id,
                 ..
             }) => {
@@ -1021,6 +1024,7 @@ async fn handle_http_proxy(
                 resolved_finalizer = finalizer;
                 resolved_body_transform = body_transform;
                 resolved_session_policy = session_policy;
+                resolved_provider = Some(provider);
                 resolved_connection_id = winning_connection_id;
             }
             Ok(AppConnectionResult::Ambiguous { connections }) => {
@@ -1104,6 +1108,7 @@ async fn handle_http_proxy(
         finalizer: resolved_finalizer,
         body_transform: resolved_body_transform,
         claim_token: resolved.claim_token,
+        provider: resolved_provider,
         session_policy: resolved_session_policy,
         winning_connection_id: resolved_connection_id,
         budget_bindings: resolved.budget_bindings,

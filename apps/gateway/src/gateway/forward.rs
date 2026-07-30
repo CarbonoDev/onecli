@@ -169,6 +169,11 @@ pub(crate) async fn forward_request(
     // keeps streaming → zero overhead.
     let (capture, req) =
         if crate::policy_engine::needs_body_buffer(&rules.policy_rules_v2, policy_host)
+            || crate::policy_engine::needs_scope_body(
+                rules.provider.as_deref().unwrap_or(""),
+                host,
+                rules.session_policy.as_ref(),
+            )
             || hooks::needs_request_body(rules, host, method.as_str(), &path)
         {
             let (parts, incoming) = req.into_parts();
@@ -242,6 +247,30 @@ pub(crate) async fn forward_request(
         &rules.policy_rules_v2,
     )
     .await;
+
+    // ── Granular resource-scope gate (Tier 3b) ────────────────────────────────
+    // Tighten the engine's decision by the winning connection's granular scope
+    // (GitHub repositories / Dropbox folders). Run unconditionally on the final
+    // decision from EITHER engine — session policy is a property of the
+    // connection, not the rule generation, so it must enforce on legacy /
+    // pre-cutover projects too. A monotone tightening: an allow-family verdict
+    // for an out-of-scope or indeterminate resource becomes `Blocked`; an
+    // existing block is untouched. A scope block is authored by no rule, so it
+    // drops the matched-rule attribution.
+    let (decision, matched_rule) = {
+        let (decision, scope_blocked) = policy_engine::apply_resource_scope(
+            decision,
+            rules.provider.as_deref().unwrap_or(""),
+            host,
+            rules.session_policy.as_ref(),
+            &path,
+            &match_input,
+        );
+        if scope_blocked {
+            warn!(method = %method, url = %url, "BLOCKED by resource scope");
+        }
+        (decision, if scope_blocked { None } else { matched_rule })
+    };
 
     // ── Early return for block / rate-limit / default-deny (no body needed) ───
     match &decision {

@@ -23,6 +23,14 @@ export interface GranularAccessConfig {
   buildPolicy: (selectedItemIds: string[]) => Record<string, unknown>;
   getSelectedItems: (policy: Record<string, unknown>) => string[];
   itemLabel: { singular: string; plural: string };
+  /** Optional validator for free-text entries authored via the text-list path
+   * (providers whose resources aren't enumerated at connect time). Returns an
+   * error message for an entry the gateway parser could not enforce, or `null`
+   * when the entry is acceptable. Without it, an entry the parser can't match
+   * silently fail-closes (bricking the resource) or — worse — no-ops (a
+   * restriction the user believes is enforced), so covered providers must
+   * supply one. */
+  validateEntry?: (value: string) => string | null;
   Icon: ComponentType<{ className?: string }>;
   PolicyDialogContent?: ComponentType<PolicyDialogContentProps>;
   /** Optional override for the one-line access summary shown on the row.

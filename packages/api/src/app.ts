@@ -54,7 +54,11 @@ import { userRoutes } from "./routes/user";
 import { appRoutes } from "./routes/apps";
 import { connectionRoutes } from "./routes/connections";
 import { vaultRoutes } from "./routes/vaults";
-import { gatewayUrlRoutes, gatewayCaRoutes } from "./routes/gateway";
+import {
+  gatewayUrlRoutes,
+  gatewayCaRoutes,
+  clientCertRoutes,
+} from "./routes/gateway";
 import { containerConfigRoutes } from "./routes/container-config";
 import { countsRoutes } from "./routes/counts";
 import { skillRoutes } from "./routes/skill";
@@ -155,6 +159,7 @@ export const createApiApp = (
   app.route("/vaults", vaultRoutes());
   app.route("/gateway-url", gatewayUrlRoutes());
   app.route("/gateway", gatewayCaRoutes());
+  app.route("/gateway", clientCertRoutes());
   app.route("/container-config", containerConfigRoutes());
   app.route("/counts", countsRoutes());
   app.route("/skill", skillRoutes());

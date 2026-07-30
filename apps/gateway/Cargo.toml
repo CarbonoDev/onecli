@@ -32,8 +32,10 @@ x509-parser = "0.16"
 # WebSocket upstream TLS root certificates
 webpki-roots = "0.26"
 
-# Certificate generation
-rcgen = "0.13"
+# Certificate generation. `x509-parser` turns on
+# `CertificateSigningRequestParams::from_pem` (feature-gated, NOT in
+# defaults) — required to parse+verify inbound CSRs in `client_ca_authority.rs`.
+rcgen = { version = "0.13", features = ["x509-parser"] }
 
 # Cryptography (AES-256-GCM for secret decryption)
 ring = "0.17"

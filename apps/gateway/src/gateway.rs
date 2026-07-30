@@ -37,11 +37,12 @@ mod tunnel;
 mod websocket;
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use axum::extract::State;
+use axum::response::IntoResponse;
 use axum::Router;
 use hyper::body::Incoming;
 use hyper::server::conn::http1;
@@ -61,6 +62,7 @@ use crate::auth::AuthUser;
 use crate::ca::CertificateAuthority;
 use crate::cache::CacheStore;
 use crate::client_ca::{self, ClientIdentity, MtlsConfig};
+use crate::client_ca_authority::{self, ClientCa, SignCsrError};
 use crate::connect::{self, AppConnectionResult, ConnectError, PolicyEngine};
 use crate::db;
 use crate::inject;
@@ -125,6 +127,13 @@ pub(crate) struct GatewayState {
     pub vault_service: Arc<vault::VaultService>,
     /// Manual approval store for held requests.
     pub approval_store: Arc<dyn ApprovalStore>,
+    /// The client-certificate minting authority (Phase 2), when the gateway
+    /// is trusting its OWN generated client CA (see `main.rs`). `None` when
+    /// an operator has configured an externally managed `GATEWAY_CLIENT_CA`
+    /// trust anchor instead — minting against an unrelated locally-generated
+    /// CA would produce certificates nobody trusts, so `issue_client_cert`
+    /// returns 503 rather than silently minting from the wrong CA.
+    pub client_ca: Option<Arc<ClientCa>>,
 }
 
 // ── GatewayServer ───────────────────────────────────────────────────────
@@ -330,6 +339,7 @@ impl GatewayServer {
         cache: Arc<dyn CacheStore>,
         approval_store: Arc<dyn ApprovalStore>,
         mtls: Option<MtlsConfig>,
+        client_ca: Option<Arc<ClientCa>>,
     ) -> Result<Self> {
         let global_skip = std::env::var("GATEWAY_DANGER_ACCEPT_INVALID_CERTS").is_ok();
         let skip_verify_hosts = Arc::new(parse_skip_verify_hosts());
@@ -362,6 +372,7 @@ impl GatewayServer {
             cache,
             vault_service,
             approval_store,
+            client_ca,
         };
 
         Ok(Self {
@@ -441,6 +452,13 @@ impl GatewayServer {
                 "/v1/approvals/{id}/decision",
                 axum::routing::post(submit_approval_decision),
             )
+            // Internal (Node -> gateway): mint a client certificate from a
+            // CSR Node forwards. Guarded by X-Gateway-Secret, not session/API
+            // key auth — see `issue_client_cert`.
+            .route(
+                "/v1/internal/client-cert/issue",
+                axum::routing::post(issue_client_cert),
+            )
             // /api legacy routes (backwards compatibility)
             .route(
                 "/api/vault/{provider}/pair",
@@ -478,6 +496,10 @@ impl GatewayServer {
             .route(
                 "/api/approvals/{id}/decision",
                 axum::routing::post(submit_approval_decision),
+            )
+            .route(
+                "/api/internal/client-cert/issue",
+                axum::routing::post(issue_client_cert),
             );
 
         // Org-scoped routes are mounted via an edition-swapped seam
@@ -703,6 +725,181 @@ async fn invalidate_cache(
     }
     .instrument(span)
     .await
+}
+
+// ── Internal (Node -> gateway): client-certificate minting ──────────────
+
+/// Hard cap on the `POST /v1/internal/client-cert/issue` request body — a
+/// CSR (plus `host_id`/`spiffe_uri`/`lifetime_secs`) is a few KB at most even
+/// generously padded, nowhere near axum's much larger generic default body
+/// limit. Checked explicitly in `issue_client_cert` before the body is
+/// parsed.
+const MAX_CLIENT_CERT_REQUEST_BODY_BYTES: usize = 16 * 1024;
+
+/// Shared secret the internal gateway<->Node endpoints authenticate with,
+/// presented as the `X-Gateway-Secret` header. Read once. Mirrors
+/// `vault/onepassword_api.rs`'s outbound `internal_secret()` (same env var,
+/// opposite direction — this module CHECKS a value Node presents TO the
+/// gateway, rather than presenting one).
+fn internal_secret() -> &'static str {
+    static SECRET: OnceLock<String> = OnceLock::new();
+    SECRET.get_or_init(|| std::env::var("GATEWAY_INTERNAL_SECRET").unwrap_or_default())
+}
+
+/// Constant-time byte comparison (no data-dependent early exit once lengths
+/// match — only the accumulated OR of differences is inspected at the end).
+/// `ring::constant_time::verify_slices_are_equal` is deprecated upstream
+/// ("internal function, no side-channel promises"), so this is hand-rolled
+/// rather than built on it — the same approach Node's `timingSafeEqual`
+/// implements, mirrored here for the Rust side of this shared-secret check.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff: u8 = 0;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+/// Comparison against an explicit expected value, fail-closed when that
+/// value is empty. Mirrors `packages/api/src/middleware/internal-auth.ts`:
+/// an empty configured secret must reject EVERY caller (including one
+/// presenting an empty header) rather than "matching" on emptiness — an
+/// unconfigured secret is a misconfiguration, never an open door.
+///
+/// Split from `verify_internal_secret` (which reads the process-wide
+/// `OnceLock`-cached env var) purely so this fail-closed logic is directly
+/// unit-testable: `internal_secret()`'s cached value can only ever be set
+/// once per test binary, which makes it unsuitable for exercising multiple
+/// expected-secret scenarios from within the same process.
+fn verify_secret(provided: &str, expected: &str) -> bool {
+    !expected.is_empty() && constant_time_eq(provided.as_bytes(), expected.as_bytes())
+}
+
+/// Comparison against the configured secret — see `verify_secret` for the
+/// fail-closed rule this enforces.
+fn verify_internal_secret(provided: &str) -> bool {
+    verify_secret(provided, internal_secret())
+}
+
+/// Body of `POST /v1/internal/client-cert/issue`. `lifetime_secs` is
+/// optional — [`client_ca_authority::clamp_lifetime`] supplies the default
+/// (24h) and ceiling (7d).
+#[derive(serde::Deserialize)]
+struct IssueClientCertRequest {
+    host_id: String,
+    spiffe_uri: String,
+    csr_pem: String,
+    #[serde(default)]
+    lifetime_secs: Option<u64>,
+}
+
+#[derive(serde::Serialize)]
+struct IssueClientCertResponse {
+    cert_pem: String,
+    ca_pem: String,
+    serial_hex: String,
+    not_after_unix: i64,
+}
+
+/// `POST /v1/internal/client-cert/issue` (+ `/api` alias): mints a client
+/// certificate for `host_id`/`spiffe_uri` from a CSR Node forwards on an
+/// agent's behalf.
+///
+/// Guarded by a shared secret (`X-Gateway-Secret`), NOT the session/API-key
+/// `AuthUser` extractor every other route in this file uses — Node is the
+/// only caller, and it has already authenticated the human/agent requesting
+/// enrollment before it ever calls here. The secret is checked BEFORE the
+/// body is parsed (raw `Bytes`, not an `axum::Json` extractor) so an
+/// unauthorized caller always gets 401 regardless of what it sent as a body
+/// — never a 400 that leaks "the body shape was wrong" to someone who
+/// doesn't hold the shared secret.
+///
+/// `sign_csr` re-parses and re-verifies the CSR itself — Node's own
+/// well-formedness check (if any) is never trusted as the security boundary;
+/// this endpoint is that boundary.
+async fn issue_client_cert(
+    State(state): State<GatewayState>,
+    headers: hyper::HeaderMap,
+    body: axum::body::Bytes,
+) -> impl axum::response::IntoResponse {
+    let provided = headers
+        .get("x-gateway-secret")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if !verify_internal_secret(provided) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            axum::Json(serde_json::json!({ "error": "unauthorized" })),
+        )
+            .into_response();
+    }
+
+    // Explicit, tight cap ahead of axum's own (much larger) default body
+    // limit: a CSR — even a generously padded one, e.g. an RSA-4096 key with
+    // extra attributes — is a few KB at most. Reject anything wildly outside
+    // that BEFORE spending effort on it, rather than relying solely on
+    // axum's generic default limit (which exists for arbitrary request
+    // bodies, not this specifically small shape).
+    if body.len() > MAX_CLIENT_CERT_REQUEST_BODY_BYTES {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            axum::Json(serde_json::json!({ "error": "request body too large" })),
+        )
+            .into_response();
+    }
+
+    let Some(client_ca) = state.client_ca.as_ref() else {
+        warn!("client-cert mint requested but no client-CA minting authority is configured");
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            axum::Json(
+                serde_json::json!({ "error": "client certificate minting is not available" }),
+            ),
+        )
+            .into_response();
+    };
+
+    let req: IssueClientCertRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                axum::Json(serde_json::json!({ "error": format!("invalid request body: {e}") })),
+            )
+                .into_response();
+        }
+    };
+
+    let lifetime = client_ca_authority::clamp_lifetime(req.lifetime_secs);
+
+    match client_ca.sign_csr(&req.host_id, &req.spiffe_uri, &req.csr_pem, lifetime) {
+        Ok(issued) => (
+            StatusCode::OK,
+            axum::Json(IssueClientCertResponse {
+                cert_pem: issued.cert_pem,
+                ca_pem: client_ca.ca_cert_pem(),
+                serial_hex: issued.serial_hex,
+                not_after_unix: issued.not_after_unix,
+            }),
+        )
+            .into_response(),
+        Err(SignCsrError::BadCsr(msg)) => (
+            StatusCode::BAD_REQUEST,
+            axum::Json(serde_json::json!({ "error": format!("invalid CSR: {msg}") })),
+        )
+            .into_response(),
+        Err(SignCsrError::Sign(err)) => {
+            warn!(error = ?err, "client-cert signing failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                axum::Json(serde_json::json!({ "error": "signing failed" })),
+            )
+                .into_response()
+        }
+    }
 }
 
 /// Query parameters for the pending approvals endpoint.
@@ -1516,6 +1713,7 @@ mod tests {
             cache,
             vault_service,
             approval_store,
+            client_ca: None,
         }
     }
 
@@ -1586,6 +1784,7 @@ mod tests {
             Some(&server_pem),
             Some(&server_key_pem),
             Some(&ca_pem),
+            None,
             &mitm_der,
             10255,
         )
@@ -1835,5 +2034,215 @@ mod tests {
             .body(())
             .unwrap();
         assert!(!is_http_proxy_request(&req));
+    }
+
+    // ── constant_time_eq / verify_secret ─────────────────────────────────
+
+    #[test]
+    fn constant_time_eq_equal_bytes_match() {
+        assert!(constant_time_eq(b"same-value", b"same-value"));
+    }
+
+    #[test]
+    fn constant_time_eq_different_bytes_do_not_match() {
+        assert!(!constant_time_eq(b"same-value", b"other-value"));
+    }
+
+    #[test]
+    fn constant_time_eq_different_lengths_do_not_match() {
+        assert!(!constant_time_eq(b"short", b"a-much-longer-value"));
+    }
+
+    #[test]
+    fn constant_time_eq_empty_slices_match() {
+        assert!(constant_time_eq(b"", b""));
+    }
+
+    #[test]
+    fn verify_secret_matches_the_correct_value() {
+        assert!(verify_secret("hunter2", "hunter2"));
+    }
+
+    #[test]
+    fn verify_secret_rejects_the_wrong_value() {
+        assert!(!verify_secret("wrong", "hunter2"));
+    }
+
+    /// An empty configured secret must reject EVERY caller, including one
+    /// presenting an empty header — never "match on emptiness". This is the
+    /// property the internal client-cert endpoint's fail-closed posture
+    /// depends on.
+    #[test]
+    fn verify_secret_empty_expected_rejects_everything() {
+        assert!(!verify_secret("", ""));
+        assert!(!verify_secret("anything", ""));
+    }
+
+    /// QA gap: the previous test only covers the empty-CONFIGURED-secret
+    /// case. The more common real-world bug is the other direction — the
+    /// server DOES have a real secret configured, and a caller sends an
+    /// empty-string header (a client that forgot to set it, or a proxy that
+    /// stripped the value but not the header). `constant_time_eq` already
+    /// short-circuits on the length mismatch, but that must never be
+    /// inferred from reading the code — assert it directly.
+    #[test]
+    fn verify_secret_empty_provided_against_a_real_configured_secret_is_rejected() {
+        assert!(!verify_secret("", "a-real-configured-secret"));
+    }
+
+    // ── issue_client_cert handler ─────────────────────────────────────────
+
+    const TEST_INTERNAL_SECRET: &str = "test-only-gateway-internal-secret";
+    static INIT_INTERNAL_SECRET: std::sync::Once = std::sync::Once::new();
+
+    /// Pin `GATEWAY_INTERNAL_SECRET` to one fixed known value for every test
+    /// below that exercises `issue_client_cert`'s auth check.
+    ///
+    /// Safe under `cargo test`'s default parallelism even though
+    /// `internal_secret()`'s `OnceLock` can only be initialized once per
+    /// process: every caller of this function sets the SAME value before
+    /// touching the handler, so whichever test thread's env write wins the
+    /// race to initialize that `OnceLock`, the cached value is identical
+    /// either way.
+    fn ensure_internal_secret_configured() {
+        INIT_INTERNAL_SECRET.call_once(|| {
+            std::env::set_var("GATEWAY_INTERNAL_SECRET", TEST_INTERNAL_SECRET);
+        });
+    }
+
+    fn header_map_with_secret(secret: &str) -> hyper::HeaderMap {
+        let mut headers = hyper::HeaderMap::new();
+        headers.insert(
+            "x-gateway-secret",
+            hyper::header::HeaderValue::from_str(secret).expect("valid header value"),
+        );
+        headers
+    }
+
+    #[tokio::test]
+    async fn issue_client_cert_401s_without_the_secret_header() {
+        ensure_internal_secret_configured();
+        let state = test_gateway_state().await;
+        let resp = issue_client_cert(
+            State(state),
+            hyper::HeaderMap::new(),
+            axum::body::Bytes::from_static(b"{}"),
+        )
+        .await
+        .into_response();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn issue_client_cert_401s_with_the_wrong_secret() {
+        ensure_internal_secret_configured();
+        let state = test_gateway_state().await;
+        let resp = issue_client_cert(
+            State(state),
+            header_map_with_secret("not-the-right-secret"),
+            axum::body::Bytes::from_static(b"{}"),
+        )
+        .await
+        .into_response();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// QA gap: the server has a REAL, non-empty `GATEWAY_INTERNAL_SECRET`
+    /// configured (`ensure_internal_secret_configured` guarantees this for
+    /// every test in this file) — the caller is the one sending an
+    /// empty-string header value (present header, empty value; a caller that
+    /// forgot to set it, or a proxy that stripped the value but not the
+    /// header). Must still 401, exercised at the actual handler, not just
+    /// inferred from `verify_secret`'s pure-function test above.
+    #[tokio::test]
+    async fn issue_client_cert_401s_with_an_empty_secret_header_against_a_configured_secret() {
+        ensure_internal_secret_configured();
+        let state = test_gateway_state().await;
+        let resp = issue_client_cert(
+            State(state),
+            header_map_with_secret(""),
+            axum::body::Bytes::from_static(b"{}"),
+        )
+        .await
+        .into_response();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// FIX 3 (security review): an explicit cap ahead of axum's own default
+    /// body limit — the auth check (which never inspects the body) must not
+    /// mask this: a correctly authenticated caller sending an oversized body
+    /// still gets rejected, before any JSON parsing is attempted.
+    #[tokio::test]
+    async fn issue_client_cert_413s_on_an_oversized_body_even_with_the_right_secret() {
+        ensure_internal_secret_configured();
+        let state = test_gateway_state().await;
+        let oversized = axum::body::Bytes::from(vec![b'a'; MAX_CLIENT_CERT_REQUEST_BODY_BYTES + 1]);
+        let resp = issue_client_cert(
+            State(state),
+            header_map_with_secret(TEST_INTERNAL_SECRET),
+            oversized,
+        )
+        .await
+        .into_response();
+        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    /// A body right at the cap is NOT rejected by the size check (only
+    /// `> MAX`, matching the plan's "cap", not an off-by-one).
+    #[tokio::test]
+    async fn issue_client_cert_accepts_a_body_exactly_at_the_cap_past_the_size_check() {
+        ensure_internal_secret_configured();
+        let state = test_gateway_state().await;
+        // Right at the cap, but not valid JSON — proves the size check let
+        // it through (400 from the JSON parse), not a size rejection (413).
+        let mut body = vec![b' '; MAX_CLIENT_CERT_REQUEST_BODY_BYTES];
+        body[0] = b'{'; // still invalid JSON, deliberately, to isolate the check under test
+        let resp = issue_client_cert(
+            State(state),
+            header_map_with_secret(TEST_INTERNAL_SECRET),
+            axum::body::Bytes::from(body),
+        )
+        .await
+        .into_response();
+        assert_ne!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test]
+    async fn issue_client_cert_503s_when_no_minting_authority_is_configured() {
+        ensure_internal_secret_configured();
+        // `test_gateway_state()` leaves `client_ca: None` — the "operator set
+        // GATEWAY_CLIENT_CA, no matching key" case described on the field's
+        // doc comment and implemented in `main.rs`.
+        let state = test_gateway_state().await;
+        let resp = issue_client_cert(
+            State(state),
+            header_map_with_secret(TEST_INTERNAL_SECRET),
+            axum::body::Bytes::from_static(
+                br#"{"host_id":"h","spiffe_uri":"spiffe://onecli/host/h","csr_pem":"x"}"#,
+            ),
+        )
+        .await
+        .into_response();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn issue_client_cert_400s_on_malformed_json_with_a_valid_secret_and_authority() {
+        ensure_internal_secret_configured();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let authority = client_ca_authority::ClientCa::load_or_generate(tmp.path())
+            .await
+            .expect("client ca authority");
+        let mut state = test_gateway_state().await;
+        state.client_ca = Some(Arc::new(authority));
+
+        let resp = issue_client_cert(
+            State(state),
+            header_map_with_secret(TEST_INTERNAL_SECRET),
+            axum::body::Bytes::from_static(b"not json"),
+        )
+        .await
+        .into_response();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 }

@@ -55,6 +55,14 @@ pub(crate) struct SecretRow {
     pub metadata: Option<serde_json::Value>,
 }
 
+/// A budget row from the `budgets` table (cost cap on a secret for an org).
+#[derive(Debug, FromRow)]
+pub(crate) struct BudgetRow {
+    pub secret_id: String,
+    pub limit_cents: i32,
+    pub period: String,
+}
+
 /// A user row from the `users` table.
 #[derive(Debug, FromRow)]
 pub(crate) struct UserRow {
@@ -342,6 +350,73 @@ pub(crate) async fn find_secrets_by_org(
     .fetch_all(pool)
     .await
     .context("querying secrets by organization_id")
+}
+
+/// Load budgets for the given org and secret ids (host-matched metered LLM
+/// secrets). Returns one row per bound secret (0/1 in practice per host).
+pub(crate) async fn find_budgets_for_secrets(
+    pool: &PgPool,
+    organization_id: &str,
+    secret_ids: &[String],
+) -> Result<Vec<BudgetRow>> {
+    sqlx::query_as::<_, BudgetRow>(
+        r#"SELECT secret_id, limit_cents, period
+           FROM budgets
+           WHERE organization_id = $1 AND secret_id = ANY($2)"#,
+    )
+    .bind(organization_id)
+    .bind(secret_ids)
+    .fetch_all(pool)
+    .await
+    .context("querying budgets for secrets")
+}
+
+/// Read the durable accumulated spend (nano-dollars) for a `(secret, org,
+/// period)` window. `None` when the window has no recorded spend yet.
+pub(crate) async fn read_budget_spend(
+    pool: &PgPool,
+    secret_id: &str,
+    organization_id: &str,
+    period: &str,
+) -> Result<Option<i64>> {
+    let row: Option<(i64,)> = sqlx::query_as(
+        r#"SELECT spent_nanos FROM budget_spends
+           WHERE secret_id = $1 AND organization_id = $2 AND period = $3"#,
+    )
+    .bind(secret_id)
+    .bind(organization_id)
+    .bind(period)
+    .fetch_optional(pool)
+    .await
+    .context("reading budget spend")?;
+    Ok(row.map(|r| r.0))
+}
+
+/// Accumulate `delta_nanos` into the durable spend floor for a `(secret, org,
+/// period)` window and return the new total. The durable floor is rehydrated
+/// into the hot counter on cache miss so a flush can't silently refill a budget.
+pub(crate) async fn upsert_budget_spend(
+    pool: &PgPool,
+    secret_id: &str,
+    organization_id: &str,
+    period: &str,
+    delta_nanos: i64,
+) -> Result<i64> {
+    let row: (i64,) = sqlx::query_as(
+        r#"INSERT INTO budget_spends (secret_id, organization_id, period, spent_nanos, updated_at)
+           VALUES ($1, $2, $3, $4, NOW())
+           ON CONFLICT (secret_id, organization_id, period)
+           DO UPDATE SET spent_nanos = budget_spends.spent_nanos + $4, updated_at = NOW()
+           RETURNING spent_nanos"#,
+    )
+    .bind(secret_id)
+    .bind(organization_id)
+    .bind(period)
+    .bind(delta_nanos)
+    .fetch_one(pool)
+    .await
+    .context("upserting budget spend")?;
+    Ok(row.0)
 }
 
 /// Update a secret's encrypted value (used for token refresh).

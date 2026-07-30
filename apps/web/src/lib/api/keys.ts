@@ -106,6 +106,10 @@ export const queryKeys = {
     byProvider: (provider: string) =>
       [...queryKeys.appBlocklist.all(), provider] as const,
   },
+  budgets: {
+    all: () => ["budgets", ...scope()] as const,
+    list: () => [...queryKeys.budgets.all(), "list"] as const,
+  },
   billing: {
     all: () => ["billing", ...scope()] as const,
     planUsage: () => [...queryKeys.billing.all(), "planUsage"] as const,

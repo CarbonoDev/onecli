@@ -23,6 +23,7 @@ const getTabRoutes = (pathname: string): Record<string, string> => {
     apps: base,
     custom: `${base}/custom`,
     llms: `${base}/llms`,
+    budgets: `${base}/budgets`,
     vaults: `${base}/vaults`,
     connected: `${base}/connected`,
   };
@@ -32,6 +33,7 @@ const pathToTab = (pathname: string): string => {
   const segment = pathname.split("/connections")[1]?.replace(/^\//, "") || "";
   if (segment === "custom") return "custom";
   if (segment === "llms") return "llms";
+  if (segment === "budgets") return "budgets";
   if (segment === "vaults") return "vaults";
   if (segment === "connected") return "connected";
   return "apps";
@@ -61,6 +63,7 @@ export const ConnectionsTabs = ({
         apps: basePath,
         custom: `${basePath}/custom`,
         llms: `${basePath}/llms`,
+        budgets: `${basePath}/budgets`,
         vaults: `${basePath}/vaults`,
         connected: `${basePath}/connected`,
       }
@@ -104,6 +107,7 @@ export const ConnectionsTabs = ({
           <AnimatedTabTrigger value="apps">Apps</AnimatedTabTrigger>
           <AnimatedTabTrigger value="custom">Custom</AnimatedTabTrigger>
           <AnimatedTabTrigger value="llms">LLMs</AnimatedTabTrigger>
+          <AnimatedTabTrigger value="budgets">Budgets</AnimatedTabTrigger>
           {showVaults && (
             <AnimatedTabTrigger value="vaults">
               <span className="sm:hidden">Vaults</span>

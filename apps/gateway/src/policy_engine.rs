@@ -21,6 +21,7 @@ mod enforce;
 mod evaluate;
 mod inject_select;
 mod loaders;
+mod scope;
 mod types;
 
 // The corpus parity test lives in the PRIVATE tree (`src/ee/policy_engine/`)
@@ -34,3 +35,8 @@ mod oss_parity_test;
 
 pub(crate) use enforce::{evaluate, load_available_apps, load_connect_v2, needs_body_buffer};
 pub(crate) use inject_select::derive_inject_selection;
+// Tier 3b granular resource-scope enforcement: the request-time tightening gate
+// and its buffering predicate, applied in `gateway::forward` on the final
+// decision from either engine (independent of the v2 cutover — session policy
+// is a property of the connection, not the rule generation).
+pub(crate) use scope::{apply_resource_scope, needs_body as needs_scope_body};

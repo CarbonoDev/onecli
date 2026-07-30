@@ -745,8 +745,11 @@ impl PolicyEngine {
                         }
                         resolved_session_policy = session_policy;
                         resolved_connection_id = connection_id;
-                    }
-                    if resolved_provider.is_none() {
+                        // Attribute the provider dispatched to `apply_resource_scope`
+                        // to the SAME serving connection as its session_policy and
+                        // connection_id — mirroring the single-connection paths.
+                        // Setting it on the first-with-rules would decouple the
+                        // provider from the scope actually enforced.
                         resolved_provider = Some(provider);
                     }
                     match (earliest_expires_at, token_expires_at) {

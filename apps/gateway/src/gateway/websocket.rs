@@ -153,6 +153,23 @@ pub(super) async fn handle_websocket(
     )
     .await;
 
+    // Granular resource-scope gate (Tier 3b), applied for symmetry with
+    // `forward.rs` / defense-in-depth. No covered provider serves
+    // resource-addressed operations over WebSocket (GitHub is URL-only and has
+    // no repo-addressed WS surface; Dropbox has none), and a WS upgrade is a
+    // GET with no buffered body — so a Dropbox RPC scope would fail closed here
+    // rather than pass. WS blocks emit no telemetry, so the scope-block flag is
+    // not consumed.
+    let decision = crate::policy_engine::apply_resource_scope(
+        decision,
+        rules.provider.as_deref().unwrap_or(""),
+        host,
+        rules.session_policy.as_ref(),
+        &path,
+        &match_input,
+    )
+    .0;
+
     match &decision {
         PolicyDecision::BlockedByDefaultPolicy => {
             warn!(host = %host, path = %path, "WebSocket BLOCKED by default deny policy");

@@ -19,5 +19,12 @@ export const githubAppConfig: GranularAccessConfig = {
   buildPolicy: (repos) => (repos.length > 0 ? { repositories: repos } : {}),
   getSelectedItems: (policy) => (policy.repositories as string[]) ?? [],
   itemLabel: { singular: "repository", plural: "repositories" },
+  // Free-text authoring path (installations that grant all repos without an
+  // enumerated list). The gateway's `repo_in_scope` matches exactly
+  // `owner/repo`, so a bare repo name can never match (fail-closed brick).
+  validateEntry: (value) =>
+    /^[^/\s]+\/[^/\s]+$/.test(value)
+      ? null
+      : "Use owner/repo format (e.g. acme/app)",
   Icon: GitBranch,
 };

@@ -70,6 +70,11 @@ export const queryKeys = {
     byProvider: (provider: string) =>
       [...queryKeys.connections.all(), "provider", provider] as const,
   },
+  projects: {
+    all: () => ["projects", ...scope()] as const,
+    detail: (projectId: string) =>
+      [...queryKeys.projects.all(), projectId] as const,
+  },
   projectAccess: {
     all: () => ["project-access", ...scope()] as const,
     list: (projectId: string) =>

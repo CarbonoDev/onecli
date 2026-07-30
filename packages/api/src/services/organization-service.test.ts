@@ -14,6 +14,8 @@ interface MemberRow {
   userId: string;
   userEmail: string;
   role: string;
+  /** Absent on the provisioning writes; Prisma defaults it to "active". */
+  status?: string;
 }
 interface ProjectRow {
   id: string;
@@ -23,6 +25,17 @@ interface ProjectRow {
   createdByUserId: string | null;
   createdByUserEmail: string | null;
   seq: number;
+}
+interface BindingRow {
+  projectId: string;
+  /** Exactly one of userId/groupId, as the DB CHECK requires. */
+  userId?: string;
+  groupId?: string;
+  role: string;
+}
+interface GroupMemberRow {
+  groupId: string;
+  userId: string;
 }
 interface ApiKeyRow {
   key: string;
@@ -36,99 +49,208 @@ const store = vi.hoisted(() => ({
   orgs: [] as OrgRow[],
   members: [] as MemberRow[],
   projects: [] as ProjectRow[],
+  bindings: [] as BindingRow[],
+  groupMembers: [] as GroupMemberRow[],
   apiKeys: [] as ApiKeyRow[],
   seq: 0,
 }));
 
-vi.mock("@onecli/db", () => ({
-  db: {
-    organization: {
-      findUnique: async ({ where: { slug } }: { where: { slug: string } }) =>
-        store.orgs.find((o) => o.slug === slug) ?? null,
-      findUniqueOrThrow: async ({
-        where: { slug },
-      }: {
-        where: { slug: string };
-      }) => {
-        const org = store.orgs.find((o) => o.slug === slug);
-        if (!org) throw new Error(`org ${slug} not found`);
-        return org;
-      },
-      create: async ({ data }: { data: OrgRow }) => {
-        if (store.orgs.some((o) => o.slug === data.slug)) {
-          throw new Error("unique constraint: organization.slug");
-        }
-        const org: OrgRow = { id: data.id, slug: data.slug, name: data.name };
-        store.orgs.push(org);
-        return org;
-      },
-    },
-    organizationMember: {
-      upsert: async ({
-        where: { organizationId_userId },
-        create,
-      }: {
-        where: {
-          organizationId_userId: { organizationId: string; userId: string };
-        };
-        create: MemberRow;
-      }) => {
-        const existing = store.members.find(
-          (m) =>
-            m.organizationId === organizationId_userId.organizationId &&
-            m.userId === organizationId_userId.userId,
+vi.mock("@onecli/db", () => {
+  /** The subset of the Prisma project `where` shapes these helpers build. */
+  interface BindingClause {
+    userId?: string;
+    group?: { members: { some: { userId: string } } };
+  }
+  interface ProjectWhere {
+    id?: { not: string };
+    organizationId?: string;
+    createdByUserId?: string;
+    organization?: {
+      members: { some: { userId: string; status?: { not?: string } } };
+    };
+    accessBindings?: { some: { OR: BindingClause[] } };
+    OR?: ProjectWhere[];
+  }
+
+  /** A binding on `projectId` satisfying any clause — direct or via a group. */
+  const matchesBinding = (projectId: string, clauses: BindingClause[]) =>
+    clauses.some((clause) => {
+      if (clause.userId !== undefined) {
+        return store.bindings.some(
+          (b) => b.projectId === projectId && b.userId === clause.userId,
         );
-        if (existing) return existing;
-        store.members.push(create);
-        return create;
+      }
+      const userId = clause.group?.members.some.userId;
+      if (userId === undefined) return false;
+      return store.bindings.some(
+        (b) =>
+          b.projectId === projectId &&
+          b.groupId !== undefined &&
+          store.groupMembers.some(
+            (gm) => gm.groupId === b.groupId && gm.userId === userId,
+          ),
+      );
+    });
+
+  const matchesProject = (p: ProjectRow, where: ProjectWhere): boolean => {
+    if (where.id?.not !== undefined && p.id === where.id.not) return false;
+    if (
+      where.organizationId !== undefined &&
+      p.organizationId !== where.organizationId
+    )
+      return false;
+    if (
+      where.createdByUserId !== undefined &&
+      p.createdByUserId !== where.createdByUserId
+    )
+      return false;
+    if (where.organization) {
+      const { userId, status } = where.organization.members.some;
+      const membership = store.members.find(
+        (m) => m.organizationId === p.organizationId && m.userId === userId,
+      );
+      if (!membership) return false;
+      if (
+        status?.not !== undefined &&
+        (membership.status ?? "active") === status.not
+      )
+        return false;
+    }
+    if (
+      where.accessBindings &&
+      !matchesBinding(p.id, where.accessBindings.some.OR)
+    )
+      return false;
+    if (where.OR && !where.OR.some((sub) => matchesProject(p, sub)))
+      return false;
+    return true;
+  };
+
+  return {
+    db: {
+      organization: {
+        findUnique: async ({ where: { slug } }: { where: { slug: string } }) =>
+          store.orgs.find((o) => o.slug === slug) ?? null,
+        findUniqueOrThrow: async ({
+          where: { slug },
+        }: {
+          where: { slug: string };
+        }) => {
+          const org = store.orgs.find((o) => o.slug === slug);
+          if (!org) throw new Error(`org ${slug} not found`);
+          return org;
+        },
+        create: async ({ data }: { data: OrgRow }) => {
+          if (store.orgs.some((o) => o.slug === data.slug)) {
+            throw new Error("unique constraint: organization.slug");
+          }
+          const org: OrgRow = { id: data.id, slug: data.slug, name: data.name };
+          store.orgs.push(org);
+          return org;
+        },
+      },
+      organizationMember: {
+        upsert: async ({
+          where: { organizationId_userId },
+          create,
+        }: {
+          where: {
+            organizationId_userId: { organizationId: string; userId: string };
+          };
+          create: MemberRow;
+        }) => {
+          const existing = store.members.find(
+            (m) =>
+              m.organizationId === organizationId_userId.organizationId &&
+              m.userId === organizationId_userId.userId,
+          );
+          if (existing) return existing;
+          store.members.push(create);
+          return create;
+        },
+        findFirst: async ({
+          where,
+        }: {
+          where: { userId: string; status?: { not?: string } };
+        }) =>
+          store.members.find(
+            (m) =>
+              m.userId === where.userId &&
+              !(
+                where.status?.not !== undefined &&
+                (m.status ?? "active") === where.status.not
+              ),
+          ) ?? null,
+      },
+      project: {
+        findFirst: async ({
+          where,
+          select,
+        }: {
+          where: ProjectWhere;
+          select?: { id?: boolean; organizationId?: boolean };
+        }) => {
+          const row =
+            store.projects
+              .filter((p) => matchesProject(p, where))
+              .sort((a, b) => a.seq - b.seq)[0] ?? null;
+          // Honour Prisma's `select` so callers see the same narrow shape they
+          // asked for (these helpers only ever select id + organizationId).
+          if (!row || !select) return row;
+          const picked: Record<string, unknown> = {};
+          if (select.id) picked.id = row.id;
+          if (select.organizationId) picked.organizationId = row.organizationId;
+          return picked;
+        },
+        create: async ({
+          data,
+        }: {
+          data: Omit<ProjectRow, "seq"> & {
+            accessBindings?: { create: { userId: string; role: string } };
+          };
+        }) => {
+          if (
+            store.projects.some(
+              (p) =>
+                p.organizationId === data.organizationId &&
+                p.slug === data.slug,
+            )
+          ) {
+            throw new Error("unique constraint: (organizationId, slug)");
+          }
+          const project: ProjectRow = { ...data, seq: store.seq++ };
+          store.projects.push(project);
+          // Materialize the nested binding write so the binding-fallback arm of
+          // findUserDefaultProject has something real to find.
+          if (data.accessBindings) {
+            store.bindings.push({
+              projectId: data.id,
+              ...data.accessBindings.create,
+            });
+          }
+          return project;
+        },
+      },
+      apiKey: {
+        findFirst: async ({
+          where: { organizationId, scope },
+        }: {
+          where: { organizationId: string; scope: string };
+        }) =>
+          store.apiKeys.find(
+            (k) => k.organizationId === organizationId && k.scope === scope,
+          ) ?? null,
+        create: async ({ data }: { data: ApiKeyRow }) => {
+          if (store.apiKeys.some((k) => k.key === data.key)) {
+            throw new Error("unique constraint: api_key.key");
+          }
+          store.apiKeys.push(data);
+          return data;
+        },
       },
     },
-    project: {
-      findFirst: async ({
-        where: { organizationId, createdByUserId },
-      }: {
-        where: { organizationId: string; createdByUserId: string };
-      }) =>
-        store.projects
-          .filter(
-            (p) =>
-              p.organizationId === organizationId &&
-              p.createdByUserId === createdByUserId,
-          )
-          .sort((a, b) => a.seq - b.seq)[0] ?? null,
-      create: async ({ data }: { data: Omit<ProjectRow, "seq"> }) => {
-        if (
-          store.projects.some(
-            (p) =>
-              p.organizationId === data.organizationId && p.slug === data.slug,
-          )
-        ) {
-          throw new Error("unique constraint: (organizationId, slug)");
-        }
-        const project: ProjectRow = { ...data, seq: store.seq++ };
-        store.projects.push(project);
-        return project;
-      },
-    },
-    apiKey: {
-      findFirst: async ({
-        where: { organizationId, scope },
-      }: {
-        where: { organizationId: string; scope: string };
-      }) =>
-        store.apiKeys.find(
-          (k) => k.organizationId === organizationId && k.scope === scope,
-        ) ?? null,
-      create: async ({ data }: { data: ApiKeyRow }) => {
-        if (store.apiKeys.some((k) => k.key === data.key)) {
-          throw new Error("unique constraint: api_key.key");
-        }
-        store.apiKeys.push(data);
-        return data;
-      },
-    },
-  },
-}));
+  };
+});
 
 vi.mock("../lib/logger", () => ({
   logger: { warn: () => {}, info: () => {}, error: () => {} },
@@ -136,6 +258,7 @@ vi.mock("../lib/logger", () => ({
 
 import {
   joinSharedOrganization,
+  hasResolvableProjectExcluding,
   SHARED_ORG_SLUG,
 } from "./organization-service";
 
@@ -143,11 +266,27 @@ beforeEach(() => {
   store.orgs = [];
   store.members = [];
   store.projects = [];
+  store.bindings = [];
+  store.groupMembers = [];
   store.apiKeys = [];
   store.seq = 0;
   delete process.env.ONECLI_ORG_API_KEY;
   delete process.env.ONECLI_ORG_API_KEY_FILE;
 });
+
+const ORG = "org-host";
+const HOST = "user-host";
+const GUEST = "user-guest";
+
+const seedOrgWithMember = (userId: string, role = "member") => {
+  store.orgs.push({ id: ORG, slug: "host", name: "Host" });
+  store.members.push({
+    organizationId: ORG,
+    userId,
+    userEmail: `${userId}@example.com`,
+    role,
+  });
+};
 
 describe("joinSharedOrganization", () => {
   it("creates the one shared org and a project for the first user", async () => {
@@ -255,5 +394,121 @@ describe("bootstrap org API key (via joinSharedOrganization)", () => {
     await expect(
       joinSharedOrganization("user-aaaaaaaa", "a@example.com"),
     ).rejects.toThrow(/ONECLI_ORG_API_KEY/);
+  });
+});
+
+// `hasResolvableProjectExcluding` is `deleteProject`'s lockout oracle, and it
+// must answer exactly what `findUserDefaultProject` would find once the named
+// project is gone. Every arm below has a twin above; drift between the two is a
+// lockout (the user resolves no project and gets a 401 on every request).
+
+describe("hasResolvableProjectExcluding", () => {
+  const seedProject = (
+    id: string,
+    createdByUserId: string | null,
+    organizationId = ORG,
+  ) => {
+    store.projects.push({
+      id,
+      name: "Default",
+      slug: id,
+      organizationId,
+      createdByUserId,
+      createdByUserEmail: null,
+      seq: store.seq++,
+    });
+  };
+
+  it("is false when the excluded project is the user's only one", async () => {
+    seedOrgWithMember(GUEST);
+    seedProject("proj-only", GUEST);
+    store.bindings.push({
+      projectId: "proj-only",
+      userId: GUEST,
+      role: "owner",
+    });
+
+    await expect(
+      hasResolvableProjectExcluding(GUEST, "proj-only"),
+    ).resolves.toBe(false);
+  });
+
+  it("is true through a project they CREATED (arm 1)", async () => {
+    seedOrgWithMember(GUEST);
+    seedProject("proj-a", GUEST);
+    seedProject("proj-b", GUEST);
+
+    await expect(hasResolvableProjectExcluding(GUEST, "proj-a")).resolves.toBe(
+      true,
+    );
+  });
+
+  it("is true through a DIRECT binding on another project (arm 2)", async () => {
+    seedOrgWithMember(HOST, "owner");
+    store.members.push({
+      organizationId: ORG,
+      userId: GUEST,
+      userEmail: "guest@example.com",
+      role: "member",
+    });
+    seedProject("proj-a", HOST);
+    seedProject("proj-b", HOST);
+    store.bindings.push({ projectId: "proj-a", userId: GUEST, role: "member" });
+    store.bindings.push({ projectId: "proj-b", userId: GUEST, role: "member" });
+
+    await expect(hasResolvableProjectExcluding(GUEST, "proj-a")).resolves.toBe(
+      true,
+    );
+  });
+
+  it("is true through a GROUP binding on another project (arm 2)", async () => {
+    seedOrgWithMember(HOST, "owner");
+    store.members.push({
+      organizationId: ORG,
+      userId: GUEST,
+      userEmail: "guest@example.com",
+      role: "member",
+    });
+    seedProject("proj-a", HOST);
+    seedProject("proj-b", HOST);
+    store.bindings.push({ projectId: "proj-a", userId: GUEST, role: "member" });
+    store.bindings.push({
+      projectId: "proj-b",
+      groupId: "g-1",
+      role: "member",
+    });
+    store.groupMembers.push({ groupId: "g-1", userId: GUEST });
+
+    await expect(hasResolvableProjectExcluding(GUEST, "proj-a")).resolves.toBe(
+      true,
+    );
+    // ...and the group path is the ONLY one left, so removing it flips it.
+    store.groupMembers = [];
+    await expect(hasResolvableProjectExcluding(GUEST, "proj-a")).resolves.toBe(
+      false,
+    );
+  });
+
+  it("ignores a project in an org the user is only SUSPENDED in", async () => {
+    seedOrgWithMember(GUEST);
+    const suspended = store.members.find((m) => m.userId === GUEST);
+    if (suspended) suspended.status = "suspended";
+    seedProject("proj-a", GUEST);
+    seedProject("proj-b", GUEST);
+
+    await expect(hasResolvableProjectExcluding(GUEST, "proj-a")).resolves.toBe(
+      false,
+    );
+  });
+
+  it("ignores projects of an org the user does not belong to", async () => {
+    seedOrgWithMember(GUEST);
+    seedProject("proj-a", GUEST);
+    store.orgs.push({ id: "org-other", slug: "other", name: "Other" });
+    seedProject("proj-foreign", GUEST, "org-other");
+
+    await expect(hasResolvableProjectExcluding(GUEST, "proj-a")).resolves.toBe(
+      false,
+    );
   });
 });

@@ -123,7 +123,7 @@ export const orgGroupRoutes = () => {
     const groupId = c.req.param("groupId");
 
     const result = await withAudit(
-      () => deleteOrgGroup(auth.organizationId, groupId),
+      () => deleteOrgGroup(auth.organizationId, auth.userId, groupId),
       (deleted) => ({
         ...auditBase(c),
         action: AUDIT_ACTIONS.DELETE,
@@ -133,6 +133,7 @@ export const orgGroupRoutes = () => {
           name: deleted.name,
           removedMembers: deleted.removedMembers,
           removedProjectBindings: deleted.removedProjectBindings,
+          removedRoleMappings: deleted.removedRoleMappings,
         },
       }),
     );
@@ -205,7 +206,8 @@ export const orgGroupRoutes = () => {
     const userId = c.req.param("userId");
 
     const result = await withAudit(
-      () => removeOrgGroupMember(auth.organizationId, groupId, userId),
+      () =>
+        removeOrgGroupMember(auth.organizationId, auth.userId, groupId, userId),
       (r) => ({
         ...auditBase(c),
         action: AUDIT_ACTIONS.UPDATE,

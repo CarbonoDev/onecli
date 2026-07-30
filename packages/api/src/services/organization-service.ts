@@ -87,6 +87,50 @@ export const findUserDefaultProject = async (
 };
 
 /**
+ * Whether `userId` would still resolve SOME project if `excludeProjectId`
+ * disappeared — the delete guard's lockout oracle
+ * (`deleteProject`, project-service).
+ *
+ * THESE TWO MUST AGREE: this is exactly `findUserDefaultProject`'s disjunction
+ * (created-by-them, OR bound directly / through a group), fenced to orgs the
+ * user is an ACTIVE member of, minus the project about to be deleted. It lives
+ * here rather than in project-service precisely so the two predicates stay in
+ * sync — drift between them is a lockout: a user whose last project is deleted
+ * resolves no project at all, and session auth then 401s them everywhere.
+ *
+ * Both arms are folded into one `OR` (unlike the ordered two-query fallback
+ * above) because only existence matters here, never which project wins.
+ */
+export const hasResolvableProjectExcluding = async (
+  userId: string,
+  excludeProjectId: string,
+): Promise<boolean> => {
+  const inActiveMemberOrg = {
+    organization: { members: { some: { userId, ...activeMembershipWhere } } },
+  };
+
+  const row = await db.project.findFirst({
+    where: {
+      ...inActiveMemberOrg,
+      id: { not: excludeProjectId },
+      OR: [
+        { createdByUserId: userId },
+        {
+          accessBindings: {
+            some: {
+              OR: [{ userId }, { group: { members: { some: { userId } } } }],
+            },
+          },
+        },
+      ],
+    },
+    select: { id: true },
+  });
+
+  return row !== null;
+};
+
+/**
  * The nested-write seeds every user-facing project is born with: one API
  * key + the default agent. The single definition all provision sites
  * spread into their `project.create` data (bootstrap, project creation,

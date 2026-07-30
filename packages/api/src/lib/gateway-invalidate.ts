@@ -24,8 +24,13 @@ export const invalidateGatewayCache = (request: Request) => {
 
 /**
  * Flush the gateway's cached config for specific API keys directly. Use this
- * when the keys are about to be — or have just been — deleted, so they can no
- * longer be looked up from the database: capture them first, then flush.
+ * when the keys are about to be deleted, so they can no longer be looked up
+ * from the database: capture them, flush, THEN delete.
+ *
+ * The order is load-bearing. The gateway authenticates `/v1/cache/invalidate`
+ * by resolving the bearer through an uncached `find_api_key` query, so a key
+ * that has already been deleted cannot flush its own entry — the request just
+ * 401s and the rejection is swallowed.
  */
 export const invalidateGatewayCacheForKeys = (keys: string[]) => {
   for (const key of keys) {

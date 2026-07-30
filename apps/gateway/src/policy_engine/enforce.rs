@@ -242,9 +242,8 @@ mod tests {
             project_id: Some("p1".to_string()),
             organization_id: Some("o1".to_string()),
             agent_id: Some("a1".to_string()),
-            agent_name: None,
-            agent_identifier: None,
             agent_token: Some("t".to_string()),
+            ..Default::default()
         }
     }
 

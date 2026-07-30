@@ -36,8 +36,9 @@ mod transforms;
 mod tunnel;
 mod websocket;
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use axum::extract::State;
@@ -47,8 +48,10 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
-use tokio::net::{TcpListener, TcpStream};
-use tokio_rustls::TlsConnector;
+use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::net::TcpListener;
+use tokio::time::timeout;
+use tokio_rustls::{TlsAcceptor, TlsConnector};
 use tower::ServiceExt;
 use tower_http::cors::CorsLayer;
 use tracing::{debug, info, info_span, warn, Instrument};
@@ -57,20 +60,29 @@ use crate::approval::{ApprovalDecision, ApprovalStore, APPROVAL_TIMEOUT_SECS};
 use crate::auth::AuthUser;
 use crate::ca::CertificateAuthority;
 use crate::cache::CacheStore;
+use crate::client_ca::{self, ClientIdentity, MtlsConfig};
 use crate::connect::{self, AppConnectionResult, ConnectError, PolicyEngine};
 use crate::db;
 use crate::inject;
 use crate::vault;
 
-/// Pause before retrying a failed `accept`, so a persistent error (a truly
-/// exhausted fd table) cannot spin the loop at full tilt.
-const ACCEPT_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(100);
+/// Cap the client TLS handshake on the mTLS listener so a stalled or hostile
+/// ClientHello can't hold a connection task (and, in effect, the socket) open
+/// indefinitely.
+const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Backoff after a recoverable `accept()` error (e.g. EMFILE under fd
+/// pressure) before retrying. Both listeners run under the same
+/// `tokio::try_join!` in `run()`, so an unhandled error from one accept loop
+/// would cancel the other — this keeps a transient error confined to its own
+/// listener instead.
+const ACCEPT_RETRY_DELAY: Duration = Duration::from_millis(100);
 
 // ── GatewayState ───────────────────────────────────────────────────────
 
 /// Context for a proxied request, resolved at CONNECT time.
 /// Wrapped in `Arc` and shared across all requests within a MITM session.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub(crate) struct ProxyContext {
     pub project_id: Option<String>,
     pub organization_id: Option<String>,
@@ -78,6 +90,13 @@ pub(crate) struct ProxyContext {
     pub agent_name: Option<String>,
     pub agent_identifier: Option<String>,
     pub agent_token: Option<String>,
+    /// Identity extracted from the client's mTLS certificate, when the
+    /// connection came in on the mTLS listener. Phase 1 only threads and logs
+    /// this (the log statements read the identity before it's moved in here)
+    /// — it is never compared against `agent_token`; Phase 2 is the first
+    /// reader of the field itself, hence the lint allowance below.
+    #[allow(dead_code)]
+    pub client_identity: Option<Arc<ClientIdentity>>,
 }
 
 /// Shared state for the gateway, passed to all request handlers.
@@ -113,6 +132,13 @@ pub(crate) struct GatewayState {
 pub struct GatewayServer {
     state: GatewayState,
     port: u16,
+    /// `None` when `GATEWAY_MTLS_PORT` is unset — the gateway then runs
+    /// exactly as it did before mTLS support existed.
+    mtls: Option<MtlsConfig>,
+    /// Bind address for the plaintext listener. Defaults to `0.0.0.0`
+    /// (`GATEWAY_PLAIN_BIND`) — see the warning in `new()` about what
+    /// narrowing it costs when mTLS is also enabled.
+    plain_bind: IpAddr,
 }
 
 /// Build the HTTP client used for upstream requests.
@@ -247,6 +273,35 @@ fn parse_skip_verify_hosts() -> Vec<String> {
         .collect()
 }
 
+/// Parse an already-read `GATEWAY_PLAIN_BIND` value (`None` when the var is
+/// unset) into a bind address, defaulting to `0.0.0.0` (unrestricted —
+/// today's behavior, unchanged unless the operator opts into narrowing it).
+///
+/// Fails closed: unset/empty stays the default, but a SET-and-unparseable
+/// value (a typo like `127.0.0.q`, or `localhost`, which isn't an IP literal)
+/// is an `Err`, not a silent fallback to the wide-open default. This is the
+/// one operator knob for restricting the always-open plaintext listener, so
+/// silently widening it on a typo would defeat the whole point of the knob.
+///
+/// No env access — that's `parse_plain_bind`'s job — so this is directly
+/// unit-testable, mirroring the `from_parts`/`from_env` split in `client_ca.rs`.
+fn parse_plain_bind_value(value: Option<&str>) -> Result<IpAddr> {
+    match value {
+        None => Ok(IpAddr::V4(Ipv4Addr::UNSPECIFIED)),
+        Some(s) if s.trim().is_empty() => Ok(IpAddr::V4(Ipv4Addr::UNSPECIFIED)),
+        Some(s) => s
+            .trim()
+            .parse()
+            .with_context(|| format!("GATEWAY_PLAIN_BIND {s:?} is not a valid IP address")),
+    }
+}
+
+/// Read `GATEWAY_PLAIN_BIND` from the environment and parse it via
+/// [`parse_plain_bind_value`].
+fn parse_plain_bind() -> Result<IpAddr> {
+    parse_plain_bind_value(std::env::var("GATEWAY_PLAIN_BIND").ok().as_deref())
+}
+
 /// Returns true if `host` matches any pattern in `patterns`.
 ///
 /// - `*.example.com` matches `sub.example.com` but NOT `example.com` itself.
@@ -266,6 +321,7 @@ fn host_matches_skip_verify(host: &str, patterns: &[String]) -> bool {
 }
 
 impl GatewayServer {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         ca: CertificateAuthority,
         port: u16,
@@ -273,7 +329,8 @@ impl GatewayServer {
         vault_service: Arc<vault::VaultService>,
         cache: Arc<dyn CacheStore>,
         approval_store: Arc<dyn ApprovalStore>,
-    ) -> Self {
+        mtls: Option<MtlsConfig>,
+    ) -> Result<Self> {
         let global_skip = std::env::var("GATEWAY_DANGER_ACCEPT_INVALID_CERTS").is_ok();
         let skip_verify_hosts = Arc::new(parse_skip_verify_hosts());
 
@@ -281,6 +338,17 @@ impl GatewayServer {
             warn!("GATEWAY_DANGER_ACCEPT_INVALID_CERTS is set: TLS verification disabled for ALL upstream hosts");
         } else if !skip_verify_hosts.is_empty() {
             info!(hosts = ?skip_verify_hosts.as_ref(), "TLS verification disabled for matched hosts (GATEWAY_SKIP_VERIFY_HOSTS)");
+        }
+
+        let plain_bind = parse_plain_bind()?;
+        if mtls.is_some() && plain_bind.is_unspecified() {
+            warn!(
+                "GATEWAY_MTLS_PORT is set but the plaintext listener is still bound to \
+                 0.0.0.0 — anyone who can reach that port bypasses certificate \
+                 authentication entirely. Set GATEWAY_PLAIN_BIND=127.0.0.1 to restrict it, \
+                 but note that loopback also breaks Docker-published browser -> gateway \
+                 vault/approval/cache calls, which arrive on the plaintext listener."
+            );
         }
 
         let state = GatewayState {
@@ -296,23 +364,18 @@ impl GatewayServer {
             approval_store,
         };
 
-        Self { state, port }
+        Ok(Self {
+            state,
+            port,
+            mtls,
+            plain_bind,
+        })
     }
 
-    /// Start the gateway TCP listener. Runs forever.
-    pub async fn run(&self) -> Result<()> {
-        let addr = SocketAddr::from(([0, 0, 0, 0], self.port));
-        let listener = TcpListener::bind(addr)
-            .await
-            .context("binding TCP listener")?;
-
-        // Report what we actually bound rather than what we asked for: with
-        // `--port 0` the OS assigns the port, and the requested address would
-        // report `:0` — leaving no way to discover where the gateway is listening.
-        let bound_addr = listener.local_addr().context("reading bound address")?;
-
-        info!(addr = %bound_addr, "listening for connections");
-
+    /// Build the Axum router for non-CONNECT routes (healthz, vault API,
+    /// approvals, org routes, ...). Shared by both listeners — the plaintext
+    /// one and, when configured, the mTLS one.
+    fn build_router(&self) -> Router {
         // CORS configuration for browser → gateway requests.
         // credentials: true requires explicit headers/methods (not wildcard *).
         let cors_layer = CorsLayer::new()
@@ -420,51 +483,167 @@ impl GatewayServer {
         // Org-scoped routes are mounted via an edition-swapped seam
         // (`ee/org_routes.rs` for cloud + onprem, an identity stub for OSS — see
         // `main.rs`), so the org handler never reaches the OSS build.
-        let axum_router = crate::org_routes::mount(axum_router)
+        crate::org_routes::mount(axum_router)
             .layer(cors_layer)
             .fallback(fallback)
-            .with_state(self.state.clone());
+            .with_state(self.state.clone())
+    }
 
-        let mut shutdown_signal = crate::shutdown::subscribe();
+    /// Start the gateway's TCP listener(s). Runs forever.
+    ///
+    /// Always binds the plaintext listener. When mTLS is configured, ALSO
+    /// binds the mTLS listener before either accept loop starts — so a bind
+    /// failure on either port aborts startup instead of leaving one listener
+    /// silently running without the other — then drives both accept loops
+    /// concurrently for the life of the process.
+    pub async fn run(&self) -> Result<()> {
+        let plain_addr = SocketAddr::new(self.plain_bind, self.port);
+        let plain_listener = TcpListener::bind(plain_addr)
+            .await
+            .context("binding plaintext TCP listener")?;
+        // Report what we actually bound rather than what we asked for: with
+        // `--port 0` the OS assigns the port, and the requested address would
+        // report `:0` — leaving no way to discover where the gateway is listening.
+        let plain_bound = plain_listener
+            .local_addr()
+            .context("reading bound plaintext address")?;
+        info!(addr = %plain_bound, "listening for plaintext connections");
 
-        loop {
-            let (stream, peer_addr) = tokio::select! {
-                accepted = listener.accept() => match accepted {
-                    Ok(conn) => conn,
-                    Err(e) => {
-                        // Accept failures are almost always transient and
-                        // self-healing (EMFILE clears as connections close,
-                        // ECONNABORTED is a client that gave up mid-handshake).
-                        // Propagating one would tear down every healthy
-                        // connection this proxy is carrying.
-                        warn!(error = %e, "accept failed; retrying");
-                        tokio::time::sleep(ACCEPT_RETRY_DELAY).await;
-                        continue;
-                    }
-                },
-                _ = shutdown_signal.wait() => break,
-            };
+        let mtls_listener = match &self.mtls {
+            Some(mtls) => {
+                let mtls_addr = SocketAddr::new(mtls.bind, mtls.port);
+                let listener = TcpListener::bind(mtls_addr)
+                    .await
+                    .context("binding mTLS TCP listener")?;
+                let mtls_bound = listener
+                    .local_addr()
+                    .context("reading bound mTLS address")?;
+                info!(addr = %mtls_bound, "listening for mTLS connections");
+                Some((listener, TlsAcceptor::from(Arc::clone(&mtls.server_config))))
+            }
+            None => None,
+        };
 
-            let state = self.state.clone();
-            let router = axum_router.clone();
-            let guard = crate::shutdown::task_guard();
+        let router = self.build_router();
+        let plain_loop = accept_loop(
+            plain_listener,
+            "plaintext",
+            router.clone(),
+            self.state.clone(),
+            None,
+        );
 
-            tokio::spawn(async move {
-                let _guard = guard;
-                if let Err(e) = handle_connection(stream, peer_addr, state, router).await {
-                    warn!(peer = %peer_addr, error = ?e, "connection error");
-                }
-            });
+        match mtls_listener {
+            Some((listener, acceptor)) => {
+                let mtls_loop =
+                    accept_loop(listener, "mTLS", router, self.state.clone(), Some(acceptor));
+                tokio::try_join!(plain_loop, mtls_loop)?;
+            }
+            None => plain_loop.await?,
         }
 
-        // Closing the port is what stops new work: anything that connects from
-        // here on is refused rather than accepted into a process on its way
-        // out. Dropped explicitly rather than at the end of the scope so the
-        // port is provably shut before the line below claims it is.
-        drop(listener);
-        info!("listener closed — draining connections");
         Ok(())
     }
+}
+
+/// Accept connections from `listener` forever, spawning a task per connection.
+/// `name` labels this listener in logs (`"plaintext"` or `"mTLS"`) so the two
+/// concurrent accept loops are distinguishable.
+///
+/// Stops accepting NEW connections once a shutdown signal arrives (breaking
+/// out of the loop below) — in-flight connections are tracked via a shutdown
+/// task guard and drained by `main`'s shutdown sequence, not by this loop.
+///
+/// When `tls` is set, the TLS handshake happens *inside* the spawned task —
+/// never in this loop — so one slow or hostile `ClientHello` can only stall
+/// its own connection, not every other pending accept.
+async fn accept_loop(
+    listener: TcpListener,
+    name: &'static str,
+    router: Router,
+    state: GatewayState,
+    tls: Option<TlsAcceptor>,
+) -> Result<()> {
+    let mut shutdown_signal = crate::shutdown::subscribe();
+
+    loop {
+        let (stream, peer_addr) = tokio::select! {
+            accepted = listener.accept() => match accepted {
+                Ok(pair) => pair,
+                Err(e) => {
+                    // Log-and-continue: a recoverable accept() error (EMFILE
+                    // under fd pressure, ECONNABORTED from a client that gave
+                    // up mid-handshake) must not propagate. Both listeners'
+                    // loops are driven by the same `tokio::try_join!` in
+                    // `run()`, so an `Err` here would cancel the OTHER loop
+                    // too, taking down a perfectly healthy listener over a
+                    // transient blip on this one.
+                    warn!(listener = name, error = %e, "accept() failed, retrying");
+                    tokio::time::sleep(ACCEPT_RETRY_DELAY).await;
+                    continue;
+                }
+            },
+            _ = shutdown_signal.wait() => break,
+        };
+
+        let state = state.clone();
+        let router = router.clone();
+        let tls = tls.clone();
+        let guard = crate::shutdown::task_guard();
+
+        tokio::spawn(async move {
+            let _guard = guard;
+            match tls {
+                Some(acceptor) => {
+                    let handshake: Result<_, anyhow::Error> = async {
+                        let tls_stream =
+                            timeout(TLS_HANDSHAKE_TIMEOUT, acceptor.accept(stream)).await??;
+                        Ok(tls_stream)
+                    }
+                    .await;
+
+                    let tls_stream = match handshake {
+                        Ok(s) => s,
+                        Err(e) => {
+                            warn!(peer = %peer_addr, error = ?e, "mTLS handshake rejected");
+                            return;
+                        }
+                    };
+
+                    // Read the peer's certificate chain before moving the
+                    // stream into `TokioIo` — `peer_certificates()` is only
+                    // reachable through the raw rustls connection.
+                    let client_identity = tls_stream
+                        .get_ref()
+                        .1
+                        .peer_certificates()
+                        .and_then(client_ca::identity_from_peer_certs)
+                        .map(Arc::new);
+
+                    if let Err(e) =
+                        handle_connection(tls_stream, peer_addr, state, router, client_identity)
+                            .await
+                    {
+                        warn!(peer = %peer_addr, error = ?e, "connection error");
+                    }
+                }
+                None => {
+                    if let Err(e) = handle_connection(stream, peer_addr, state, router, None).await
+                    {
+                        warn!(peer = %peer_addr, error = ?e, "connection error");
+                    }
+                }
+            }
+        });
+    }
+
+    // Closing the port is what stops new work: anything that connects from
+    // here on is refused rather than accepted into a process on its way out.
+    // Dropped explicitly rather than at the end of the scope so the port is
+    // provably shut before the line below claims it is.
+    drop(listener);
+    info!(listener = name, "listener closed — draining connections");
+    Ok(())
 }
 
 // ── Axum route handlers ─────────────────────────────────────────────────
@@ -715,12 +894,16 @@ fn is_http_proxy_request<T>(req: &Request<T>) -> bool {
 /// Uses a `service_fn` wrapper that intercepts CONNECT requests before they reach
 /// the Axum router (CONNECT URIs like `host:port` don't match Axum's path-based routing).
 /// All other HTTP routes (vault API, healthz, etc.) go through the Axum router.
-async fn handle_connection(
-    stream: TcpStream,
+async fn handle_connection<S>(
+    stream: S,
     peer_addr: SocketAddr,
     state: GatewayState,
     router: Router,
-) -> Result<()> {
+    client_identity: Option<Arc<ClientIdentity>>,
+) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
     let io = TokioIo::new(stream);
 
     let conn = http1::Builder::new()
@@ -731,11 +914,12 @@ async fn handle_connection(
             service_fn(move |req: Request<Incoming>| {
                 let state = state.clone();
                 let router = router.clone();
+                let client_identity = client_identity.clone();
                 async move {
                     if req.method() == Method::CONNECT {
-                        handle_connect(req, peer_addr, state).await
+                        handle_connect(req, peer_addr, state, client_identity).await
                     } else if is_http_proxy_request(&req) {
-                        handle_http_proxy(req, peer_addr, state).await
+                        handle_http_proxy(req, peer_addr, state, client_identity).await
                     } else {
                         // Axum handles all non-proxy routes (healthz, vault API, fallback)
                         let resp: Response<axum::body::Body> = router
@@ -773,6 +957,7 @@ async fn handle_connect(
     req: Request<Incoming>,
     peer_addr: SocketAddr,
     state: GatewayState,
+    client_identity: Option<Arc<ClientIdentity>>,
 ) -> Result<Response<axum::body::Body>, anyhow::Error> {
     let host = req
         .uri()
@@ -848,6 +1033,7 @@ async fn handle_connect(
         org_id = organization_id.as_deref().unwrap_or("-"),
         agent = agent_name.as_deref().unwrap_or("-"),
         agent_id = agent_id.as_deref().unwrap_or("-"),
+        client_identity = client_identity.as_deref().and_then(ClientIdentity::primary).unwrap_or("-"),
     );
 
     info!(
@@ -880,6 +1066,7 @@ async fn handle_connect(
         agent_name,
         agent_identifier,
         agent_token: agent_token.clone(),
+        client_identity,
     });
 
     // Taken here, before the spawn, so the session is tracked from the moment
@@ -943,6 +1130,7 @@ async fn handle_http_proxy(
     req: Request<Incoming>,
     peer_addr: SocketAddr,
     state: GatewayState,
+    client_identity: Option<Arc<ClientIdentity>>,
 ) -> Result<Response<axum::body::Body>, anyhow::Error> {
     let authority = req
         .uri()
@@ -1074,6 +1262,7 @@ async fn handle_http_proxy(
         org_id = resolved.organization_id.as_deref().unwrap_or("-"),
         agent = resolved.agent_name.as_deref().unwrap_or("-"),
         agent_id = resolved.agent_id.as_deref().unwrap_or("-"),
+        client_identity = client_identity.as_deref().and_then(ClientIdentity::primary).unwrap_or("-"),
     );
 
     info!(
@@ -1090,6 +1279,7 @@ async fn handle_http_proxy(
         agent_name: resolved.agent_name,
         agent_identifier: resolved.agent_identifier,
         agent_token,
+        client_identity,
     };
 
     let rules = mitm::ResolvedRules {
@@ -1268,6 +1458,215 @@ mod tests {
         );
     }
 
+    /// Build a `GatewayState` cheap enough for tests: a lazily-connected pool
+    /// (`connect_lazy` never actually dials — nothing exercised by these
+    /// tests touches the DB), an in-memory cache/approval store, and a local
+    /// `CryptoService` key. None of this is real credential material; it
+    /// exists only so the type checker is satisfied and `/healthz` (which
+    /// touches none of these fields) can be routed to through the real
+    /// `handle_connection` path.
+    async fn test_gateway_state() -> GatewayState {
+        use base64::Engine;
+
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://test:test@127.0.0.1/test")
+            .expect("lazy pool");
+        let crypto = Arc::new(
+            crate::crypto::CryptoService::from_base64_key(
+                &base64::engine::general_purpose::STANDARD.encode([0u8; 32]),
+            )
+            .expect("crypto"),
+        );
+        let onepassword = Arc::new(crate::vault::onepassword::OnePasswordVaultProvider::new(
+            pool.clone(),
+            Arc::clone(&crypto),
+        ));
+        let policy_engine = Arc::new(PolicyEngine {
+            pool: pool.clone(),
+            crypto: Arc::clone(&crypto),
+            onepassword: Arc::clone(&onepassword),
+        });
+        let bitwarden = crate::vault::bitwarden::BitwardenVaultProvider::new(
+            crate::vault::bitwarden::BitwardenConfig {
+                proxy_url: "wss://example.invalid".to_string(),
+            },
+            pool.clone(),
+            Arc::clone(&crypto),
+        );
+        let providers: Vec<Arc<dyn vault::VaultProvider>> = vec![Arc::new(bitwarden), onepassword];
+        let vault_service = Arc::new(vault::VaultService::new(providers, pool.clone()));
+        let cache = crate::cache::create_store().await.expect("cache store");
+        let approval_store = crate::approval::create_store()
+            .await
+            .expect("approval store");
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let ca = crate::ca::CertificateAuthority::load_or_generate(tmp.path())
+            .await
+            .expect("test ca");
+
+        GatewayState {
+            ca: Arc::new(ca),
+            http_client: build_http_client(false),
+            http_client_no_verify: build_http_client(true),
+            skip_verify_hosts: Arc::new(vec![]),
+            ws_connector: TlsConnector::from(build_ws_tls_config(false)),
+            ws_connector_no_verify: TlsConnector::from(build_ws_tls_config(true)),
+            policy_engine,
+            cache,
+            vault_service,
+            approval_store,
+        }
+    }
+
+    /// End-to-end proof that Phase 1 mTLS *threads* identity but does not
+    /// *enforce* on it: a client cert that verifies successfully is extracted
+    /// into a `ClientIdentity` (asserted below), but a plain `GET /healthz`
+    /// over that same connection still gets a normal 200 through the real
+    /// `handle_connection` path — nothing gates on the identity yet.
+    #[tokio::test]
+    async fn mtls_valid_cert_reaches_healthz_with_no_enforcement() {
+        static INIT: std::sync::Once = std::sync::Once::new();
+        INIT.call_once(|| {
+            let _ = rustls::crypto::ring::default_provider().install_default();
+        });
+
+        // Client CA + a leaf it signs.
+        let ca_key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).expect("ca key");
+        let mut ca_params = rcgen::CertificateParams::default();
+        ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        ca_params
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, "Test Client CA");
+        ca_params.not_before = time::OffsetDateTime::now_utc() - time::Duration::hours(1);
+        ca_params.not_after = time::OffsetDateTime::now_utc() + time::Duration::days(1);
+        let ca_cert = ca_params.self_signed(&ca_key).expect("self-sign ca");
+        let ca_pem = ca_cert.pem();
+
+        let leaf_key =
+            rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).expect("leaf key");
+        let mut leaf_params = rcgen::CertificateParams::default();
+        leaf_params
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, "agent-1");
+        leaf_params.not_before = time::OffsetDateTime::now_utc() - time::Duration::hours(1);
+        leaf_params.not_after = time::OffsetDateTime::now_utc() + time::Duration::hours(24);
+        let leaf_cert = leaf_params
+            .signed_by(&leaf_key, &ca_cert, &ca_key)
+            .expect("sign leaf");
+        let leaf_pem = leaf_cert.pem();
+        let leaf_key_pem = leaf_key.serialize_pem();
+
+        // The gateway's own mTLS listener cert (self-signed, "localhost").
+        let server_key =
+            rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).expect("server key");
+        let mut server_params =
+            rcgen::CertificateParams::new(vec!["localhost".to_string()]).expect("params");
+        server_params.not_before = time::OffsetDateTime::now_utc() - time::Duration::hours(1);
+        server_params.not_after = time::OffsetDateTime::now_utc() + time::Duration::days(1);
+        let server_cert = server_params
+            .self_signed(&server_key)
+            .expect("self-sign server");
+        let server_pem = server_cert.pem();
+        let server_key_pem = server_key.serialize_pem();
+        let server_der = server_cert.der().clone();
+
+        // A distinct CA standing in for "the gateway's MITM CA" — only used
+        // to satisfy `from_parts`'s signature; unrelated to the client CA above.
+        let mitm_key =
+            rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).expect("mitm key");
+        let mitm_cert = rcgen::CertificateParams::default()
+            .self_signed(&mitm_key)
+            .expect("self-sign mitm");
+        let mitm_der = mitm_cert.der().clone();
+
+        // Build the real ServerConfig through the same path main.rs uses.
+        let mtls = client_ca::MtlsConfig::from_parts(
+            Some("10256"),
+            Some(&server_pem),
+            Some(&server_key_pem),
+            Some(&ca_pem),
+            &mitm_der,
+            10255,
+        )
+        .expect("from_parts")
+        .expect("mtls configured");
+
+        // Client trusts the server's self-signed cert directly and presents
+        // the CA-signed leaf.
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(server_der).expect("trust server cert");
+        let mut key_reader = leaf_key_pem.as_bytes();
+        let client_key = rustls_pemfile::private_key(&mut key_reader)
+            .expect("parse client key")
+            .expect("client key present");
+        let mut cert_reader = leaf_pem.as_bytes();
+        let client_chain: Vec<_> = rustls_pemfile::certs(&mut cert_reader)
+            .collect::<Result<_, _>>()
+            .expect("client chain");
+        let client_config = Arc::new(
+            rustls::ClientConfig::builder()
+                .with_root_certificates(roots)
+                .with_client_auth_cert(client_chain, client_key)
+                .expect("client auth cert"),
+        );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+
+        let router = Router::new()
+            .route("/healthz", axum::routing::get(healthz))
+            .fallback(fallback);
+        let state = test_gateway_state().await;
+
+        let server_task = tokio::spawn(async move {
+            let (stream, peer_addr) = listener.accept().await.expect("accept");
+            let acceptor = TlsAcceptor::from(Arc::clone(&mtls.server_config));
+            let tls_stream = acceptor.accept(stream).await.expect("server handshake");
+
+            let client_identity = tls_stream
+                .get_ref()
+                .1
+                .peer_certificates()
+                .and_then(client_ca::identity_from_peer_certs)
+                .map(Arc::new);
+            assert!(client_identity.is_some(), "identity must be extracted");
+
+            handle_connection(tls_stream, peer_addr, state, router, client_identity).await
+        });
+
+        let client_stream = tokio::net::TcpStream::connect(addr).await.expect("connect");
+        let server_name = rustls::pki_types::ServerName::try_from("localhost").expect("name");
+        let mut tls_client = tokio_rustls::TlsConnector::from(client_config)
+            .connect(server_name, client_stream)
+            .await
+            .expect("client handshake");
+
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        tls_client
+            .write_all(b"GET /healthz HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .await
+            .expect("write request");
+
+        let mut response = Vec::new();
+        tls_client
+            .read_to_end(&mut response)
+            .await
+            .expect("read response");
+        let response_str = String::from_utf8_lossy(&response);
+        assert!(
+            response_str.starts_with("HTTP/1.1 200"),
+            "expected 200 OK (no enforcement in Phase 1), got: {response_str}"
+        );
+
+        server_task
+            .await
+            .expect("server task panicked")
+            .expect("connection handled");
+    }
+
     // ── strip_port ──────────────────────────────────────────────────────
 
     #[test]
@@ -1350,6 +1749,54 @@ mod tests {
     #[test]
     fn parse_skip_verify_empty_input() {
         assert!(parse_patterns("").is_empty());
+    }
+
+    // ── parse_plain_bind_value ───────────────────────────────────────────
+
+    #[test]
+    fn plain_bind_defaults_to_unspecified_when_unset() {
+        assert_eq!(
+            parse_plain_bind_value(None).unwrap(),
+            IpAddr::V4(Ipv4Addr::UNSPECIFIED)
+        );
+    }
+
+    #[test]
+    fn plain_bind_defaults_to_unspecified_when_empty() {
+        assert_eq!(
+            parse_plain_bind_value(Some("")).unwrap(),
+            IpAddr::V4(Ipv4Addr::UNSPECIFIED)
+        );
+        assert_eq!(
+            parse_plain_bind_value(Some("   ")).unwrap(),
+            IpAddr::V4(Ipv4Addr::UNSPECIFIED)
+        );
+    }
+
+    #[test]
+    fn plain_bind_parses_valid_ip() {
+        assert_eq!(
+            parse_plain_bind_value(Some("127.0.0.1")).unwrap(),
+            IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))
+        );
+    }
+
+    /// FIX 1: a set-but-unparseable value must fail closed (`Err`), not
+    /// silently fall back to the wide-open `0.0.0.0` default — that default
+    /// is exactly what this knob exists to let an operator narrow.
+    #[test]
+    fn plain_bind_unparseable_value_errs_naming_var_and_value() {
+        let err = parse_plain_bind_value(Some("127.0.0.q")).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("GATEWAY_PLAIN_BIND"), "message: {msg}");
+        assert!(msg.contains("127.0.0.q"), "message: {msg}");
+    }
+
+    #[test]
+    fn plain_bind_hostname_is_not_an_ip_literal_errs() {
+        // "localhost" is a valid hostname but not an IP literal — parsing it
+        // as an IpAddr must fail rather than silently resolve or default.
+        assert!(parse_plain_bind_value(Some("localhost")).is_err());
     }
 
     // ── is_http_proxy_request ──────────────────────────────────────────

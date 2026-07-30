@@ -10,6 +10,7 @@ mod auth;
 mod auth;
 
 mod ca;
+mod client_ca;
 
 #[cfg(not(edition_cloud))]
 mod cache;
@@ -239,6 +240,16 @@ async fn main() -> Result<()> {
     let ca = CertificateAuthority::load_or_generate(&data_dir).await?;
     info!("CA certificate loaded");
 
+    // mTLS is opt-in: unset GATEWAY_MTLS_PORT and this is a no-op (full
+    // backward compatibility). When it IS requested, any load failure here
+    // must abort startup — the gateway must never silently fall back to
+    // plaintext-only when mTLS was asked for.
+    let mtls = client_ca::MtlsConfig::from_env(ca.ca_cert_der(), cli.port)?;
+    match &mtls {
+        Some(m) => info!(port = m.port, "mTLS client-certificate listener configured"),
+        None => info!("mTLS disabled (GATEWAY_MTLS_PORT not set)"),
+    }
+
     // Connect to PostgreSQL
     // Support both DATABASE_URL (OSS) and individual DB_* vars (cloud ECS from Secrets Manager)
     let database_url = match std::env::var("DATABASE_URL") {
@@ -317,7 +328,8 @@ async fn main() -> Result<()> {
         vault_service,
         cache,
         approval_store,
-    );
+        mtls,
+    )?;
     let result = server.run().await;
 
     // The drain, in the one order that does not lose data: connections first

@@ -113,9 +113,10 @@ pub(super) struct Rule {
     pub require_approval: bool,
     pub rate_limit: Option<u64>,
     pub rate_limit_window: Option<RateWindow>,
-    /// Carried for structural fidelity and routed through the edition-swapped
-    /// `condition_match` — which is the no-op arm in OSS, so conditions are
-    /// never evaluated here (matching the legacy OSS gateway exactly).
+    /// The rule's behavioral conditions (body/header), routed through the
+    /// edition-swapped `condition_match`. In OSS (Tier 3a) they are EVALUATED
+    /// byte-level over the buffered body and request headers, carrying the
+    /// rule's Block-ness so an unevaluable condition fails closed by action.
     pub conditions: Option<serde_json::Value>,
 }
 

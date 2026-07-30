@@ -325,7 +325,9 @@ export interface CreateInvitationInput {
 // ── Shared policy identity/condition shapes ──────────────────────────────────
 // Used by the editor's PolicyRuleV2. Project rules target a specific agent or
 // "any" (empty); org rules target directory identities (user / user-group).
-// Conditions are body-contains.
+// Conditions are body OR header matches (contains/equals/regex/exists) — the
+// wire shape mirrors the authoritative RuleCondition: `key` names the header
+// (header target only) and `value` is absent for `exists`.
 
 export type ProjectionIdentity =
   | { type: "agent"; id: string }
@@ -335,7 +337,8 @@ export type ProjectionIdentity =
 export interface ProjectionCondition {
   target: string;
   operator: string;
-  value: string;
+  value?: string;
+  key?: string;
 }
 
 // ── Editable policy rules (policy_rules_v2) ──────────────────────────────────

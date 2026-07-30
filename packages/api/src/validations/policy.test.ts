@@ -166,6 +166,30 @@ describe("createPolicyRuleSchema — conditions dual-use (behavioral | session p
     ).toBe(false);
   });
 
+  it("accepts header conditions through the dual-use union (Tier 3a)", () => {
+    const parsed = createPolicyRuleSchema.parse({
+      ...base,
+      targets: [{ kind: "network", hostPattern: "api.example.com" }],
+      conditions: [
+        { target: "header", operator: "exists", key: "x-api-key" },
+        { target: "body", operator: "regex", value: "(?i)delete" },
+      ],
+    });
+    expect(Array.isArray(parsed.conditions)).toBe(true);
+  });
+
+  it("rejects a malformed header condition through the union", () => {
+    // Header without a key is neither a valid behavioral array element nor a
+    // session-policy object.
+    expect(
+      createPolicyRuleSchema.safeParse({
+        ...base,
+        targets: [{ kind: "network", hostPattern: "api.example.com" }],
+        conditions: [{ target: "header", operator: "equals", value: "v" }],
+      }).success,
+    ).toBe(false);
+  });
+
   it("still enforces the behavioral .max(10) through the dual-use union", () => {
     // The union must not let the behavioral-array bound leak — 11 conditions is
     // rejected (it's not a valid session-policy object either).

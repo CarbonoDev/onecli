@@ -4,7 +4,8 @@ export type AppCategory =
   | "development"
   | "project-management"
   | "cloud-data"
-  | "communication";
+  | "communication"
+  | "security";
 
 export const CATEGORY_LABELS: { id: AppCategory | "all"; label: string }[] = [
   { id: "all", label: "All" },
@@ -14,6 +15,7 @@ export const CATEGORY_LABELS: { id: AppCategory | "all"; label: string }[] = [
   { id: "project-management", label: "Project Management" },
   { id: "cloud-data", label: "Cloud & Data" },
   { id: "communication", label: "Communication" },
+  { id: "security", label: "Security & Compliance" },
 ];
 
 export const APP_CATEGORIES: Record<string, AppCategory> = {
@@ -79,4 +81,7 @@ export const APP_CATEGORIES: Record<string, AppCategory> = {
   granola: "communication",
   fathom: "communication",
   x: "communication",
+
+  // Security & Compliance
+  vanta: "security",
 };

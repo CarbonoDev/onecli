@@ -1126,9 +1126,28 @@ impl PolicyEngine {
                 {
                     // Authorized user / default: refresh via OAuth refresh_token
                     if let Some(config) = apps::refresh_config(provider) {
-                        let byoc = self
-                            .resolve_byoc_credentials(project_id, provider, connection_id)
-                            .await;
+                        // A public client (dynamically registered, no secret)
+                        // carries its client id and regional token endpoint in
+                        // the connection's own credentials — the BYOC and env
+                        // tiers have neither, so skip the BYOC lookup entirely.
+                        // Owned copies: `creds` is mutated below.
+                        let cred_client_id = config
+                            .client_id_credential_field
+                            .and_then(|field| creds.get(field))
+                            .and_then(|v| v.as_str())
+                            .map(String::from);
+                        let cred_token_url = config
+                            .token_url_credential_field
+                            .and_then(|field| creds.get(field))
+                            .and_then(|v| v.as_str())
+                            .map(String::from);
+
+                        let byoc = if cred_client_id.is_some() {
+                            None
+                        } else {
+                            self.resolve_byoc_credentials(project_id, provider, connection_id)
+                                .await
+                        };
                         let (byoc_id, byoc_secret) = match &byoc {
                             Some((id, secret)) => (Some(id.as_str()), Some(secret.as_str())),
                             None => (None, None),
@@ -1137,8 +1156,9 @@ impl PolicyEngine {
                         match apps::refresh_access_token(
                             config,
                             refresh_token,
-                            byoc_id,
+                            cred_client_id.as_deref().or(byoc_id),
                             byoc_secret,
+                            cred_token_url.as_deref(),
                         )
                         .await
                         {

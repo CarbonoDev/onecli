@@ -5,14 +5,10 @@ import * as connections from "./connections";
 import * as grants from "./grants";
 import * as projects from "./projects";
 import * as projectAccess from "./project-access";
-import * as domains from "./domains";
 import * as orgMembers from "./org-members";
 import * as invitations from "./invitations";
 import * as groups from "./groups";
 import * as roleMappings from "./role-mappings";
-import * as ssoConnections from "./sso-connections";
-import * as ssoEnforcement from "./sso-enforcement";
-import * as scimTokens from "./scim-tokens";
 import * as counts from "./counts";
 import * as appBlocklist from "./app-blocklist";
 import * as appConfig from "./app-config";
@@ -29,14 +25,10 @@ export {
   grants,
   projects,
   projectAccess,
-  domains,
   orgMembers,
   invitations,
   groups,
   roleMappings,
-  ssoConnections,
-  ssoEnforcement,
-  scimTokens,
   counts,
   appBlocklist,
   appConfig,
@@ -56,8 +48,6 @@ export type {
   ProjectAccessUserRow,
   ProjectAccessGroupRow,
   SetProjectAccessInput,
-  OrgDomain,
-  OrgSsoEnforcement,
   OrgMemberRow,
   UpdatedOrgMember,
   UpdateOrgMemberInput,
@@ -72,12 +62,6 @@ export type {
   UpdateRoleMappingInput,
   RoleMappingImpact,
   OrgMemberListRow,
-  OrgSsoConnection,
-  SsoTestResult,
-  CreateSsoConnectionInput,
-  UpdateSsoConnectionInput,
-  ScimToken,
-  CreatedScimToken,
   ResourceCounts,
   CreateAgentInput,
   CreateSecretInput,

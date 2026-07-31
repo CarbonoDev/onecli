@@ -116,6 +116,20 @@ pub(super) fn bad_gateway() -> Response<axum::body::Body> {
     )
 }
 
+/// 403 Forbidden — Phase 5 cert↔token tenant binding denied the request
+/// (`binding::evaluate` returned `Deny` for a reason other than a lookup
+/// failure — see `gateway.rs`'s `enforce_binding`, the sole caller). No
+/// specifics about WHY (mismatched project, unknown/revoked host, missing
+/// identity...) ride in the body: that detail is only ever logged
+/// server-side (`enforce_binding`'s structured `warn!`), never handed to the
+/// caller, which is exactly who might be trying to probe the binding.
+pub(super) fn binding_denied() -> Response<axum::body::Body> {
+    with_no_retry(json_error_axum(
+        StatusCode::FORBIDDEN,
+        serde_json::json!({ "error": "identity_not_permitted" }),
+    ))
+}
+
 /// Build the shared JSON body for multiple-connections responses.
 fn multiple_connections_json(
     connections: &[crate::connect::ConnectionChoice],
@@ -577,6 +591,34 @@ mod tests {
             .get("proxy-authenticate")
             .expect("should have Proxy-Authenticate header");
         assert_eq!(auth_header, "Basic realm=\"OneCLI Gateway\"");
+    }
+
+    #[tokio::test]
+    async fn binding_denied_is_403_no_retry_and_carries_no_specifics() {
+        let resp = binding_denied();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            resp.headers().get("content-type").unwrap(),
+            "application/json"
+        );
+        assert_eq!(resp.headers().get("x-should-retry").unwrap(), "false");
+
+        use http_body_util::BodyExt;
+        let body = resp
+            .into_body()
+            .collect()
+            .await
+            .expect("collect body")
+            .to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("valid JSON");
+        assert_eq!(json["error"], "identity_not_permitted");
+        // The body must never leak the specific reason (mismatch vs. unknown
+        // vs. revoked vs. missing identity) — that's server-log-only.
+        assert_eq!(
+            json.as_object().expect("object").len(),
+            1,
+            "body must carry nothing beyond the generic error code"
+        );
     }
 
     #[test]

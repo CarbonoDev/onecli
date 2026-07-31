@@ -59,6 +59,7 @@ use tracing::{debug, info, info_span, warn, Instrument};
 
 use crate::approval::{ApprovalDecision, ApprovalStore, APPROVAL_TIMEOUT_SECS};
 use crate::auth::AuthUser;
+use crate::binding::{self, BindingMode};
 use crate::ca::CertificateAuthority;
 use crate::cache::CacheStore;
 use crate::client_ca::{self, ClientIdentity, MtlsConfig};
@@ -93,10 +94,14 @@ pub(crate) struct ProxyContext {
     pub agent_identifier: Option<String>,
     pub agent_token: Option<String>,
     /// Identity extracted from the client's mTLS certificate, when the
-    /// connection came in on the mTLS listener. Phase 1 only threads and logs
-    /// this (the log statements read the identity before it's moved in here)
-    /// — it is never compared against `agent_token`; Phase 2 is the first
-    /// reader of the field itself, hence the lint allowance below.
+    /// connection came in on the mTLS listener. Phase 5's `enforce_binding`
+    /// is the first to actually compare an identity against the agent
+    /// token's tenant — but it does so from the `client_identity` local
+    /// variable BEFORE this `ProxyContext` is built (see `handle_connect` /
+    /// `handle_http_proxy`), so this field itself is still carried onward
+    /// only for a future consumer (e.g. session-level logging inside
+    /// `mitm`/`forward`) rather than read anywhere today, hence the lint
+    /// allowance below.
     #[allow(dead_code)]
     pub client_identity: Option<Arc<ClientIdentity>>,
 }
@@ -134,6 +139,10 @@ pub(crate) struct GatewayState {
     /// CA would produce certificates nobody trusts, so `issue_client_cert`
     /// returns 503 rather than silently minting from the wrong CA.
     pub client_ca: Option<Arc<ClientCa>>,
+    /// Phase 5 cert↔token tenant binding enforcement posture, read once at
+    /// startup from `GATEWAY_BINDING_ENFORCEMENT` (default `Off` — see
+    /// `binding::BindingMode`). Consulted by `enforce_binding`.
+    pub binding_mode: BindingMode,
 }
 
 // ── GatewayServer ───────────────────────────────────────────────────────
@@ -311,6 +320,21 @@ fn parse_plain_bind() -> Result<IpAddr> {
     parse_plain_bind_value(std::env::var("GATEWAY_PLAIN_BIND").ok().as_deref())
 }
 
+/// Whether the plaintext listener's bind address defeats Phase 5 enforcement:
+/// true when `binding_mode` is `Enforce` AND `plain_bind` is anything OTHER
+/// than loopback. `enforce_binding` exempts the plain listener by design (see
+/// its doc comment) — that is only safe when the plain listener itself is
+/// unreachable from wherever an attacker sits. Loopback (`127.0.0.0/8` /
+/// `::1`, via `IpAddr::is_loopback`) is the only address this crate can prove
+/// is host-local from the bind address alone; anything else — including the
+/// wildcard `0.0.0.0`/`::` AND a specific-looking but still off-host-reachable
+/// address (a pod/cluster IP) — must warn, since both are equally reachable
+/// from outside this process for the purpose of skipping the mTLS port
+/// entirely. No env access, so this is directly unit-testable.
+fn plain_bind_bypasses_binding_enforcement(binding_mode: BindingMode, plain_bind: IpAddr) -> bool {
+    matches!(binding_mode, BindingMode::Enforce) && !plain_bind.is_loopback()
+}
+
 /// Returns true if `host` matches any pattern in `patterns`.
 ///
 /// - `*.example.com` matches `sub.example.com` but NOT `example.com` itself.
@@ -340,6 +364,7 @@ impl GatewayServer {
         approval_store: Arc<dyn ApprovalStore>,
         mtls: Option<MtlsConfig>,
         client_ca: Option<Arc<ClientCa>>,
+        binding_mode: BindingMode,
     ) -> Result<Self> {
         let global_skip = std::env::var("GATEWAY_DANGER_ACCEPT_INVALID_CERTS").is_ok();
         let skip_verify_hosts = Arc::new(parse_skip_verify_hosts());
@@ -360,6 +385,26 @@ impl GatewayServer {
                  vault/approval/cache calls, which arrive on the plaintext listener."
             );
         }
+        // Phase 5: enforcement is only as strong as the listener it applies
+        // to. `enforce_binding` exempts the plain listener BY DESIGN (it has
+        // no client certificate to bind at all) — but if that listener is
+        // reachable from anywhere an attacker can reach, they simply skip the
+        // mTLS port and the binding check entirely. Broader than the mTLS
+        // warning above (which only fires on the literal unspecified address,
+        // 0.0.0.0): ANY non-loopback bind — including a specific, deliberately
+        // "reachable" address like a pod/cluster IP — still lets the plain
+        // listener see traffic from off-host, so it warns on anything that
+        // isn't loopback, not just the wildcard address.
+        if plain_bind_bypasses_binding_enforcement(binding_mode, plain_bind) {
+            warn!(
+                "GATEWAY_BINDING_ENFORCEMENT=enforce is set but the plaintext listener is \
+                 bound to a non-loopback address ({plain_bind}) — cert↔token binding is only \
+                 checked on the mTLS listener, so anyone who can reach the plaintext port \
+                 bypasses it entirely, same as the mTLS bypass warning above. Restrict \
+                 GATEWAY_PLAIN_BIND to loopback (127.0.0.1) or another trusted-network-only \
+                 address (same tradeoff noted above applies)."
+            );
+        }
 
         let state = GatewayState {
             ca: Arc::new(ca),
@@ -373,6 +418,7 @@ impl GatewayServer {
             vault_service,
             approval_store,
             client_ca,
+            binding_mode,
         };
 
         Ok(Self {
@@ -642,15 +688,28 @@ async fn accept_loop(
                         .and_then(client_ca::identity_from_peer_certs)
                         .map(Arc::new);
 
-                    if let Err(e) =
-                        handle_connection(tls_stream, peer_addr, state, router, client_identity)
-                            .await
+                    if let Err(e) = handle_connection(
+                        tls_stream,
+                        peer_addr,
+                        state,
+                        router,
+                        client_identity,
+                        // `on_mtls` is threaded as its OWN signal, separate
+                        // from `client_identity` — an mTLS handshake whose
+                        // cert had an unparseable CN/SAN also yields `None`
+                        // above, and Phase 5's `enforce_binding` must still
+                        // see "this came in on the mTLS listener" for that
+                        // case (see `binding.rs`'s module doc, subtlety #1).
+                        true,
+                    )
+                    .await
                     {
                         warn!(peer = %peer_addr, error = ?e, "connection error");
                     }
                 }
                 None => {
-                    if let Err(e) = handle_connection(stream, peer_addr, state, router, None).await
+                    if let Err(e) =
+                        handle_connection(stream, peer_addr, state, router, None, false).await
                     {
                         warn!(peer = %peer_addr, error = ?e, "connection error");
                     }
@@ -1097,6 +1156,13 @@ async fn handle_connection<S>(
     state: GatewayState,
     router: Router,
     client_identity: Option<Arc<ClientIdentity>>,
+    // Whether this connection came in on the mTLS listener — set by
+    // `accept_loop` from whether `tls` was `Some`, threaded here as its OWN
+    // signal rather than inferred from `client_identity.is_some()`. Phase 5's
+    // `enforce_binding` needs to tell "mTLS handshake, cert had no usable
+    // identity" (deny) apart from "plain listener, no cert at all" (exempt) —
+    // both look identical as `client_identity: None` otherwise.
+    on_mtls: bool,
 ) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -1114,9 +1180,9 @@ where
                 let client_identity = client_identity.clone();
                 async move {
                     if req.method() == Method::CONNECT {
-                        handle_connect(req, peer_addr, state, client_identity).await
+                        handle_connect(req, peer_addr, state, client_identity, on_mtls).await
                     } else if is_http_proxy_request(&req) {
-                        handle_http_proxy(req, peer_addr, state, client_identity).await
+                        handle_http_proxy(req, peer_addr, state, client_identity, on_mtls).await
                     } else {
                         // Axum handles all non-proxy routes (healthz, vault API, fallback)
                         let resp: Response<axum::body::Body> = router
@@ -1147,6 +1213,153 @@ where
     }
 }
 
+// ── Phase 5: cert↔token tenant binding enforcement ──────────────────────
+
+/// Cache TTL for host-tenant lookups — the same 60s window `connect::resolve`
+/// uses for `ConnectResponse`, so a revoked/renamed `client_hosts` row is
+/// picked up on the same staleness budget as everything else CONNECT-time
+/// resolution already accepts.
+const BINDING_CACHE_TTL_SECS: u64 = 60;
+
+/// Resolve the `client_hosts` row for `spiffe` via the cache, falling back to
+/// `db::find_client_host_by_spiffe` on a miss — mirroring
+/// `connect::resolve`'s cache-then-DB pattern. Negative results (no matching
+/// row) are cached too, exactly like a positive one: `Option<ClientHostRow>`
+/// round-trips through the cache either way, so an attacker hammering an
+/// unknown spiffe URI doesn't turn into a sustained DB query per request.
+///
+/// Returns `Err(())` — collapsing whatever the underlying error was — when
+/// the lookup itself failed (DB or cache-deserialization trouble); the
+/// caller (`enforce_binding`) fails closed on that, and `binding::evaluate`
+/// never needs to know anything about the failure beyond "it happened".
+async fn resolve_host_tenant(
+    state: &GatewayState,
+    spiffe: &str,
+) -> Result<Option<db::ClientHostRow>, ()> {
+    let cache_key = format!("binding:host:{spiffe}");
+
+    if let Some(cached) = state
+        .cache
+        .get::<Option<db::ClientHostRow>>(&cache_key)
+        .await
+    {
+        return Ok(cached);
+    }
+
+    match db::find_client_host_by_spiffe(&state.policy_engine.pool, spiffe).await {
+        Ok(row) => {
+            state
+                .cache
+                .set(&cache_key, &row, BINDING_CACHE_TTL_SECS)
+                .await;
+            Ok(row)
+        }
+        Err(e) => {
+            warn!(spiffe = %spiffe, error = ?e, "binding: client_hosts lookup failed");
+            Err(())
+        }
+    }
+}
+
+/// Phase 5 enforcement gate — the ONE place `handle_connect` and
+/// `handle_http_proxy` both call into, so the two entry points can never
+/// diverge on what "permitted" means (see the module-level worry this whole
+/// feature exists to close: a relay's cert bypassing enforcement on one path
+/// while the other still checks it). Returns `Some(response)` to
+/// short-circuit the request with a denial, `None` to let it proceed.
+///
+/// `mode == Off` or `!on_mtls` (the plain listener is exempt BY LISTENER
+/// KIND, in every mode — see `binding.rs`'s module doc) both return `None`
+/// WITHOUT ever resolving the host tenant: zero DB/cache overhead beyond the
+/// mode/on_mtls check itself, so a default (unset) deployment pays nothing
+/// for this feature's existence.
+async fn enforce_binding(
+    state: &GatewayState,
+    on_mtls: bool,
+    client_identity: Option<&Arc<ClientIdentity>>,
+    agent_id: Option<&str>,
+    token_project: &str,
+    token_org: Option<&str>,
+) -> Option<Response<axum::body::Body>> {
+    if matches!(state.binding_mode, BindingMode::Off) || !on_mtls {
+        return None;
+    }
+
+    let identity = client_identity.and_then(|id| id.primary());
+
+    // Only resolve the host tenant when there's an identity to look up at
+    // all — `binding::evaluate` denies a missing identity before it ever
+    // looks at this result, so an unparseable-cert request never touches the
+    // cache or DB.
+    let host_lookup: Option<Result<Option<db::ClientHostRow>, ()>> = match identity {
+        Some(spiffe) => Some(resolve_host_tenant(state, spiffe).await),
+        None => None,
+    };
+    let host_tenant: Result<Option<&db::ClientHostRow>, ()> = match &host_lookup {
+        Some(Ok(row)) => Ok(row.as_ref()),
+        Some(Err(())) => Err(()),
+        None => Ok(None),
+    };
+    let host_project_id = match &host_lookup {
+        Some(Ok(Some(row))) => Some(row.project_id.as_str()),
+        _ => None,
+    };
+
+    let decision = binding::evaluate(
+        state.binding_mode,
+        on_mtls,
+        identity,
+        host_tenant,
+        token_project,
+        token_org,
+    );
+
+    match decision {
+        binding::BindingDecision::Allow => None,
+        binding::BindingDecision::WouldDeny { reason } => {
+            // Log-mode audit trail: this is what `Enforce` WOULD have denied.
+            // Never logs the token or any secret — spiffe/host/token ids only.
+            warn!(
+                spiffe = identity.unwrap_or("-"),
+                host_project_id = host_project_id.unwrap_or("-"),
+                token_project_id = %token_project,
+                token_org_id = token_org.unwrap_or("-"),
+                agent_id = agent_id.unwrap_or("-"),
+                reason,
+                mode = ?state.binding_mode,
+                on_mtls,
+                decision = "would_deny",
+                "binding: cert/token tenant mismatch (log mode — request allowed)"
+            );
+            None
+        }
+        binding::BindingDecision::Deny { reason } => {
+            warn!(
+                spiffe = identity.unwrap_or("-"),
+                host_project_id = host_project_id.unwrap_or("-"),
+                token_project_id = %token_project,
+                token_org_id = token_org.unwrap_or("-"),
+                agent_id = agent_id.unwrap_or("-"),
+                reason,
+                mode = ?state.binding_mode,
+                on_mtls,
+                decision = "deny",
+                "binding: cert/token tenant mismatch — request denied"
+            );
+            // The lookup-failed case is retryable (a transient DB/cache
+            // hiccup, not a permanent verdict about this identity) — 502,
+            // same as every other internal-error path in this file. Every
+            // other reason (mismatch, unknown/revoked host, missing
+            // identity) is a permanent denial — 403.
+            if reason == binding::REASON_HOST_LOOKUP_ERROR {
+                Some(response::bad_gateway())
+            } else {
+                Some(response::binding_denied())
+            }
+        }
+    }
+}
+
 // ── CONNECT handling ────────────────────────────────────────────────────
 
 /// Handle a CONNECT request: authenticate, resolve policy, then MITM or tunnel.
@@ -1155,6 +1368,7 @@ async fn handle_connect(
     peer_addr: SocketAddr,
     state: GatewayState,
     client_identity: Option<Arc<ClientIdentity>>,
+    on_mtls: bool,
 ) -> Result<Response<axum::body::Body>, anyhow::Error> {
     let host = req
         .uri()
@@ -1193,6 +1407,30 @@ async fn handle_connect(
         } else {
             (false, None, None, None, None, None)
         };
+
+    // Phase 5: cert↔token tenant binding. AFTER `connect::resolve` (needs the
+    // token's project/org), BEFORE vault/intercept/spawn — a denial here must
+    // short-circuit before any of that runs. Only when an agent token is
+    // actually present: no token, nothing to bind.
+    if agent_token.is_some() {
+        // `connect::resolve`'s success arm always sets `project_id` for a
+        // resolved token (`ConnectResponse { project_id: Some(agent.project_id), .. }`);
+        // the empty-string fallback only guards a resolver invariant this
+        // handler doesn't otherwise depend on.
+        let token_project = project_id.as_deref().unwrap_or_default();
+        if let Some(denial) = enforce_binding(
+            &state,
+            on_mtls,
+            client_identity.as_ref(),
+            agent_id.as_deref(),
+            token_project,
+            organization_id.as_deref(),
+        )
+        .await
+        {
+            return Ok(denial);
+        }
+    }
 
     // Vault fallback: resolved at CONNECT time and passed to mitm as a frozen
     // fallback. Vault queries are expensive (network calls to Bitwarden), so
@@ -1328,6 +1566,7 @@ async fn handle_http_proxy(
     peer_addr: SocketAddr,
     state: GatewayState,
     client_identity: Option<Arc<ClientIdentity>>,
+    on_mtls: bool,
 ) -> Result<Response<axum::body::Body>, anyhow::Error> {
     let authority = req
         .uri()
@@ -1360,6 +1599,26 @@ async fn handle_http_proxy(
     } else {
         connect::ConnectResponse::default()
     };
+
+    // Phase 5: cert↔token tenant binding — AFTER `connect::resolve`, BEFORE
+    // app-connection resolution / vault fallback / forwarding. See the
+    // matching call (and its comment) in `handle_connect`; both go through
+    // the ONE shared `enforce_binding` helper so the two entry points can't
+    // drift from each other.
+    if agent_token.is_some() {
+        if let Some(denial) = enforce_binding(
+            &state,
+            on_mtls,
+            client_identity.as_ref(),
+            resolved.agent_id.as_deref(),
+            resolved.project_id.as_deref().unwrap_or_default(),
+            resolved.organization_id.as_deref(),
+        )
+        .await
+        {
+            return Ok(denial);
+        }
+    }
 
     // Per-request app connection disambiguation — app rules MERGE with the
     // secret rules (see inject::merge_injection_rules; #428). When the secret
@@ -1714,6 +1973,7 @@ mod tests {
             vault_service,
             approval_store,
             client_ca: None,
+            binding_mode: BindingMode::Off,
         }
     }
 
@@ -1833,7 +2093,7 @@ mod tests {
                 .map(Arc::new);
             assert!(client_identity.is_some(), "identity must be extracted");
 
-            handle_connection(tls_stream, peer_addr, state, router, client_identity).await
+            handle_connection(tls_stream, peer_addr, state, router, client_identity, true).await
         });
 
         let client_stream = tokio::net::TcpStream::connect(addr).await.expect("connect");
@@ -1996,6 +2256,54 @@ mod tests {
         // "localhost" is a valid hostname but not an IP literal — parsing it
         // as an IpAddr must fail rather than silently resolve or default.
         assert!(parse_plain_bind_value(Some("localhost")).is_err());
+    }
+
+    // ── plain_bind_bypasses_binding_enforcement (Phase 5, security-review FIX 2) ──
+
+    #[test]
+    fn bypass_warning_fires_on_wildcard_ipv4_under_enforce() {
+        assert!(plain_bind_bypasses_binding_enforcement(
+            BindingMode::Enforce,
+            IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+        ));
+    }
+
+    /// FIX 2: unlike the plain `is_unspecified()` check this replaced, a
+    /// specific-looking but still off-host-reachable address (a pod/cluster
+    /// IP) must ALSO warn — it is exactly as reachable from outside this
+    /// process as the wildcard address is.
+    #[test]
+    fn bypass_warning_fires_on_a_specific_non_loopback_address_under_enforce() {
+        assert!(plain_bind_bypasses_binding_enforcement(
+            BindingMode::Enforce,
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5)),
+        ));
+    }
+
+    #[test]
+    fn bypass_warning_silent_on_ipv4_loopback_under_enforce() {
+        assert!(!plain_bind_bypasses_binding_enforcement(
+            BindingMode::Enforce,
+            IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
+        ));
+    }
+
+    #[test]
+    fn bypass_warning_silent_on_ipv6_loopback_under_enforce() {
+        assert!(!plain_bind_bypasses_binding_enforcement(
+            BindingMode::Enforce,
+            IpAddr::V6(std::net::Ipv6Addr::LOCALHOST),
+        ));
+    }
+
+    #[test]
+    fn bypass_warning_silent_when_mode_is_not_enforce_even_on_wildcard() {
+        for mode in [BindingMode::Off, BindingMode::Log] {
+            assert!(
+                !plain_bind_bypasses_binding_enforcement(mode, IpAddr::V4(Ipv4Addr::UNSPECIFIED)),
+                "mode={mode:?}"
+            );
+        }
     }
 
     // ── is_http_proxy_request ──────────────────────────────────────────
@@ -2244,5 +2552,248 @@ mod tests {
         .await
         .into_response();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    // ── enforce_binding / resolve_host_tenant (Phase 5) ───────────────────
+    //
+    // `test_gateway_state()`'s pool is a `connect_lazy` handle to
+    // `127.0.0.1` with nothing listening (see its doc comment) — no real
+    // Postgres runs in this test binary. That is USED deliberately below,
+    // not merely tolerated:
+    //   - Cache-seeded scenarios never touch the DB at all (a cache hit
+    //     returns before `db::find_client_host_by_spiffe` is ever called),
+    //     so they exercise real code, not a stub.
+    //   - The one scenario that must reach the DB (`enforce_binding` with
+    //     nothing cached) gets a real `Err` from the doomed connection
+    //     attempt — which IS the fail-closed path this suite needs to prove,
+    //     obtained without hand-rolling a mock reader.
+    // This is the plan's documented fallback ("stub the reader" when a live
+    // DB isn't available in-crate) — here the "stub" is the cache, which is
+    // real production code on the read path `resolve_host_tenant` already
+    // exercises before ever reaching the DB.
+    //
+    // Both `handle_connect` and `handle_http_proxy` call the SAME
+    // `enforce_binding` (see the two call sites above, right after each
+    // one's `connect::resolve`) — there is exactly one implementation for
+    // this suite to exercise, which is the structural guarantee that neither
+    // entry point can quietly diverge from the other.
+
+    fn binding_test_identity(spiffe: &str) -> Arc<ClientIdentity> {
+        Arc::new(ClientIdentity {
+            cn: None,
+            uri_sans: vec![spiffe.to_string()],
+            serial_hex: "ab".to_string(),
+            not_after_unix: 0,
+        })
+    }
+
+    /// A cert whose CN/SAN failed extraction (or was never sanitizable) —
+    /// `ClientIdentity::primary()` returns `None`. Distinct from "no cert at
+    /// all" (`on_mtls = false`): this identity came from a verified mTLS
+    /// handshake, so `on_mtls = true` in every test that uses it.
+    fn binding_test_unparseable_identity() -> Arc<ClientIdentity> {
+        Arc::new(ClientIdentity {
+            cn: None,
+            uri_sans: vec![],
+            serial_hex: "ab".to_string(),
+            not_after_unix: 0,
+        })
+    }
+
+    /// `revoked_at` is `TIMESTAMP` (no time zone — see `db::ClientHostRow`'s
+    /// doc comment), so the stand-in "now" value must be a
+    /// `PrimitiveDateTime`, not an `OffsetDateTime`.
+    fn binding_test_host_row(
+        project_id: &str,
+        organization_id: Option<&str>,
+        revoked: bool,
+    ) -> db::ClientHostRow {
+        let now = time::OffsetDateTime::now_utc();
+        db::ClientHostRow {
+            project_id: project_id.to_string(),
+            organization_id: organization_id.map(str::to_string),
+            revoked_at: revoked.then(|| time::PrimitiveDateTime::new(now.date(), now.time())),
+        }
+    }
+
+    async fn seed_binding_cache(
+        state: &GatewayState,
+        spiffe: &str,
+        row: Option<&db::ClientHostRow>,
+    ) {
+        state
+            .cache
+            .set(
+                &format!("binding:host:{spiffe}"),
+                &row,
+                BINDING_CACHE_TTL_SECS,
+            )
+            .await;
+    }
+
+    async fn binding_state(mode: BindingMode) -> GatewayState {
+        let mut state = test_gateway_state().await;
+        state.binding_mode = mode;
+        state
+    }
+
+    #[tokio::test]
+    async fn enforce_binding_off_mode_allows_without_ever_resolving_the_host() {
+        let state = binding_state(BindingMode::Off).await;
+        // Deliberately unseeded: if `Off` resolved the host tenant anyway, it
+        // would hit the dead test DB and this test would hang/slow down
+        // rather than return immediately.
+        let id = binding_test_identity("spiffe://onecli/host/off-1");
+        let result =
+            enforce_binding(&state, true, Some(&id), Some("agent-1"), "proj-A", None).await;
+        assert!(result.is_none(), "Off must allow unconditionally");
+    }
+
+    #[tokio::test]
+    async fn enforce_binding_plain_listener_exempt_even_under_enforce() {
+        let state = binding_state(BindingMode::Enforce).await;
+        let id = binding_test_identity("spiffe://onecli/host/plain-1");
+        // on_mtls = false: must be exempt regardless of mode, unseeded cache,
+        // or anything else — the plain listener never had a cert to bind.
+        let result =
+            enforce_binding(&state, false, Some(&id), Some("agent-1"), "proj-A", None).await;
+        assert!(
+            result.is_none(),
+            "plain-listener requests are always exempt"
+        );
+    }
+
+    #[tokio::test]
+    async fn enforce_binding_matching_tenant_allows_under_enforce() {
+        let state = binding_state(BindingMode::Enforce).await;
+        let spiffe = "spiffe://onecli/host/match-1";
+        seed_binding_cache(
+            &state,
+            spiffe,
+            Some(&binding_test_host_row("proj-A", Some("org-1"), false)),
+        )
+        .await;
+        let id = binding_test_identity(spiffe);
+        let result = enforce_binding(
+            &state,
+            true,
+            Some(&id),
+            Some("agent-1"),
+            "proj-A",
+            Some("org-1"),
+        )
+        .await;
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn enforce_binding_mismatched_tenant_403s_under_enforce() {
+        let state = binding_state(BindingMode::Enforce).await;
+        let spiffe = "spiffe://onecli/host/mismatch-1";
+        seed_binding_cache(
+            &state,
+            spiffe,
+            Some(&binding_test_host_row("proj-B", None, false)),
+        )
+        .await;
+        let id = binding_test_identity(spiffe);
+        let result = enforce_binding(&state, true, Some(&id), Some("agent-1"), "proj-A", None)
+            .await
+            .expect("mismatched tenant must be denied under Enforce");
+        assert_eq!(result.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn enforce_binding_mismatched_tenant_allowed_under_log_would_deny_only() {
+        let state = binding_state(BindingMode::Log).await;
+        let spiffe = "spiffe://onecli/host/mismatch-2";
+        seed_binding_cache(
+            &state,
+            spiffe,
+            Some(&binding_test_host_row("proj-B", None, false)),
+        )
+        .await;
+        let id = binding_test_identity(spiffe);
+        let result =
+            enforce_binding(&state, true, Some(&id), Some("agent-1"), "proj-A", None).await;
+        assert!(
+            result.is_none(),
+            "Log mode must allow (WouldDeny), never actually deny"
+        );
+    }
+
+    #[tokio::test]
+    async fn enforce_binding_off_mode_allows_even_a_cached_mismatch() {
+        let state = binding_state(BindingMode::Off).await;
+        let spiffe = "spiffe://onecli/host/off-2";
+        seed_binding_cache(
+            &state,
+            spiffe,
+            Some(&binding_test_host_row("proj-B", None, false)),
+        )
+        .await;
+        let id = binding_test_identity(spiffe);
+        let result =
+            enforce_binding(&state, true, Some(&id), Some("agent-1"), "proj-A", None).await;
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn enforce_binding_revoked_host_403s_under_enforce() {
+        let state = binding_state(BindingMode::Enforce).await;
+        let spiffe = "spiffe://onecli/host/revoked-1";
+        seed_binding_cache(
+            &state,
+            spiffe,
+            Some(&binding_test_host_row("proj-A", None, true)),
+        )
+        .await;
+        let id = binding_test_identity(spiffe);
+        let result = enforce_binding(&state, true, Some(&id), Some("agent-1"), "proj-A", None)
+            .await
+            .expect("revoked host must be denied even with a matching project");
+        assert_eq!(result.status(), StatusCode::FORBIDDEN);
+    }
+
+    /// Subtlety #1: an mTLS handshake with no extractable identity must be
+    /// DENIED, not treated as an exempt plain-listener request.
+    #[tokio::test]
+    async fn enforce_binding_unparseable_identity_403s_under_enforce_not_exempt() {
+        let state = binding_state(BindingMode::Enforce).await;
+        let id = binding_test_unparseable_identity();
+        let result = enforce_binding(&state, true, Some(&id), Some("agent-1"), "proj-A", None)
+            .await
+            .expect("a verified mTLS cert with no usable identity must be denied");
+        assert_eq!(result.status(), StatusCode::FORBIDDEN);
+    }
+
+    /// Fail-closed on a lookup failure must be 502 (retryable), never 403
+    /// (permanent) — a transient DB/cache outage is not a verdict about this
+    /// identity. Unseeded cache + the dead test-DB pool together give a real
+    /// lookup failure here, not a simulated one.
+    #[tokio::test]
+    async fn enforce_binding_db_error_502s_under_enforce_not_403() {
+        let state = binding_state(BindingMode::Enforce).await;
+        let id = binding_test_identity("spiffe://onecli/host/db-error-1");
+        let result = enforce_binding(&state, true, Some(&id), Some("agent-1"), "proj-A", None)
+            .await
+            .expect("a lookup failure must fail closed (deny), not silently allow");
+        assert_eq!(
+            result.status(),
+            StatusCode::BAD_GATEWAY,
+            "a lookup failure is retryable — 502, not a permanent 403"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_host_tenant_serves_a_cached_negative_result_without_touching_the_db() {
+        let state = test_gateway_state().await;
+        let spiffe = "spiffe://onecli/host/neg-1";
+        // Cache an explicit "no such host" — proves negative results ride
+        // the same `Option<ClientHostRow>` cache slot a positive one would,
+        // and that a hit (positive OR negative) never reaches the DB.
+        seed_binding_cache(&state, spiffe, None).await;
+        let result = resolve_host_tenant(&state, spiffe).await;
+        assert_eq!(result, Ok(None));
     }
 }

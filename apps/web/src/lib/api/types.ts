@@ -401,3 +401,95 @@ export interface AgentGrantsSummary {
 export interface AgentWithGrantsSummary extends Agent {
   grantsSummary: AgentGrantsSummary;
 }
+
+// ── Webhooks ──────────────────────────────────────────────────────────────
+
+export type WebhookVerification = "github" | "token" | "none";
+
+export type WebhookDeliveryStatus =
+  | "pending"
+  | "delivered"
+  | "failed"
+  | "discarded";
+
+export interface WebhookVerifierOption {
+  id: string;
+  label: string;
+  requiresSecret: boolean;
+  /** v1 registers every hook manually; the seam is unimplemented. */
+  autoSubscribe: boolean;
+}
+
+export interface WebhookEndpoint {
+  id: string;
+  publicId: string;
+  slug: string;
+  name: string;
+  verification: string;
+  hasSecret: boolean;
+  template: string;
+  agentId: string;
+  agentName: string;
+  agentIdentifier: string;
+  /** Opaque to OneCLI — passed to the consumer verbatim. */
+  routing: unknown;
+  enabled: boolean;
+  rateLimitPerMin: number;
+  /** Append to the deployment's public origin to get the full ingest URL. */
+  ingestPath: string;
+  lastDeliveryAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface WebhookEndpointWithSecret extends WebhookEndpoint {
+  secret: string | null;
+}
+
+export interface CreateWebhookInput {
+  name: string;
+  slug: string;
+  agentId: string;
+  verification: string;
+  template: string;
+  routing?: Record<string, unknown> | null;
+  enabled?: boolean;
+  rateLimitPerMin?: number;
+  /** Required when verification is "none" — never a silent default. */
+  acknowledgeUnverified?: boolean;
+}
+
+export type UpdateWebhookInput = Partial<CreateWebhookInput>;
+
+export interface WebhookDelivery {
+  id: string;
+  endpointId: string;
+  status: WebhookDeliveryStatus;
+  discardReason: string | null;
+  event: string | null;
+  dedupeKey: string | null;
+  duplicateCount: number;
+  attempts: number;
+  bodyBytes: number;
+  lastError: string | null;
+  replayOfId: string | null;
+  receivedAt: string;
+  deliveredAt: string | null;
+  createdAt: string;
+  /** Derived server-side: pending, claimed, and the lease has not lapsed. */
+  inFlight: boolean;
+}
+
+export interface WebhookDeliveryDetail extends WebhookDelivery {
+  payload: unknown;
+  headers: unknown;
+  renderedText: string | null;
+  renderWarnings: string[];
+  claimedBy: string | null;
+  claimedAt: string | null;
+}
+
+export interface WebhookDeliveryPage {
+  deliveries: WebhookDelivery[];
+  nextCursor: { createdAt: string; id: string } | null;
+}

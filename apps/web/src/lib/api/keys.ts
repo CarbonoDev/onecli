@@ -22,6 +22,16 @@ export const queryKeys = {
     lastPublish: (pageScope: PageScope = "project") =>
       [...queryKeys.policy.all(), "last-publish", pageScope] as const,
   },
+  webhooks: {
+    all: () => ["webhooks", ...scope()] as const,
+    list: () => [...queryKeys.webhooks.all(), "list"] as const,
+    detail: (hookId: string) => [...queryKeys.webhooks.all(), hookId] as const,
+    deliveries: (hookId: string) =>
+      [...queryKeys.webhooks.all(), hookId, "deliveries"] as const,
+    delivery: (deliveryId: string) =>
+      [...queryKeys.webhooks.all(), "delivery", deliveryId] as const,
+    verifiers: () => [...queryKeys.webhooks.all(), "verifiers"] as const,
+  },
   groups: {
     all: () => ["groups", ...scope()] as const,
     list: () => [...queryKeys.groups.all(), "list"] as const,

@@ -15,6 +15,7 @@ import {
   resolveSecret,
   validateToken,
 } from "../services/onepassword-service";
+import { sweepWebhookDeliveries } from "../services/webhook-retention-service";
 import type { ApiEnv } from "../types";
 import {
   listFieldsSchema,
@@ -84,6 +85,14 @@ export const internalRoutes = () => {
     );
     return c.json(await getItemFields(token, vaultId, itemId));
   });
+
+  // POST /v1/internal/webhooks/sweep — force a delivery-log retention pass.
+  // The primary trigger is opportunistic (throttled, off the ingest path);
+  // this exists so an operator or an external scheduler can run one on demand
+  // and read the stats back.
+  app.post("/webhooks/sweep", async (c) =>
+    c.json(await sweepWebhookDeliveries()),
+  );
 
   return app;
 };

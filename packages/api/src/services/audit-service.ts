@@ -69,6 +69,10 @@ export const AUDIT_SERVICES = {
   ROLE_MAPPING: "role-mapping",
   // EE-only (directory): bearer tokens for the org's SCIM endpoint
   SCIM_TOKEN: "scim-token",
+  // Public webhook ingest endpoints (`/v1/hooks`): the endpoint config and its
+  // ingest secret. Individual DELIVERIES are deliberately not audited — like
+  // RequestLog they are data, not configuration, and they have their own log.
+  WEBHOOK: "webhook",
 } as const;
 
 export const AUDIT_STATUS = {

@@ -208,6 +208,7 @@ model Project {
   appConfigs       AppConfig[]
   budgets          Budget[] // cloud-only: per-secret spend budgets for this project (inert in OSS)
   accessBindings   ProjectAccess[]
+  webhookEndpoints WebhookEndpoint[]
 
   @@unique([organizationId, slug])
   @@index([organizationId])
@@ -312,6 +313,7 @@ model Agent {
   agentAppConnections  AgentAppConnection[]
   policyRules          PolicyRule[]
   policyRuleIdentities PolicyRuleIdentity[]
+  webhookEndpoints     WebhookEndpoint[]
 
   @@unique([projectId, identifier])
   @@index([projectId])
@@ -585,6 +587,153 @@ model RequestLog {
 
   @@index([projectId, createdAt])
   @@map("request_logs")
+}
+
+// ── Webhooks (inbound ingress + the delivery pull queue) ────────────────
+
+/// A public ingest URL. OneCLI mints `publicId` + `secret`; the operator pastes
+/// `<appUrl>/v1/hooks/<publicId>` into GitHub/alerting/whatever. v1 is manual
+/// registration — `subscriptionState` is the seam for provider-native
+/// subscription (creating the hook through a stored AppConnection) later.
+model WebhookEndpoint {
+  id        String @id @default(uuid())
+  projectId String @map("project_id")
+  /// The unguessable path segment of the ingest URL: "whe_" + 32 hex chars
+  /// (128 bits of CSPRNG). This is the ONLY thing that names an endpoint to the
+  /// outside world — the uuid `id` is never exposed publicly.
+  publicId  String @unique @map("public_id")
+  /// Human-facing, unique within the project. Rendered as `{{$slug}}` and
+  /// carried to the consumer as the webhook's identity.
+  slug      String
+  name      String
+
+  /// Verifier id — the key into the code-side registry
+  /// (`services/webhook/verifiers`). A free string, not an enum, so a new
+  /// provider is a code-only change: "github" | "token" | "none".
+  verification String  @default("token")
+  /// The shared secret / HMAC key, encrypted at rest via the injected crypto
+  /// provider (AES-256-GCM, "iv:authTag:ciphertext"). Null only when
+  /// verification is "none".
+  secret       String?
+
+  /// Text template rendered per delivery: {{a.b.0.c}} dot paths plus {{$raw}},
+  /// {{$slug}}, {{$event}}, {{$delivery_id}}. Empty = the built-in default.
+  template String @default("")
+
+  /// The agent whose poller drains this endpoint's queue. Required: the pull
+  /// queue is per-agent and the poller's credential IS the queue selector.
+  agentId String @map("agent_id")
+
+  /// OPAQUE consumer routing. OneCLI never parses this — it is copied verbatim
+  /// into the delivery envelope. The reference consumer (nanoclaw) reads
+  /// {mode:'lane'|'chat', target:{…}}, but that schema is the consumer's, not
+  /// ours, and must never be validated here.
+  routing Json?
+
+  enabled         Boolean @default(true)
+  /// Per-endpoint ingest ceiling (requests/minute), enforced in-process.
+  rateLimitPerMin Int     @default(120) @map("rate_limit_per_min")
+
+  /// v2 seam, INERT in v1: provider-native subscription state (the webhook id
+  /// the provider assigned, the connection used to create it). Declared now so
+  /// adding auto-subscription is a code change, not a migration.
+  subscriptionState Json? @map("subscription_state")
+
+  lastDeliveryAt DateTime? @map("last_delivery_at")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+
+  project    Project           @relation(fields: [projectId], references: [id])
+  agent      Agent             @relation(fields: [agentId], references: [id])
+  deliveries WebhookDelivery[]
+
+  @@unique([projectId, slug])
+  @@index([projectId])
+  @@index([agentId])
+  @@map("webhook_endpoints")
+}
+
+/// One received webhook. This is both the delivery-log row and the queue row:
+/// `status` + `availableAt` are the visibility pair the pull queue claims
+/// against.
+model WebhookDelivery {
+  id         String @id @default(uuid())
+  projectId  String @map("project_id")
+  endpointId String @map("endpoint_id")
+  /// Denormalized from the endpoint AT INGEST so the claim query is a single
+  /// index-ordered scan, and so re-pointing an endpoint at another agent never
+  /// re-routes deliveries already sitting in the queue.
+  agentId    String @map("agent_id")
+
+  /// "pending" | "delivered" | "failed" | "discarded".
+  /// There is deliberately no "claimed" status: in-flight is DERIVED
+  /// (status="pending" AND claimId != null AND availableAt > now), which keeps
+  /// the claim predicate to a single index-friendly arm.
+  status        String  @default("pending")
+  /// Why a "discarded" row was not queued: "handshake" (provider ping),
+  /// "rejected" (signature failed — payload is not stored), "disabled".
+  discardReason String? @map("discard_reason")
+
+  /// Provider event name, e.g. "issues.opened". Rendered as `{{$event}}`.
+  eventType      String? @map("event_type")
+  /// Provider-supplied delivery id (X-GitHub-Delivery, Idempotency-Key, …),
+  /// unique per endpoint. NULL when the provider supplies none — Postgres
+  /// treats NULLs as distinct, so unkeyed deliveries never collide.
+  dedupeKey      String? @map("dedupe_key")
+  /// Redeliveries of this same provider delivery id. Incremented in place
+  /// rather than writing a second row.
+  duplicateCount Int     @default(0) @map("duplicate_count")
+
+  /// Null for "rejected" rows — an unverified caller must not be able to write
+  /// arbitrary payload bytes into the log.
+  payload        Json?
+  /// Allow-listed request headers only — never authorization, cookie, or the
+  /// signature header itself.
+  headers        Json
+  bodyBytes      Int      @map("body_bytes")
+  /// Rendered AT INGEST from the endpoint's template, so the log records what
+  /// the agent was actually told. Replay re-renders into a NEW row, which is
+  /// how template edits get picked up.
+  renderedText   String?  @map("rendered_text")
+  /// Template placeholders that resolved to nothing — surfaced in the delivery
+  /// detail so a broken template is visible without diffing the payload.
+  renderWarnings String[] @default([]) @map("render_warnings")
+
+  attempts    Int       @default(0)
+  /// THE visibility timestamp. A row is claimable when status="pending" AND
+  /// availableAt <= now. Claiming pushes it to now()+lease (the visibility
+  /// timeout); a retryable nack pushes it to now()+backoff. An abandoned claim
+  /// needs no reaper — the lease expires and the row becomes claimable again.
+  availableAt DateTime  @default(now()) @map("available_at")
+  /// Batch token minted per claim. The ack must present it, which is what makes
+  /// a late ack from a poller whose lease already expired a 409 rather than a
+  /// silently lost row.
+  claimId     String?   @map("claim_id")
+  claimedBy   String?   @map("claimed_by")
+  claimedAt   DateTime? @map("claimed_at")
+  deliveredAt DateTime? @map("delivered_at")
+  lastError   String?   @map("last_error")
+
+  /// Set when this row was produced by replaying another delivery.
+  replayOfId String? @map("replay_of_id")
+
+  receivedAt DateTime @default(now()) @map("received_at")
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  endpoint WebhookEndpoint @relation(fields: [endpointId], references: [id], onDelete: Cascade)
+
+  /// Dedup: one row per (endpoint, provider delivery id).
+  @@unique([endpointId, dedupeKey])
+  /// THE CLAIM QUERY: equality on agentId+status, range+sort on availableAt —
+  /// one index-ordered scan, no sort node.
+  @@index([agentId, status, availableAt])
+  /// Delivery-log keyset scans, per-endpoint and project-wide.
+  @@index([endpointId, createdAt])
+  @@index([projectId, createdAt])
+  /// Retention sweep.
+  @@index([status, createdAt])
+  @@map("webhook_deliveries")
 }
 
 model VaultConnection {

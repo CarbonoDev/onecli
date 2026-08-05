@@ -59,6 +59,7 @@ import { containerConfigRoutes } from "./routes/container-config";
 import { countsRoutes } from "./routes/counts";
 import { skillRoutes } from "./routes/skill";
 import { credentialStubRoutes } from "./routes/credential-stubs";
+import { hookRoutes } from "./routes/hooks";
 import { migrateRoutes } from "./routes/migrate";
 import { internalRoutes } from "./routes/internal";
 import {
@@ -159,6 +160,9 @@ export const createApiApp = (
   app.route("/counts", countsRoutes());
   app.route("/skill", skillRoutes());
   app.route("/credential-stubs", credentialStubRoutes());
+  // Inbound webhooks. Mounted with the live routers (before the 410 shims);
+  // note this router deliberately carries no `use("*")` — see routes/hooks.ts.
+  app.route("/hooks", hookRoutes());
   app.route("/migrate", migrateRoutes());
   app.route("/internal", internalRoutes());
   // 410 Gone for the old-model paths step 10 removed. LAST, so every live route

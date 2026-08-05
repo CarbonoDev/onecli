@@ -17,6 +17,7 @@ import * as appPermissions from "./app-permissions";
 import * as vaults from "./vaults";
 import * as dropbox from "./dropbox";
 import * as budgets from "./budgets";
+import * as webhooks from "./webhooks";
 
 export {
   agents,
@@ -38,6 +39,7 @@ export {
   vaults,
   dropbox,
   budgets,
+  webhooks,
 };
 export type {
   Agent,
@@ -81,6 +83,16 @@ export type {
   AgentGrantsSummary,
   AgentWithGrantsSummary,
   GrantsSummaryEntry,
+  WebhookEndpoint,
+  WebhookEndpointWithSecret,
+  WebhookVerification,
+  WebhookVerifierOption,
+  WebhookDelivery,
+  WebhookDeliveryDetail,
+  WebhookDeliveryPage,
+  WebhookDeliveryStatus,
+  CreateWebhookInput,
+  UpdateWebhookInput,
 } from "./types";
 export type { CreatePolicyRuleInput, UpdatePolicyRuleInput } from "./policy";
 export type {

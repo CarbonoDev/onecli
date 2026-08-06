@@ -70,6 +70,7 @@ mod edition;
 mod gateway;
 mod inject;
 mod policy;
+mod relay;
 mod secret_inject;
 mod shutdown;
 mod summary;
@@ -163,6 +164,29 @@ struct Cli {
     /// Data directory for CA certificates and persistent state.
     #[arg(long, default_value = default_data_dir())]
     data_dir: PathBuf,
+
+    /// Optional subcommand. With none given, `onecli-gateway` (optionally
+    /// with `--port`/`--data-dir`) parses exactly as it always has and runs
+    /// the MITM gateway server — see the module doc on `Command` below for
+    /// why that byte-for-byte compatibility matters.
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+/// Subcommands layered onto the historically flag-only `onecli-gateway` CLI.
+///
+/// `command` on [`Cli`] is `Option<Command>`, not `Command`, specifically so
+/// that omitting it entirely — the only way this binary has ever been
+/// invoked before this change — continues to select the server, not a clap
+/// error demanding a subcommand. `main` dispatches on it before any of the
+/// server's own CA/DB/crypto/vault bootstrapping runs, so `relay` never pays
+/// for (or requires) any of that.
+#[derive(clap::Subcommand, Debug)]
+enum Command {
+    /// Run a local mTLS relay: a blind byte-splice between a plain
+    /// HTTP-proxy agent and a remote OneCLI gateway. See `relay.rs`'s module
+    /// doc for the security property this preserves.
+    Relay(relay::RelayArgs),
 }
 
 /// Cap on the final telemetry flush, inside the overall shutdown budget.
@@ -212,6 +236,15 @@ async fn main() -> Result<()> {
     // the startup below simply sets the flag, and the accept loop exits on its
     // first poll.
     shutdown::install();
+
+    // Relay mode is an entirely separate program sharing only the process's
+    // signal handling and rustls crypto provider install above: no CA, no
+    // database, no crypto service, no vault. Dispatched here, before any of
+    // that server-only bootstrapping below runs, so it never pays for (or
+    // requires) any of it.
+    if let Some(Command::Relay(args)) = cli.command {
+        return relay::run(args).await;
+    }
 
     // Expand ~ in data dir
     let data_dir = expand_tilde(&cli.data_dir);
@@ -393,4 +426,95 @@ fn expand_tilde(path: &Path) -> PathBuf {
         }
     }
     path.to_path_buf()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The default invocation — no subcommand at all — must keep parsing to
+    /// the server arm exactly as it did before `Command` existed. This is
+    /// the regression guard for every existing deployment's `onecli-gateway`
+    /// (with no args) or `onecli-gateway --port N` invocation.
+    #[test]
+    fn no_subcommand_parses_to_the_server_arm() {
+        let cli = Cli::try_parse_from(["onecli-gateway"]).expect("parses with no args");
+        assert_eq!(cli.port, 10255);
+        assert!(cli.command.is_none());
+    }
+
+    #[test]
+    fn port_flag_alone_still_parses_to_the_server_arm() {
+        let cli = Cli::try_parse_from(["onecli-gateway", "--port", "9999"]).expect("parses --port");
+        assert_eq!(cli.port, 9999);
+        assert!(cli.command.is_none());
+    }
+
+    #[test]
+    fn data_dir_flag_alone_still_parses_to_the_server_arm() {
+        let cli = Cli::try_parse_from(["onecli-gateway", "--data-dir", "/tmp/onecli-data"])
+            .expect("parses --data-dir");
+        assert_eq!(cli.data_dir, PathBuf::from("/tmp/onecli-data"));
+        assert!(cli.command.is_none());
+    }
+
+    /// The new `relay` subcommand parses into `Command::Relay` with its
+    /// required fields populated — proving the subcommand addition didn't
+    /// break argument routing in either direction.
+    #[test]
+    fn relay_subcommand_parses_its_required_args() {
+        let cli = Cli::try_parse_from([
+            "onecli-gateway",
+            "relay",
+            "--gateway-addr",
+            "gateway.example.com:8443",
+            "--gateway-server-ca",
+            "/etc/onecli/server-ca.pem",
+            "--api-url",
+            "https://api.example.com",
+            "--api-key",
+            "oc_test_key",
+        ])
+        .expect("parses relay subcommand");
+
+        match cli.command {
+            Some(Command::Relay(args)) => {
+                assert_eq!(args.gateway_addr, "gateway.example.com:8443");
+                assert_eq!(args.api_url, "https://api.example.com");
+                assert_eq!(args.api_key, "oc_test_key");
+                assert_eq!(
+                    args.bind,
+                    "127.0.0.1:10255".parse::<std::net::SocketAddr>().unwrap()
+                );
+            }
+            None => panic!("expected Command::Relay"),
+        }
+    }
+
+    /// Missing a required relay flag (with its env var also unset) must
+    /// fail to parse rather than silently default — `--gateway-addr` has no
+    /// default and nothing here sets `RELAY_GATEWAY_ADDR`.
+    #[test]
+    fn relay_subcommand_requires_gateway_addr() {
+        // Isolated from whatever the test process's real environment holds:
+        // if `RELAY_GATEWAY_ADDR` happened to be set, this would spuriously
+        // pass. There is no portable safe env-mutation in a parallel test
+        // binary, so this only asserts what it can control directly: the
+        // flag form is absent, and if the env var were also absent this
+        // must fail.
+        if std::env::var("RELAY_GATEWAY_ADDR").is_ok() {
+            return;
+        }
+        let result = Cli::try_parse_from([
+            "onecli-gateway",
+            "relay",
+            "--gateway-server-ca",
+            "/etc/onecli/server-ca.pem",
+            "--api-url",
+            "https://api.example.com",
+            "--api-key",
+            "oc_test_key",
+        ]);
+        assert!(result.is_err(), "must require --gateway-addr");
+    }
 }

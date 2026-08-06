@@ -131,7 +131,7 @@ fn sanitize_identity_component(s: &str) -> Option<String> {
 /// from Secrets Manager); anything else is treated as a filesystem path (OSS
 /// mounts files). Empty or unset input is `Ok(None)` — the caller decides
 /// whether that's fatal.
-fn pem_from_value(var_name: &str, value: &str) -> Result<Option<String>> {
+pub(crate) fn pem_from_value(var_name: &str, value: &str) -> Result<Option<String>> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         return Ok(None);

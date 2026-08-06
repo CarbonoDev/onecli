@@ -43,8 +43,10 @@ ring = "0.17"
 # HTTP client (for upstream forwarding in MITM mode)
 reqwest = { version = "0.12", features = ["json", "rustls-tls", "stream"], default-features = false }
 
-# CLI
-clap = { version = "4", features = ["derive"] }
+# CLI. `env` (relay mode): every relay CLI flag falls back to an environment
+# variable so it can run unattended in a container with no generated command
+# line.
+clap = { version = "4", features = ["derive", "env"] }
 
 # Logging
 tracing = "0.1"
@@ -73,6 +75,11 @@ base64 = "0.22"
 
 # UUID (for approval IDs)
 uuid = { version = "1", features = ["v4"] }
+
+# Lock-free config swap (relay mode): the mTLS `ClientConfig` is rebuilt on
+# certificate renewal and swapped in without disrupting in-flight tunnels,
+# each of which holds its own `Arc` snapshot taken at dial time.
+arc-swap = "1"
 
 # Stream combinators
 futures-util = "0.3"

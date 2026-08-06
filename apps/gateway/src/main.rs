@@ -11,6 +11,7 @@ mod auth;
 
 mod ca;
 mod client_ca;
+mod client_ca_authority;
 
 #[cfg(not(edition_cloud))]
 mod cache;
@@ -241,11 +242,41 @@ async fn main() -> Result<()> {
     let ca = CertificateAuthority::load_or_generate(&data_dir).await?;
     info!("CA certificate loaded");
 
+    // Client-certificate minting authority (Phase 2). Only meaningful when
+    // the mTLS trust anchor is the gateway's OWN generated client CA: if an
+    // operator has configured GATEWAY_CLIENT_CA (Phase 1 — an externally
+    // managed trust anchor cert, whose matching private key we never hold),
+    // minting against a locally generated CA would produce certificates
+    // nobody trusts. In that case, skip generating/loading a client CA
+    // entirely and leave minting unavailable (the internal endpoint 503s)
+    // rather than silently minting from an unrelated CA. Any OTHER failure
+    // here (a corrupt on-disk key, an unwritable data dir, ...) aborts
+    // startup — fail closed, mirroring `ca::CertificateAuthority`.
+    let operator_configured_client_ca = std::env::var("GATEWAY_CLIENT_CA")
+        .ok()
+        .is_some_and(|v| !v.trim().is_empty());
+    let client_ca: Option<Arc<client_ca_authority::ClientCa>> = if operator_configured_client_ca {
+        info!(
+            "GATEWAY_CLIENT_CA is set — client-certificate minting stays unavailable (the \
+             internal endpoint 503s); the trust anchor is externally managed"
+        );
+        None
+    } else {
+        let authority = client_ca_authority::ClientCa::load_or_generate(&data_dir).await?;
+        info!("client-certificate CA loaded");
+        Some(Arc::new(authority))
+    };
+    let fallback_client_ca_pem = client_ca.as_ref().map(|c| c.ca_cert_pem());
+
     // mTLS is opt-in: unset GATEWAY_MTLS_PORT and this is a no-op (full
     // backward compatibility). When it IS requested, any load failure here
     // must abort startup — the gateway must never silently fall back to
     // plaintext-only when mTLS was asked for.
-    let mtls = client_ca::MtlsConfig::from_env(ca.ca_cert_der(), cli.port)?;
+    let mtls = client_ca::MtlsConfig::from_env(
+        ca.ca_cert_der(),
+        cli.port,
+        fallback_client_ca_pem.as_deref(),
+    )?;
     match &mtls {
         Some(m) => info!(port = m.port, "mTLS client-certificate listener configured"),
         None => info!("mTLS disabled (GATEWAY_MTLS_PORT not set)"),
@@ -330,6 +361,7 @@ async fn main() -> Result<()> {
         cache,
         approval_store,
         mtls,
+        client_ca,
     )?;
     let result = server.run().await;
 

@@ -259,16 +259,25 @@ impl MtlsConfig {
     /// [`pem_from_value`]. `mitm_ca_der` is the gateway's own MITM CA
     /// certificate (see `ca.rs`); `plain_port` is the plaintext listener port.
     ///
+    /// `fallback_client_ca_pem` (Phase 2): when `ca` (`GATEWAY_CLIENT_CA`) is
+    /// unset, this PEM is used as the client-CA trust anchor instead of
+    /// erroring — it's `main`'s generated/loaded `client_ca_authority::ClientCa`
+    /// certificate, so a fresh OSS install trusts (and can mint against) its
+    /// own client CA with zero configuration. An explicit `GATEWAY_CLIENT_CA`
+    /// always wins over this fallback: an operator who has configured their
+    /// own external trust anchor is never silently overridden.
+    ///
     /// `Ok(None)` means mTLS is off (port unset). Every other failure mode —
-    /// unparseable/zero/colliding port, missing material, unreadable/garbage
-    /// PEM, or a client CA that IS the MITM CA — is `Err`, and the caller
-    /// (`main`) must fail closed: never fall back to plaintext-only when mTLS
-    /// was requested but couldn't be built.
+    /// unparseable/zero/colliding port, missing material (with no fallback to
+    /// cover it), unreadable/garbage PEM, or a client CA that IS the MITM CA —
+    /// is `Err`, and the caller (`main`) must fail closed: never fall back to
+    /// plaintext-only when mTLS was requested but couldn't be built.
     pub(crate) fn from_parts(
         port: Option<&str>,
         cert: Option<&str>,
         key: Option<&str>,
         ca: Option<&str>,
+        fallback_client_ca_pem: Option<&str>,
         mitm_ca_der: &CertificateDer<'static>,
         plain_port: u16,
     ) -> Result<Option<MtlsConfig>> {
@@ -297,10 +306,25 @@ impl MtlsConfig {
             .context("GATEWAY_TLS_KEY is required when GATEWAY_MTLS_PORT is set")
             .and_then(|v| pem_from_value("GATEWAY_TLS_KEY", v))?
             .context("GATEWAY_TLS_KEY is required when GATEWAY_MTLS_PORT is set")?;
-        let ca_pem = ca
-            .context("GATEWAY_CLIENT_CA is required when GATEWAY_MTLS_PORT is set")
-            .and_then(|v| pem_from_value("GATEWAY_CLIENT_CA", v))?
-            .context("GATEWAY_CLIENT_CA is required when GATEWAY_MTLS_PORT is set")?;
+
+        // GATEWAY_CLIENT_CA explicit env value takes precedence; only fall
+        // back to the generated authority's cert when it's genuinely unset
+        // (or set-but-empty, which `pem_from_value` already treats as unset).
+        let ca_from_env = match ca {
+            Some(v) => pem_from_value("GATEWAY_CLIENT_CA", v)?,
+            None => None,
+        };
+        let ca_pem = match ca_from_env {
+            Some(pem) => pem,
+            None => fallback_client_ca_pem
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .context(
+                    "GATEWAY_CLIENT_CA is required when GATEWAY_MTLS_PORT is set (and no \
+                     generated client-CA authority is available as a fallback)",
+                )?
+                .to_string(),
+        };
 
         // SECURITY: reject a client CA bundle that carries the same public
         // key as the gateway's own MITM CA. Compared on the DER-encoded
@@ -340,10 +364,14 @@ impl MtlsConfig {
     }
 
     /// Read `GATEWAY_MTLS_PORT` / `GATEWAY_TLS_CERT` / `GATEWAY_TLS_KEY` /
-    /// `GATEWAY_CLIENT_CA` from the environment and forward to [`Self::from_parts`].
+    /// `GATEWAY_CLIENT_CA` from the environment and forward to
+    /// [`Self::from_parts`], along with `fallback_client_ca_pem` (see its doc
+    /// there) which `main` supplies when it holds a generated
+    /// `client_ca_authority::ClientCa`.
     pub(crate) fn from_env(
         mitm_ca_der: &CertificateDer<'static>,
         plain_port: u16,
+        fallback_client_ca_pem: Option<&str>,
     ) -> Result<Option<MtlsConfig>> {
         let port = std::env::var("GATEWAY_MTLS_PORT").ok();
         let cert = std::env::var("GATEWAY_TLS_CERT").ok();
@@ -354,19 +382,27 @@ impl MtlsConfig {
             cert.as_deref(),
             key.as_deref(),
             ca.as_deref(),
+            fallback_client_ca_pem,
             mitm_ca_der,
             plain_port,
         )
     }
 }
 
+/// Test-only PKI harness shared across this crate's test suites: a minimal
+/// CA + leaf-signing helper on rcgen, plus a loopback mTLS handshake runner
+/// built on this module's own `build_server_config`/`WebPkiClientVerifier`.
+///
+/// `pub(crate)` and NOT nested inside `mod tests` below, so
+/// `client_ca_authority`'s test module (Phase 2: minting client certs from a
+/// CSR) can drive a real handshake against a freshly minted client
+/// certificate through this same verifier, instead of duplicating the
+/// harness.
 #[cfg(test)]
-mod tests {
+pub(crate) mod test_support {
     use super::*;
-    use std::io::Write;
     use std::net::SocketAddr;
     use std::sync::Once;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     use rcgen::{
         BasicConstraints, CertificateParams, DnType, IsCa, KeyPair, KeyUsagePurpose,
@@ -379,15 +415,171 @@ mod tests {
 
     static INIT_CRYPTO: Once = Once::new();
 
-    fn ensure_crypto_provider() {
+    pub(crate) fn ensure_crypto_provider() {
         INIT_CRYPTO.call_once(|| {
-            // Ignore the error: it just means another test module (e.g.
-            // `ca`) already installed the process-wide default in this same
-            // test binary — a no-op for our purposes either way, since it's
-            // the same `ring` provider.
+            // Ignore the error: it just means another test suite in this
+            // same test binary already installed the process-wide default —
+            // a no-op for our purposes either way, since it's the same
+            // `ring` provider.
             let _ = rustls::crypto::ring::default_provider().install_default();
         });
     }
+
+    /// A minimal CA + leaf-signing helper built on rcgen, mirroring the
+    /// pattern in `ca.rs`'s own test module.
+    pub(crate) struct TestCa {
+        pub(crate) cert: rcgen::Certificate,
+        pub(crate) key: KeyPair,
+        pub(crate) der: CertificateDer<'static>,
+    }
+
+    pub(crate) fn new_test_ca(cn: &str) -> TestCa {
+        let key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).expect("CA key");
+        let mut params = CertificateParams::default();
+        params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        params.distinguished_name.push(DnType::CommonName, cn);
+        params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+        params.not_before = OffsetDateTime::now_utc() - time::Duration::hours(1);
+        params.not_after = OffsetDateTime::now_utc() + time::Duration::days(3650);
+        let cert = params.self_signed(&key).expect("self-sign CA");
+        let der = cert.der().clone();
+        TestCa { cert, key, der }
+    }
+
+    /// Sign a client leaf under `ca`, valid `[not_before_h, not_after_h]` hours
+    /// from now, with the given CN and URI SANs. Returns (cert_pem, key_pem).
+    pub(crate) fn sign_client_leaf(
+        ca: &TestCa,
+        cn: Option<&str>,
+        uri_sans: &[&str],
+        not_before_h: i64,
+        not_after_h: i64,
+    ) -> (String, String) {
+        let leaf_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).expect("leaf key");
+        let mut params = CertificateParams::default();
+        // `CertificateParams::new(strings)` only ever infers IP or DNS SANs —
+        // a "spiffe://..."-shaped string comes out as a (nonsensical) DNS
+        // name, not a URI SAN. Push `SanType::URI` directly instead.
+        params.subject_alt_names = uri_sans
+            .iter()
+            .map(|s| {
+                rcgen::SanType::URI(
+                    rcgen::Ia5String::try_from(s.to_string()).expect("valid IA5 URI"),
+                )
+            })
+            .collect();
+        if let Some(cn) = cn {
+            params.distinguished_name.push(DnType::CommonName, cn);
+        }
+        params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+        params.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::ClientAuth];
+        params.not_before = OffsetDateTime::now_utc() + time::Duration::hours(not_before_h);
+        params.not_after = OffsetDateTime::now_utc() + time::Duration::hours(not_after_h);
+        let leaf_cert = params
+            .signed_by(&leaf_key, &ca.cert, &ca.key)
+            .expect("sign leaf");
+        (leaf_cert.pem(), leaf_key.serialize_pem())
+    }
+
+    /// Self-signed "server" cert for `localhost`, used as the mTLS listener's
+    /// own identity in handshake tests. The test client trusts it directly
+    /// (it's its own root), sidestepping the need for a fake server verifier.
+    pub(crate) fn self_signed_server_cert() -> (String, String, CertificateDer<'static>) {
+        let key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).expect("server key");
+        let mut params = CertificateParams::new(vec!["localhost".to_string()]).expect("params");
+        params
+            .distinguished_name
+            .push(DnType::CommonName, "localhost");
+        params.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::ServerAuth];
+        params.not_before = OffsetDateTime::now_utc() - time::Duration::hours(1);
+        params.not_after = OffsetDateTime::now_utc() + time::Duration::days(1);
+        let cert = params.self_signed(&key).expect("self-sign server cert");
+        let der = cert.der().clone();
+        (cert.pem(), key.serialize_pem(), der)
+    }
+
+    /// Build a server config AND return the matching server cert DER — the
+    /// two must come from the same `self_signed_server_cert()` call, since
+    /// the test client trusts that DER directly as its only root.
+    pub(crate) fn test_server_setup(
+        trusted_ca_pem: &str,
+    ) -> (Arc<ServerConfig>, CertificateDer<'static>) {
+        let (server_cert_pem, server_key_pem, server_der) = self_signed_server_cert();
+        let roots = load_client_ca_roots(trusted_ca_pem).expect("roots");
+        let config =
+            build_server_config(&server_cert_pem, &server_key_pem, roots).expect("server config");
+        (config, server_der)
+    }
+
+    pub(crate) fn test_client_config(
+        server_der: &CertificateDer<'static>,
+        client_cert_pem: Option<&str>,
+        client_key_pem: Option<&str>,
+    ) -> Arc<rustls::ClientConfig> {
+        let mut roots = RootCertStore::empty();
+        roots.add(server_der.clone()).expect("trust server cert");
+
+        let builder = rustls::ClientConfig::builder().with_root_certificates(roots);
+        let config = match (client_cert_pem, client_key_pem) {
+            (Some(cert_pem), Some(key_pem)) => {
+                let chain = pem_to_der_certs(cert_pem).expect("client cert chain");
+                let mut key_reader = key_pem.as_bytes();
+                let key = rustls_pemfile::private_key(&mut key_reader)
+                    .expect("parse client key")
+                    .expect("client key present");
+                builder
+                    .with_client_auth_cert(chain, key)
+                    .expect("client auth cert")
+            }
+            _ => builder.with_no_client_auth(),
+        };
+        Arc::new(config)
+    }
+
+    /// Run one TLS handshake end to end over a real loopback socket (same
+    /// pattern as the plain-TCP tests in `gateway.rs`/`ca.rs`, just over TLS).
+    /// Returns the server-side accept result — the thing under test — and
+    /// discards the client-side result beyond confirming it also failed when
+    /// the server did (a rejected handshake fails both sides).
+    pub(crate) async fn attempt_handshake(
+        server_config: Arc<ServerConfig>,
+        client_config: Arc<rustls::ClientConfig>,
+    ) -> std::io::Result<tokio_rustls::server::TlsStream<TcpStream>> {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr: SocketAddr = listener.local_addr().expect("local addr");
+
+        let server = async move {
+            let (stream, _) = listener.accept().await?;
+            TlsAcceptor::from(server_config).accept(stream).await
+        };
+        let client = async move {
+            let stream = TcpStream::connect(addr).await?;
+            let name = ServerName::try_from("localhost").expect("server name");
+            TlsConnector::from(client_config)
+                .connect(name, stream)
+                .await
+        };
+
+        let (server_result, _client_result) = tokio::join!(server, client);
+        server_result
+    }
+
+    pub(crate) fn err_debug_contains(err: &std::io::Error, needle: &str) -> bool {
+        format!("{err:?}").contains(needle)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_support::*;
+    use super::*;
+    use std::io::Write;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use rcgen::{
+        BasicConstraints, CertificateParams, DnType, IsCa, KeyPair, PKCS_ECDSA_P256_SHA256,
+    };
+    use time::OffsetDateTime;
 
     // ── sanitize_identity_component ─────────────────────────────────────
 
@@ -496,150 +688,10 @@ mod tests {
         );
     }
 
-    // ── test PKI helper ───────────────────────────────────────────────────
-
-    /// A minimal CA + leaf-signing helper built on rcgen, mirroring the
-    /// pattern in `ca.rs`'s own test module.
-    struct TestCa {
-        cert: rcgen::Certificate,
-        key: KeyPair,
-        der: CertificateDer<'static>,
-    }
-
-    fn new_test_ca(cn: &str) -> TestCa {
-        let key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).expect("CA key");
-        let mut params = CertificateParams::default();
-        params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-        params.distinguished_name.push(DnType::CommonName, cn);
-        params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
-        params.not_before = OffsetDateTime::now_utc() - time::Duration::hours(1);
-        params.not_after = OffsetDateTime::now_utc() + time::Duration::days(3650);
-        let cert = params.self_signed(&key).expect("self-sign CA");
-        let der = cert.der().clone();
-        TestCa { cert, key, der }
-    }
-
-    /// Sign a client leaf under `ca`, valid `[not_before_h, not_after_h]` hours
-    /// from now, with the given CN and URI SANs. Returns (cert_pem, key_pem).
-    fn sign_client_leaf(
-        ca: &TestCa,
-        cn: Option<&str>,
-        uri_sans: &[&str],
-        not_before_h: i64,
-        not_after_h: i64,
-    ) -> (String, String) {
-        let leaf_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).expect("leaf key");
-        let mut params = CertificateParams::default();
-        // `CertificateParams::new(strings)` only ever infers IP or DNS SANs —
-        // a "spiffe://..."-shaped string comes out as a (nonsensical) DNS
-        // name, not a URI SAN. Push `SanType::URI` directly instead.
-        params.subject_alt_names = uri_sans
-            .iter()
-            .map(|s| {
-                rcgen::SanType::URI(
-                    rcgen::Ia5String::try_from(s.to_string()).expect("valid IA5 URI"),
-                )
-            })
-            .collect();
-        if let Some(cn) = cn {
-            params.distinguished_name.push(DnType::CommonName, cn);
-        }
-        params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
-        params.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::ClientAuth];
-        params.not_before = OffsetDateTime::now_utc() + time::Duration::hours(not_before_h);
-        params.not_after = OffsetDateTime::now_utc() + time::Duration::hours(not_after_h);
-        let leaf_cert = params
-            .signed_by(&leaf_key, &ca.cert, &ca.key)
-            .expect("sign leaf");
-        (leaf_cert.pem(), leaf_key.serialize_pem())
-    }
-
-    /// Self-signed "server" cert for `localhost`, used as the mTLS listener's
-    /// own identity in handshake tests. The test client trusts it directly
-    /// (it's its own root), sidestepping the need for a fake server verifier.
-    fn self_signed_server_cert() -> (String, String, CertificateDer<'static>) {
-        let key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).expect("server key");
-        let mut params = CertificateParams::new(vec!["localhost".to_string()]).expect("params");
-        params
-            .distinguished_name
-            .push(DnType::CommonName, "localhost");
-        params.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::ServerAuth];
-        params.not_before = OffsetDateTime::now_utc() - time::Duration::hours(1);
-        params.not_after = OffsetDateTime::now_utc() + time::Duration::days(1);
-        let cert = params.self_signed(&key).expect("self-sign server cert");
-        let der = cert.der().clone();
-        (cert.pem(), key.serialize_pem(), der)
-    }
-
-    /// Build a server config AND return the matching server cert DER — the
-    /// two must come from the same `self_signed_server_cert()` call, since
-    /// the test client trusts that DER directly as its only root.
-    fn test_server_setup(trusted_ca_pem: &str) -> (Arc<ServerConfig>, CertificateDer<'static>) {
-        let (server_cert_pem, server_key_pem, server_der) = self_signed_server_cert();
-        let roots = load_client_ca_roots(trusted_ca_pem).expect("roots");
-        let config =
-            build_server_config(&server_cert_pem, &server_key_pem, roots).expect("server config");
-        (config, server_der)
-    }
-
-    fn test_client_config(
-        server_der: &CertificateDer<'static>,
-        client_cert_pem: Option<&str>,
-        client_key_pem: Option<&str>,
-    ) -> Arc<rustls::ClientConfig> {
-        let mut roots = RootCertStore::empty();
-        roots.add(server_der.clone()).expect("trust server cert");
-
-        let builder = rustls::ClientConfig::builder().with_root_certificates(roots);
-        let config = match (client_cert_pem, client_key_pem) {
-            (Some(cert_pem), Some(key_pem)) => {
-                let chain = pem_to_der_certs(cert_pem).expect("client cert chain");
-                let mut key_reader = key_pem.as_bytes();
-                let key = rustls_pemfile::private_key(&mut key_reader)
-                    .expect("parse client key")
-                    .expect("client key present");
-                builder
-                    .with_client_auth_cert(chain, key)
-                    .expect("client auth cert")
-            }
-            _ => builder.with_no_client_auth(),
-        };
-        Arc::new(config)
-    }
-
-    /// Run one TLS handshake end to end over a real loopback socket (same
-    /// pattern as the plain-TCP tests in `gateway.rs`/`ca.rs`, just over TLS).
-    /// Returns the server-side accept result — the thing under test — and
-    /// discards the client-side result beyond confirming it also failed when
-    /// the server did (a rejected handshake fails both sides).
-    async fn attempt_handshake(
-        server_config: Arc<ServerConfig>,
-        client_config: Arc<rustls::ClientConfig>,
-    ) -> std::io::Result<tokio_rustls::server::TlsStream<TcpStream>> {
-        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-        let addr: SocketAddr = listener.local_addr().expect("local addr");
-
-        let server = async move {
-            let (stream, _) = listener.accept().await?;
-            TlsAcceptor::from(server_config).accept(stream).await
-        };
-        let client = async move {
-            let stream = TcpStream::connect(addr).await?;
-            let name = ServerName::try_from("localhost").expect("server name");
-            TlsConnector::from(client_config)
-                .connect(name, stream)
-                .await
-        };
-
-        let (server_result, _client_result) = tokio::join!(server, client);
-        server_result
-    }
-
-    fn err_debug_contains(err: &std::io::Error, needle: &str) -> bool {
-        format!("{err:?}").contains(needle)
-    }
-
     // ── Handshake behavior ────────────────────────────────────────────────
+    // (TestCa, new_test_ca, sign_client_leaf, self_signed_server_cert,
+    // test_server_setup, test_client_config, attempt_handshake, and
+    // err_debug_contains now live in `test_support` above, glob-imported.)
 
     #[tokio::test]
     async fn handshake_rejects_missing_client_cert() {
@@ -771,7 +823,8 @@ mod tests {
     fn from_parts_port_none_is_off() {
         ensure_crypto_provider();
         let mitm_der = dummy_mitm_ca_der();
-        let result = MtlsConfig::from_parts(None, None, None, None, &mitm_der, 10255).unwrap();
+        let result =
+            MtlsConfig::from_parts(None, None, None, None, None, &mitm_der, 10255).unwrap();
         assert!(result.is_none());
     }
 
@@ -793,6 +846,7 @@ mod tests {
             None,
             Some("key"),
             Some("ca"),
+            None,
             &mitm_der,
             10255,
         )
@@ -809,6 +863,7 @@ mod tests {
             Some(PRESENT_PLACEHOLDER_PEM),
             None,
             Some(PRESENT_PLACEHOLDER_PEM),
+            None,
             &mitm_der,
             10255,
         )
@@ -825,6 +880,7 @@ mod tests {
             Some(PRESENT_PLACEHOLDER_PEM),
             Some(PRESENT_PLACEHOLDER_PEM),
             None,
+            None,
             &mitm_der,
             10255,
         )
@@ -836,9 +892,16 @@ mod tests {
     fn from_parts_zero_port_errs() {
         ensure_crypto_provider();
         let mitm_der = dummy_mitm_ca_der();
-        let err =
-            MtlsConfig::from_parts(Some("0"), Some("c"), Some("k"), Some("a"), &mitm_der, 10255)
-                .unwrap_err();
+        let err = MtlsConfig::from_parts(
+            Some("0"),
+            Some("c"),
+            Some("k"),
+            Some("a"),
+            None,
+            &mitm_der,
+            10255,
+        )
+        .unwrap_err();
         assert!(format!("{err:#}").contains("must not be 0"));
     }
 
@@ -851,6 +914,7 @@ mod tests {
             Some("c"),
             Some("k"),
             Some("a"),
+            None,
             &mitm_der,
             10255,
         )
@@ -867,6 +931,7 @@ mod tests {
             Some("c"),
             Some("k"),
             Some("a"),
+            None,
             &mitm_der,
             10255,
         )
@@ -888,6 +953,7 @@ mod tests {
             Some(&server_cert_pem),
             Some(&server_key_pem),
             Some(&ca_pem),
+            None,
             &mitm_der,
             10255,
         )
@@ -908,6 +974,7 @@ mod tests {
             Some(cert_path.to_str().unwrap()),
             Some(key_path.to_str().unwrap()),
             Some(ca_path.to_str().unwrap()),
+            None,
             &mitm_der,
             10255,
         )
@@ -924,6 +991,7 @@ mod tests {
             Some("/nonexistent/path/cert.pem"),
             Some("/nonexistent/path/key.pem"),
             Some("/nonexistent/path/ca.pem"),
+            None,
             &mitm_der,
             10255,
         )
@@ -941,6 +1009,7 @@ mod tests {
             Some(&server_cert_pem),
             Some(&server_key_pem),
             Some("-----BEGIN CERTIFICATE-----\nbm90IGEgY2VydA==\n-----END CERTIFICATE-----\n"),
+            None,
             &mitm_der,
             10255,
         )
@@ -960,6 +1029,7 @@ mod tests {
             Some(&server_cert_pem),
             Some(&server_key_pem),
             Some(""),
+            None,
             &mitm_der,
             10255,
         )
@@ -979,6 +1049,7 @@ mod tests {
             Some(&server_cert_pem),
             Some(&server_key_pem),
             Some(&mitm_ca.cert.pem()),
+            None,
             &mitm_ca.der,
             10255,
         )
@@ -1029,12 +1100,112 @@ mod tests {
             Some(&server_cert_pem),
             Some(&server_key_pem),
             Some(&reissued_cert.pem()),
+            None,
             &mitm_der,
             10255,
         )
         .unwrap_err();
         assert!(format!("{err:#}").contains("GATEWAY_CLIENT_CA"));
         assert!(format!("{err:#}").contains("public"));
+    }
+
+    // ── fallback_client_ca_pem (Phase 2: generated client-CA authority) ──
+
+    /// When `GATEWAY_CLIENT_CA` is unset, the caller-supplied fallback (the
+    /// generated `client_ca_authority::ClientCa`'s own cert) is used instead
+    /// of erroring — a fresh install trusts its own generated client CA with
+    /// zero configuration.
+    #[test]
+    fn from_parts_uses_fallback_client_ca_when_env_unset() {
+        ensure_crypto_provider();
+        let mitm_der = dummy_mitm_ca_der();
+        let (server_cert_pem, server_key_pem, _) = self_signed_server_cert();
+        let generated_client_ca = new_test_ca("Generated Client CA");
+        let fallback_pem = generated_client_ca.cert.pem();
+
+        let result = MtlsConfig::from_parts(
+            Some("10256"),
+            Some(&server_cert_pem),
+            Some(&server_key_pem),
+            None,
+            Some(&fallback_pem),
+            &mitm_der,
+            10255,
+        )
+        .expect("fallback client CA must be accepted when GATEWAY_CLIENT_CA is unset");
+        assert!(result.is_some());
+    }
+
+    /// An explicit `GATEWAY_CLIENT_CA` always wins over the fallback — an
+    /// operator's own configured trust anchor is never silently replaced by
+    /// the gateway's generated one. Proven end to end: the resolved
+    /// `server_config` accepts a leaf from the explicit CA and rejects one
+    /// from the fallback (generated) CA.
+    #[tokio::test]
+    async fn from_parts_explicit_client_ca_wins_over_fallback() {
+        ensure_crypto_provider();
+        let mitm_der = dummy_mitm_ca_der();
+        let (server_cert_pem, server_key_pem, server_der) = self_signed_server_cert();
+        let explicit_ca = new_test_ca("Explicit Operator CA");
+        let generated_client_ca = new_test_ca("Generated Client CA");
+
+        let mtls = MtlsConfig::from_parts(
+            Some("10256"),
+            Some(&server_cert_pem),
+            Some(&server_key_pem),
+            Some(&explicit_ca.cert.pem()),
+            Some(&generated_client_ca.cert.pem()),
+            &mitm_der,
+            10255,
+        )
+        .expect("explicit GATEWAY_CLIENT_CA must load")
+        .expect("mTLS configured");
+
+        // Rejected: signed by the fallback (generated) CA, which lost.
+        let (fallback_cert_pem, fallback_key_pem) =
+            sign_client_leaf(&generated_client_ca, Some("agent-1"), &[], -1, 24);
+        let fallback_client_config = test_client_config(
+            &server_der,
+            Some(&fallback_cert_pem),
+            Some(&fallback_key_pem),
+        );
+        let rejected =
+            attempt_handshake(Arc::clone(&mtls.server_config), fallback_client_config).await;
+        assert!(
+            rejected.is_err(),
+            "a leaf from the losing fallback CA must be rejected"
+        );
+
+        // Accepted: signed by the explicit CA, which won.
+        let (explicit_cert_pem, explicit_key_pem) =
+            sign_client_leaf(&explicit_ca, Some("agent-1"), &[], -1, 24);
+        let explicit_client_config = test_client_config(
+            &server_der,
+            Some(&explicit_cert_pem),
+            Some(&explicit_key_pem),
+        );
+        attempt_handshake(mtls.server_config, explicit_client_config)
+            .await
+            .expect("a leaf from the winning explicit CA must be accepted");
+    }
+
+    /// Both `GATEWAY_CLIENT_CA` and the fallback absent is still an error —
+    /// the fallback is a convenience, not a way to silently skip validation.
+    #[test]
+    fn from_parts_errs_when_both_ca_and_fallback_absent() {
+        ensure_crypto_provider();
+        let mitm_der = dummy_mitm_ca_der();
+        let err = MtlsConfig::from_parts(
+            Some("10256"),
+            Some(PRESENT_PLACEHOLDER_PEM),
+            Some(PRESENT_PLACEHOLDER_PEM),
+            None,
+            None,
+            &mitm_der,
+            10255,
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("GATEWAY_CLIENT_CA"));
     }
 
     // ── pem_from_env / pem_from_value ────────────────────────────────────

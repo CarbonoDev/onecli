@@ -20,6 +20,10 @@ export const AUDIT_ACTIONS = {
   // EE-only (identity): a claimed resource passed its ownership proof
   // (e.g. an org domain's DNS TXT check).
   VERIFY: "verify",
+  // Client-certificate minting (gateway mTLS): a host enrolls and receives a
+  // signed leaf. Never DELETE/REGENERATE — there is no revocation flow yet
+  // (see `ClientHost.revokedAt`'s doc comment), so every mint is an ISSUE.
+  ISSUE: "issue",
 } as const;
 
 export const AUDIT_SERVICES = {
@@ -69,6 +73,8 @@ export const AUDIT_SERVICES = {
   ROLE_MAPPING: "role-mapping",
   // EE-only (directory): bearer tokens for the org's SCIM endpoint
   SCIM_TOKEN: "scim-token",
+  // Gateway mTLS client-certificate issuance (`POST /v1/gateway/client-cert`).
+  CLIENT_CERT: "client-cert",
 } as const;
 
 export const AUDIT_STATUS = {

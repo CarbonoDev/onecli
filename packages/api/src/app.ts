@@ -11,7 +11,6 @@ import type {
   PolicyValidator,
   RuleActionGate,
   NewOrgPolicySeeder,
-  PolicyCoherenceBridge,
 } from "./providers";
 import type { CryptoService } from "./lib/crypto-types";
 import type { AppDefinition } from "./apps/types";
@@ -32,7 +31,6 @@ import {
   initPolicyValidator,
   initRuleActionGate,
   initNewOrgPolicySeeder,
-  initPolicyCoherenceBridge,
   initStrictApiKeyAuth,
 } from "./providers";
 import { registerAppPermission } from "./apps/app-permissions";
@@ -40,8 +38,18 @@ import { errorHandler, notFoundHandler } from "./middleware/error-handler";
 import { healthRoutes } from "./routes/health";
 import { agentRoutes } from "./routes/agents";
 import { secretRoutes } from "./routes/secrets";
-import { ruleRoutes } from "./routes/rules";
-import { policyRoutes } from "./routes/policy";
+import {
+  policyReflectRoutes,
+  agentReflectRoutes,
+  connectionReflectRoutes,
+} from "./routes/policy-reflect";
+import { agentGrantsRoutes, connectionGrantsRoutes } from "./routes/grants";
+import {
+  removedAgentEquipmentRoutes,
+  removedConnectionAgentRoutes,
+  removedProjectPolicyRoutes,
+  removedRuleRoutes,
+} from "./routes/removed-routes";
 import { userRoutes } from "./routes/user";
 import { appRoutes } from "./routes/apps";
 import { connectionRoutes } from "./routes/connections";
@@ -80,16 +88,11 @@ export interface CreateApiAppOptions {
   policyValidator?: PolicyValidator;
   ruleActionGate?: RuleActionGate;
   /**
-   * Seeds a new org's initial published policy on bootstrap (cloud: a
-   * secure-by-default org Default Rule). OSS never sets it — new orgs stay on
-   * the old model until step 9.
+   * Seeds a new org's initial published policy on bootstrap (cloud: an
+   * allow-posture org Default Rule — deny-by-default is the admin's opt-in
+   * flip). OSS never sets it — new orgs stay on the old model until step 9.
    */
   newOrgPolicySeeder?: NewOrgPolicySeeder;
-  /**
-   * Re-materializes app-permission/blocklist v2 rules after an old-model write
-   * (step-5 coherence bridge, retired step 7). OSS never sets it — no-op.
-   */
-  policyCoherenceBridge?: PolicyCoherenceBridge;
   sessionHooks?: Partial<SessionHooks>;
   /**
    * Commit `oc_` bearers to API-key auth: when set, a failed API-key
@@ -124,8 +127,6 @@ export const createApiApp = (
   if (options?.ruleActionGate) initRuleActionGate(options.ruleActionGate);
   if (options?.newOrgPolicySeeder)
     initNewOrgPolicySeeder(options.newOrgPolicySeeder);
-  if (options?.policyCoherenceBridge)
-    initPolicyCoherenceBridge(options.policyCoherenceBridge);
   if (options?.sessionHooks) initSessionHooks(options.sessionHooks);
   if (options?.strictApiKeyAuth) initStrictApiKeyAuth(options.strictApiKeyAuth);
 
@@ -137,11 +138,20 @@ export const createApiApp = (
   app.route("/auth/session", authSessionRoutes());
   app.route("/agents", agentRoutes());
   app.route("/secrets", secretRoutes());
-  app.route("/rules", ruleRoutes());
-  app.route("/policy", policyRoutes());
   app.route("/user", userRoutes());
   app.route("/apps", appRoutes());
   app.route("/connections", connectionRoutes());
+  // Read-only policy reflections (step 9.7b) compose onto the same base paths.
+  // Since step 10 they are SHARED — OSS shows the credential-access dialog too —
+  // and each route redacts org-rule details via the roleResolver provider (null
+  // in OSS → fail-safe non-admin).
+  app.route("/policy", policyReflectRoutes());
+  app.route("/agents", agentReflectRoutes());
+  app.route("/connections", connectionReflectRoutes());
+  // The attach-model grants surface (step 2): agent⇄credential grants compiled
+  // into source:"grant" policy rules, composed onto the same base paths.
+  app.route("/agents", agentGrantsRoutes());
+  app.route("/connections", connectionGrantsRoutes());
   app.route("/vaults", vaultRoutes());
   app.route("/gateway-url", gatewayUrlRoutes());
   app.route("/gateway", gatewayCaRoutes());
@@ -151,6 +161,16 @@ export const createApiApp = (
   app.route("/credential-stubs", credentialStubRoutes());
   app.route("/migrate", migrateRoutes());
   app.route("/internal", internalRoutes());
+  // 410 Gone for the old-model paths step 10 removed. LAST, so every live route
+  // above wins the first-match — these only catch what no longer exists.
+  app.route("/rules", removedRuleRoutes());
+  app.route("/agents", removedAgentEquipmentRoutes());
+  app.route("/connections", removedConnectionAgentRoutes());
+  // Project-scope policy CRUD retired in attach-model step 6. Mounted on the
+  // same base path as `policyReflectRoutes` above, which is why the shim
+  // enumerates exact sub-paths instead of a wildcard: the reflections
+  // (`/v1/policy/effective-app-permissions`) must keep answering.
+  app.route("/policy", removedProjectPolicyRoutes());
 
   if (options?.eeRoutes) {
     options.eeRoutes(app);

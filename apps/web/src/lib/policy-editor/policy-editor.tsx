@@ -1,9 +1,8 @@
 "use client";
 
 import { useCallback, useMemo, useState } from "react";
-import { Building2, Folder, Loader2, Plus, TriangleAlert } from "lucide-react";
+import { Building2, Loader2, Plus, TriangleAlert } from "lucide-react";
 import { Button } from "@onecli/ui/components/button";
-import { useAgents } from "@/hooks/use-agents";
 import {
   useDeletePolicyRule,
   usePolicyDefault,
@@ -27,7 +26,6 @@ import { DeleteRuleDialog } from "./delete-rule-dialog";
 // rewrites as-written `@/` specifiers, so a relative import would load the OSS
 // module in every edition.
 import {
-  OrgGuardrails,
   StagedActions,
   StagedMeta,
   useDirectoryNames,
@@ -52,18 +50,15 @@ export interface PolicyEditorProps {
  * render read-only. Edits stage into a draft; Publish enforces them.
  */
 export const PolicyEditor = ({ scope }: PolicyEditorProps) => {
-  const isProject = scope === "project";
-
   const draft = usePolicyRules(scope);
   const published = usePublishedPolicyRules(scope);
   const draftDefault = usePolicyDefault(scope);
   const publishedDefault = usePublishedPolicyDefault(scope);
-  // Project-scoped (agents belong to a project); at org scope it's disabled — org
-  // rules render/target "all agents", so agent names aren't needed there.
-  const { data: agents = [] } = useAgents(isProject);
-  // Directory identities appear on org rules (and the org guardrails shown in
-  // the project view) — resolved through the edition seam (EE: the org-admin-
-  // gated directory reads; OSS: always undefined, identities fall back to id).
+  // Directory identities are what org rules target — resolved through the
+  // edition seam (EE: the org-admin-gated directory reads; OSS: always
+  // undefined, identities fall back to the raw id). The agent-name lookup that
+  // used to sit here went with the project page in step 6: `useAgents` was
+  // already disabled at org scope, so this reads identically.
   const directoryName = useDirectoryNames();
 
   const updateMutation = useUpdatePolicyRule(scope);
@@ -78,9 +73,8 @@ export const PolicyEditor = ({ scope }: PolicyEditorProps) => {
   const rules = useMemo(() => draft.data ?? [], [draft.data]);
   const q = query.trim().toLowerCase();
   const identityName = useCallback(
-    (id: string): string =>
-      agents.find((a) => a.id === id)?.name ?? directoryName(id) ?? id,
-    [agents, directoryName],
+    (id: string): string => directoryName(id) ?? id,
+    [directoryName],
   );
 
   // The staged diff (custom rules + the Default action; system-derived rows are
@@ -119,14 +113,13 @@ export const PolicyEditor = ({ scope }: PolicyEditorProps) => {
 
   const editableRules = useMemo(
     // Equipment rules (source="equipment") are INJECTION-ONLY — the block/allow
-    // engine drops them BY SOURCE (assemble_v2 / the simulator's load), so their
-    // connection/secret targets never decide — and they are managed via the
-    // agent access UI, not here. Hide them from the block/allow console so
-    // they don't render as unlabeled, un-editable "allow" rows.
-    () =>
-      rules
-        .filter((r) => !r.isDefault && r.source !== "equipment")
-        .filter(matches),
+    // engine drops them BY SOURCE (assemble_v2 / the injection load keeps them,
+    // the decision load doesn't), so their connection/secret targets never
+    // decide. They used to be hidden here because the agent-access dialogs
+    // managed them; those are gone, so hiding them would leave a live credential
+    // grant with no way to revoke it. They render labelled "Credential grant",
+    // not editable, but disable/delete are available.
+    () => rules.filter((r) => !r.isDefault).filter(matches),
     [rules, matches],
   );
 
@@ -225,15 +218,6 @@ export const PolicyEditor = ({ scope }: PolicyEditorProps) => {
         </div>
       ) : (
         <div className="flex flex-col gap-3">
-          {isProject && (
-            <OrgGuardrails
-              query={query}
-              identityName={identityName}
-              onEdit={openEdit}
-              onToggleEnabled={toggleEnabled}
-              onDelete={setPendingDelete}
-            />
-          )}
           {overlapState.size > 0 && (
             <div className="flex items-start gap-2.5 rounded-xl border border-amber-500/40 bg-amber-500/5 px-4 py-3 text-sm">
               <TriangleAlert
@@ -255,8 +239,8 @@ export const PolicyEditor = ({ scope }: PolicyEditorProps) => {
             </div>
           )}
           <PolicyRulesTable
-            title={isProject ? "Project rules" : "Organization rules"}
-            icon={isProject ? Folder : Building2}
+            title="Organization rules"
+            icon={Building2}
             rules={editableRules}
             editable
             identityName={identityName}

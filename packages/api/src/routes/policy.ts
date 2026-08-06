@@ -3,9 +3,7 @@ import { z } from "zod";
 import type { ApiEnv } from "../types";
 import type { AuthContext } from "../providers";
 import type { ResourceScope } from "../services/resource-scope";
-import { authMiddleware, requireProjectId } from "../middleware/auth";
 import { ServiceError } from "../services/errors";
-import { policyEditingEnabled } from "../lib/policy-flags";
 import {
   listPolicyRules,
   getPolicyRule,
@@ -69,19 +67,6 @@ export const registerPolicyRoutes = (
   app: Hono<ApiEnv>,
   cfg: PolicyRouteScope,
 ) => {
-  // Gate the mutating methods behind the editing flag; reads (and OPTIONS/HEAD
-  // preflight) stay open.
-  const MUTATING = new Set(["POST", "PUT", "PATCH", "DELETE"]);
-  app.use("*", async (c, next) => {
-    if (MUTATING.has(c.req.method) && !policyEditingEnabled()) {
-      throw new ServiceError(
-        "FORBIDDEN",
-        "Policy editing is not enabled for this deployment yet.",
-      );
-    }
-    return next();
-  });
-
   const auditBase = (auth: AuthContext) => ({
     ...cfg.auditScope(auth),
     userId: auth.userId,
@@ -203,13 +188,8 @@ export const registerPolicyRoutes = (
   });
 };
 
-/** Project-scoped policy routes: /v1/policy/* (blanket project auth). */
-export const policyRoutes = () => {
-  const app = new Hono<ApiEnv>();
-  app.use("*", authMiddleware);
-  registerPolicyRoutes(app, {
-    resolveScope: (auth) => ({ projectId: requireProjectId(auth) }),
-    auditScope: (auth) => ({ projectId: auth.projectId }),
-  });
-  return app;
-};
+// The PROJECT mounting of this factory retired in attach-model step 6: project
+// scope has exactly one writer now, the grants API, and `/v1/policy/*` answers
+// 410 there (`removedProjectPolicyRoutes`). The factory itself stays — the ORG
+// mirror (`ee/routes/org-policy.ts`) registers the identical ten handlers with
+// an organization scope, and onprem mounts it the same way.

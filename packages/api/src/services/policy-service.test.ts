@@ -49,6 +49,10 @@ vi.mock("@onecli/db", () => ({
       findUnique: async () =>
         state.projectOrg == null ? null : { organizationId: state.projectOrg },
     },
+    // getPolicyDefault's read path: no persisted default → the virtual one.
+    policyRuleV2: {
+      findFirst: async () => null,
+    },
     appConnection: {
       findMany: async ({ where }: { where: unknown }) => {
         state.connectionWheres.push(where);
@@ -58,7 +62,7 @@ vi.mock("@onecli/db", () => ({
   },
 }));
 
-const { backfillPublishScope, assertSessionPolicyValid } =
+const { backfillPublishScope, assertSessionPolicyValid, getPolicyDefault } =
   await import("./policy-service");
 const { initPolicyValidator } = await import("../providers");
 
@@ -101,50 +105,6 @@ describe("backfillPublishScope", () => {
     expect(state.creates).toHaveLength(0);
     // The default path never deletes — it only skips.
     expect(state.deleteManyCalls).toBe(0);
-  });
-
-  it("replace: discards the published scope and re-writes fresh (the heal path)", async () => {
-    // A scope that ALREADY has a published generation — the default path would
-    // skip; replace must delete it and re-materialize instead (fixing a scope
-    // frozen from an earlier catalog-less run).
-    state.publishedCount = 5;
-    const result = await backfillPublishScope(
-      { organizationId: "org-1" },
-      [networkRule],
-      { replace: true },
-    );
-    expect(state.deleteManyCalls).toBe(1); // stale v2 discarded
-    // The delete is fenced to EXACTLY this scope (the `scope` discriminator keeps
-    // an org replace from ever matching a project/other-org row) — the single
-    // highest-risk property of the heal path.
-    expect(state.deleteManyWheres[0]).toEqual({
-      scope: "organization",
-      organizationId: "org-1",
-    });
-    expect(result).toEqual({ skipped: false, generation: 1, ruleCount: 1 });
-    expect(state.creates).toHaveLength(2); // fresh draft gen 0 + published gen 1
-  });
-
-  it("replace on a project scope fences the delete to that project", async () => {
-    state.publishedCount = 2;
-    await backfillPublishScope({ projectId: "proj-1" }, [networkRule], {
-      replace: true,
-    });
-    expect(state.deleteManyWheres[0]).toEqual({
-      scope: "project",
-      projectId: "proj-1",
-    });
-  });
-
-  it("replace with no rules still discards the stale scope (generation null)", async () => {
-    // A scope whose old model is now empty must be CLEARED, not left stale.
-    state.publishedCount = 4;
-    const result = await backfillPublishScope({ organizationId: "org-1" }, [], {
-      replace: true,
-    });
-    expect(state.deleteManyCalls).toBe(1);
-    expect(state.creates).toHaveLength(0);
-    expect(result).toEqual({ skipped: false, generation: null, ruleCount: 0 });
   });
 
   it("writes each rule as draft gen 0 + published gen 1 (the gateway reads published)", async () => {
@@ -309,5 +269,24 @@ describe("assertSessionPolicyValid", () => {
         "allow",
       ),
     ).rejects.toThrow(/organization/i);
+  });
+});
+
+describe("the default-rule posture (both scopes allow)", () => {
+  // The attach-model law (plans/project-attach-model.md, step-3 decision): a
+  // scope with no persisted Default Rule reads back ALLOW — org included. This
+  // pins the co-change beside the new-org seeder flip: ensureDefault and the
+  // virtual default derive from the same `defaultAction`, so an org whose
+  // birth seed failed can never lazily resurrect a Block nobody chose.
+  it("virtual org default is allow", async () => {
+    const dto = await getPolicyDefault({ organizationId: "org-1" });
+    expect(dto.isDefault).toBe(true);
+    expect(dto.action).toBe("allow");
+  });
+
+  it("virtual project default is allow", async () => {
+    const dto = await getPolicyDefault({ projectId: "p-1" });
+    expect(dto.isDefault).toBe(true);
+    expect(dto.action).toBe("allow");
   });
 });

@@ -61,6 +61,9 @@ interface ConnectFlowProps {
   hiddenFields?: Record<string, string>;
   projectId?: string;
   orgId?: string;
+  /** Region for providers hosted in several (e.g. Vanta's us/eu/aus); the
+   *  authorize route validates it and falls back to the provider's default. */
+  region?: string;
 }
 
 export const ConnectFlow = ({
@@ -75,6 +78,7 @@ export const ConnectFlow = ({
   hiddenFields,
   projectId: explicitProjectId,
   orgId,
+  region,
 }: ConnectFlowProps) => {
   const [state, setState] = useState<FlowState>(
     status === "success" ? "success" : status === "error" ? "error" : "ready",
@@ -97,6 +101,7 @@ export const ConnectFlow = ({
     const params = new URLSearchParams();
     if (connectionId) params.set("connectionId", connectionId);
     if (agentName) params.set("agent_name", agentName);
+    if (region) params.set("region", region);
 
     const token = await getAuthToken();
     if (token) params.set("_token", token);
@@ -107,7 +112,7 @@ export const ConnectFlow = ({
     const qs = params.toString();
     const authorizeUrl = `${API_ORIGIN}/v1/apps/${app.id}/authorize${qs ? `?${qs}` : ""}`;
     window.location.href = authorizeUrl;
-  }, [app.id, connectionId, agentName, explicitProjectId, orgId]);
+  }, [app.id, connectionId, agentName, explicitProjectId, orgId, region]);
 
   // Countdown timer for auto-redirect
   useEffect(() => {

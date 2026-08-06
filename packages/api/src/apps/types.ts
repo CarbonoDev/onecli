@@ -3,12 +3,17 @@ export interface OAuthBuildAuthUrlParams {
   redirectUri: string;
   scopes: string[];
   state: string;
+  /** S256 PKCE challenge — present only for methods that set `pkce: true`. */
+  codeChallenge?: string;
 }
 
 export interface OAuthExchangeCodeParams {
   appCredentials: Record<string, string>;
   callbackParams: Record<string, string>;
   redirectUri: string;
+  /** The PKCE verifier whose challenge was sent to `buildAuthUrl` — present
+   *  only for methods that set `pkce: true`. */
+  codeVerifier?: string;
 }
 
 export interface OAuthExchangeResult {
@@ -35,6 +40,11 @@ export type ConnectionMethod =
       defaultScopes?: string[];
       /** Human-friendly permission descriptions. Drives the permissions UI. */
       permissions?: OAuthPermission[];
+      /** Send a PKCE (RFC 7636) S256 challenge/verifier pair. Required by
+       *  public clients — providers that issue no client secret. The connect
+       *  route generates the pair, hands `codeChallenge` to `buildAuthUrl`, and
+       *  replays `codeVerifier` into `exchangeCode`. */
+      pkce?: boolean;
       /** Providers that return the token in a URL fragment (#token=...) instead
        *  of a query parameter. The bridge page extracts the named param from the
        *  fragment and resubmits it as a query parameter for the server. */
@@ -95,6 +105,28 @@ export type ConnectionMethod =
       type: "cloud_only";
     };
 
+/**
+ * RFC 7591 dynamic client registration. For providers that mint a public OAuth
+ * client on demand instead of asking the operator to pre-register one — the MCP
+ * authorization pattern, where the server advertises a `registration_endpoint`
+ * and `token_endpoint_auth_methods_supported: ["none"]`, so there is no client
+ * secret to configure and BYOC (`configurable`) has nothing to hold.
+ *
+ * The minted client id is cached in the project's AppConfig row, keyed by the
+ * region and redirect URI it was registered for; a change in either
+ * re-registers, since a client id is only valid for its own redirect URI.
+ */
+export interface DynamicClientRegistration {
+  /** Client name sent to the provider — shown on its consent screen. */
+  clientName: string;
+  /** Regions the provider is hosted in; the first is the default. Chosen per
+   *  connect via `?region=` and passed through to `buildAuthUrl` /
+   *  `exchangeCode` as `appCredentials.region`. */
+  regions: readonly string[];
+  /** The region's RFC 7591 registration endpoint. */
+  registrationUrl: (region: string) => string;
+}
+
 export interface OAuthConfigField {
   name: string;
   label: string;
@@ -134,6 +166,10 @@ export interface AppDefinition {
     name: string;
     hostPattern: string;
   }[];
+  /** OAuth apps whose provider hands out clients on demand (RFC 7591) instead
+   *  of requiring configured credentials. Mutually exclusive with
+   *  `configurable`: there is no client secret to bring. */
+  dynamicRegistration?: DynamicClientRegistration;
   /** OAuth apps can be configured with custom credentials (BYOC). */
   configurable?: {
     fields: OAuthConfigField[];

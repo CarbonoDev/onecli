@@ -10,7 +10,15 @@ import {
   getAppPermissionDefinitions,
   toAppPermissionDefinitionSummary,
 } from "../apps/app-permissions";
-import { resolveAppCredentials } from "../apps/resolve-credentials";
+import {
+  resolveAppCredentials,
+  type ResolvedAppCredentials,
+} from "../apps/resolve-credentials";
+import {
+  resolveDynamicClient,
+  resolveRegion,
+  type DynamicClientResolution,
+} from "../apps/oauth/dynamic-registration";
 import {
   resolveConnectCredentials,
   type ConnectRequestBody,
@@ -21,6 +29,7 @@ import {
   verifyOAuthState,
   generateNonce,
 } from "../lib/oauth-state";
+import { createPkcePair } from "../lib/pkce";
 import { NODE_ENV } from "../lib/env";
 import { dashboardUrl } from "../lib/dashboard-url";
 import { getRequestOrigin, getAppOrigin } from "../lib/request-origin";
@@ -53,6 +62,7 @@ import {
 import { parseConfigBody } from "../validations/app-config";
 import {
   withAudit,
+  recordAuditEvent,
   AUDIT_ACTIONS,
   AUDIT_SERVICES,
   AUDIT_SOURCE,
@@ -410,6 +420,16 @@ export const appRoutes = () => {
       const rawAgentName = c.req.query("agent_name");
       const agentName = rawAgentName ? rawAgentName.slice(0, 128) : undefined;
 
+      // Providers hosted per region (all of them dynamic-registration apps)
+      // resolve their authorize/token/registration endpoints from this choice.
+      // It rides the signed state so the callback exchanges the code against the
+      // same region that issued it. Non-regional apps leave it undefined and
+      // resolve credentials exactly as before.
+      const registration = appDef.dynamicRegistration;
+      const region = registration
+        ? resolveRegion(registration, c.req.query("region"))
+        : undefined;
+
       // Decide where the browser goes *after* consent here, at the authenticated
       // end, and sign it: the callback is unauthenticated, so re-deriving it
       // there from request headers lets the caller influence the destination.
@@ -420,13 +440,36 @@ export const appRoutes = () => {
         origin: getAppOrigin(c.req.raw),
         ...(connectionId ? { connectionId } : {}),
         ...(agentName ? { agentName } : {}),
+        ...(region ? { region } : {}),
       });
 
-      const resolved = await resolveAppCredentials(
-        projectId,
-        appDef,
-        auth.organizationId,
-      );
+      const redirectUri = `${getRequestOrigin(c.req.raw)}/v1/apps/${provider}/callback`;
+      const scopes = appDef.connectionMethod.defaultScopes ?? [];
+
+      let resolved: ResolvedAppCredentials | DynamicClientResolution | null;
+      try {
+        resolved = region
+          ? await resolveDynamicClient(
+              { projectId },
+              appDef,
+              redirectUri,
+              region,
+              scopes,
+              { allowRegister: true },
+            )
+          : await resolveAppCredentials(projectId, appDef, auth.organizationId);
+      } catch (err) {
+        logger.warn(
+          { err, provider, region },
+          "dynamic client registration failed",
+        );
+        return c.json(
+          {
+            error: `Could not register an OAuth client with ${appDef.name}. Please try again.`,
+          },
+          502,
+        );
+      }
       if (!resolved) {
         return c.json(
           {
@@ -436,25 +479,46 @@ export const appRoutes = () => {
         );
       }
 
+      // Minting a client writes the project's AppConfig row — audit it like any
+      // other config write. Reused clients change nothing, so they log nothing.
+      if ("registered" in resolved && resolved.registered) {
+        await recordAuditEvent({
+          projectId,
+          userId: auth.userId,
+          userEmail: auth.userEmail,
+          action: AUDIT_ACTIONS.CREATE,
+          service: AUDIT_SERVICES.APP_CONFIG,
+          source: AUDIT_SOURCE.API,
+          metadata: { provider, region, dynamicRegistration: true },
+        });
+      }
+
       const { values: creds } = resolved;
 
-      const redirectUri = `${getRequestOrigin(c.req.raw)}/v1/apps/${provider}/callback`;
-      const scopes = appDef.connectionMethod.defaultScopes ?? [];
+      // Public clients (no secret) prove ownership of the flow with PKCE. The
+      // verifier never leaves this server: it goes into an httpOnly cookie
+      // scoped to the callback path, the same channel the state cookie uses.
+      const pkce = appDef.connectionMethod.pkce ? createPkcePair() : null;
 
       const authUrl = appDef.connectionMethod.buildAuthUrl({
         appCredentials: creds,
         redirectUri,
         scopes,
         state,
+        ...(pkce ? { codeChallenge: pkce.challenge } : {}),
       });
 
-      setCookie(c, "oauth_state", state, {
+      const callbackCookieOpts = {
         httpOnly: true,
         secure: NODE_ENV === "production",
-        sameSite: "Lax",
+        sameSite: "Lax" as const,
         path: `/v1/apps/${provider}/callback`,
         maxAge: 600,
-      });
+      };
+      setCookie(c, "oauth_state", state, callbackCookieOpts);
+      if (pkce) {
+        setCookie(c, "oauth_pkce", pkce.verifier, callbackCookieOpts);
+      }
 
       return c.redirect(authUrl);
     },
@@ -571,25 +635,44 @@ export const appRoutes = () => {
         }
       }
 
-      const resolved = await resolveAppCredentials(
-        state.projectId,
-        appDef,
-        stateOrgId,
-      );
+      const redirectUri = `${apiOrigin}/v1/apps/${provider}/callback`;
+
+      // The region committed to at /authorize — never a value re-derived here,
+      // where the request is unauthenticated. `allowRegister: false`: the code
+      // is bound to the client that started the flow, so a client minted now
+      // could only produce a failed exchange.
+      const stateRegion =
+        typeof state.region === "string" ? state.region : undefined;
+      const resolved = stateRegion
+        ? await resolveDynamicClient(
+            { projectId: state.projectId },
+            appDef,
+            redirectUri,
+            stateRegion,
+            appDef.connectionMethod.defaultScopes ?? [],
+            { allowRegister: false },
+          )
+        : await resolveAppCredentials(state.projectId, appDef, stateOrgId);
       if (!resolved) {
         return errorRedirect(`${appDef.name} is not configured`);
       }
-
-      const redirectUri = `${apiOrigin}/v1/apps/${provider}/callback`;
 
       // Extract all query params as callback params
       const url = new URL(c.req.url);
       const callbackParams = Object.fromEntries(url.searchParams.entries());
 
+      const codeVerifier = getCookie(c, "oauth_pkce");
+      if (appDef.connectionMethod.pkce && !codeVerifier) {
+        return errorRedirect(
+          "Authorization expired before it completed. Please connect again.",
+        );
+      }
+
       const result = await appDef.connectionMethod.exchangeCode({
         appCredentials: resolved.values,
         callbackParams,
         redirectUri,
+        ...(codeVerifier ? { codeVerifier } : {}),
       });
 
       const { credentials, scopes, metadata } = result;
@@ -666,6 +749,9 @@ export const appRoutes = () => {
       }
 
       deleteCookie(c, "oauth_state", {
+        path: `/v1/apps/${provider}/callback`,
+      });
+      deleteCookie(c, "oauth_pkce", {
         path: `/v1/apps/${provider}/callback`,
       });
 

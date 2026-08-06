@@ -15,6 +15,8 @@ interface Props {
     agent_name?: string;
     projectId?: string;
     orgId?: string;
+    /** Region for providers hosted in several (e.g. Vanta's us/eu/aus). */
+    region?: string;
   }>;
 }
 
@@ -28,6 +30,7 @@ export default async function ConnectPage({ params, searchParams }: Props) {
     agent_name,
     projectId,
     orgId,
+    region,
   } = await searchParams;
 
   const app = getApp(provider);
@@ -49,6 +52,11 @@ export default async function ConnectPage({ params, searchParams }: Props) {
   } catch {
     // Auth may not be resolved; treat as false
   }
+
+  // Dynamic-registration apps (RFC 7591) need nothing configured up front: the
+  // connect route mints their OAuth client on the way out.
+  const hasDefaults =
+    hasEnvDefaults || hasAppConfig || !!app.dynamicRegistration;
 
   // An app may offer an API-key alternate alongside its primary OAuth flow.
   const apiKeyMethod = app.additionalMethods?.find((m) => m.type === "api_key");
@@ -77,7 +85,8 @@ export default async function ConnectPage({ params, searchParams }: Props) {
             : undefined,
         apiKeyFields,
       }}
-      hasDefaults={hasEnvDefaults || hasAppConfig}
+      hasDefaults={hasDefaults}
+      region={region}
       status={status === "success" || status === "error" ? status : undefined}
       errorMessage={message}
       connectionId={connectionId}

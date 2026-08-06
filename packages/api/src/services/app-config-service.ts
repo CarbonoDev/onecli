@@ -244,6 +244,38 @@ export const saveAppConfigWithoutDisconnect = async (
   });
 };
 
+/**
+ * Persist an OAuth client obtained by dynamic registration (RFC 7591).
+ *
+ * Public clients have no secret, so everything lives in `settings`: the client
+ * id plus the region and redirect URI it was registered for, which is what
+ * {@link resolveDynamicClient} compares against before reusing it.
+ *
+ * Unlike {@link upsertAppConfig} this never disconnects existing connections —
+ * each connection stores the client id it was minted with, so re-registering
+ * (new deployment origin, other region) leaves working connections alone.
+ */
+export const upsertDynamicClientConfig = async (
+  scope: ResourceScope,
+  provider: string,
+  settings: { clientId: string; redirectUri: string; region: string },
+) =>
+  db.appConfig.upsert({
+    where: appConfigKey(scope, provider),
+    create: {
+      ...scopeCreate(scope),
+      provider,
+      enabled: true,
+      settings: { ...settings } as Prisma.InputJsonValue,
+      credentials: null,
+    },
+    update: {
+      enabled: true,
+      settings: { ...settings } as Prisma.InputJsonValue,
+    },
+    select: { id: true, provider: true },
+  });
+
 export const deleteAppConfig = async (
   scope: ResourceScope,
   provider: string,

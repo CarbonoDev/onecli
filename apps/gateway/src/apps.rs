@@ -100,6 +100,10 @@ pub(crate) enum ClientCredentialMethod {
     Body,
     /// Send `Authorization: Basic base64(client_id:client_secret)` header (Notion).
     BasicAuth,
+    /// Public client (no secret exists): send `client_id` in the body only.
+    /// Used by dynamically registered clients — providers advertising
+    /// `token_endpoint_auth_methods_supported: ["none"]`, e.g. Vanta's MCP.
+    PublicClient,
 }
 
 /// Configuration for refreshing expired OAuth tokens.
@@ -114,6 +118,15 @@ pub(crate) struct RefreshConfig {
     pub(crate) body_format: TokenBodyFormat,
     /// How client credentials are sent (body vs Basic auth header).
     pub(crate) client_auth: ClientCredentialMethod,
+    /// For dynamically registered clients: the credential JSON field holding the
+    /// client id this connection's refresh token was issued to. The id is
+    /// per-connection (not per-deployment), so it can only come from the
+    /// credentials — there is no AppConfig pair or env var to fall back to.
+    pub(crate) client_id_credential_field: Option<&'static str>,
+    /// For providers with regional token endpoints: the credential JSON field
+    /// holding the endpoint this connection was minted against. Falls back to
+    /// `token_url` when absent, so a refresh never crosses regions.
+    pub(crate) token_url_credential_field: Option<&'static str>,
 }
 
 /// Maps a credential JSON field to an HTTP header injected on every request.
@@ -173,6 +186,8 @@ static ATLASSIAN_REFRESH: RefreshConfig = RefreshConfig {
     client_secret_env: "ATLASSIAN_CLIENT_SECRET",
     body_format: TokenBodyFormat::Json,
     client_auth: ClientCredentialMethod::Body,
+    client_id_credential_field: None,
+    token_url_credential_field: None,
 };
 
 /// Refresh config for Todoist OAuth API.
@@ -182,6 +197,8 @@ static TODOIST_REFRESH: RefreshConfig = RefreshConfig {
     client_secret_env: "TODOIST_CLIENT_SECRET",
     body_format: TokenBodyFormat::Form,
     client_auth: ClientCredentialMethod::Body,
+    client_id_credential_field: None,
+    token_url_credential_field: None,
 };
 
 /// Shared refresh config for all Google OAuth APIs.
@@ -191,6 +208,8 @@ static GOOGLE_REFRESH: RefreshConfig = RefreshConfig {
     client_secret_env: "GOOGLE_CLIENT_SECRET",
     body_format: TokenBodyFormat::Form,
     client_auth: ClientCredentialMethod::Body,
+    client_id_credential_field: None,
+    token_url_credential_field: None,
 };
 
 /// Refresh config for Supabase Management API OAuth (uses Basic auth).
@@ -200,6 +219,8 @@ static SUPABASE_REFRESH: RefreshConfig = RefreshConfig {
     client_secret_env: "SUPABASE_CLIENT_SECRET",
     body_format: TokenBodyFormat::Form,
     client_auth: ClientCredentialMethod::BasicAuth,
+    client_id_credential_field: None,
+    token_url_credential_field: None,
 };
 
 /// Refresh config for GitLab OAuth API.
@@ -209,6 +230,8 @@ static GITLAB_REFRESH: RefreshConfig = RefreshConfig {
     client_secret_env: "GITLAB_CLIENT_SECRET",
     body_format: TokenBodyFormat::Form,
     client_auth: ClientCredentialMethod::Body,
+    client_id_credential_field: None,
+    token_url_credential_field: None,
 };
 
 /// Refresh config for Notion OAuth API (uses Basic auth + token rotation).
@@ -218,6 +241,8 @@ static NOTION_REFRESH: RefreshConfig = RefreshConfig {
     client_secret_env: "NOTION_CLIENT_SECRET",
     body_format: TokenBodyFormat::Json,
     client_auth: ClientCredentialMethod::BasicAuth,
+    client_id_credential_field: None,
+    token_url_credential_field: None,
 };
 
 /// Refresh config for Dropbox OAuth API.
@@ -227,6 +252,8 @@ static DROPBOX_REFRESH: RefreshConfig = RefreshConfig {
     client_secret_env: "DROPBOX_CLIENT_SECRET",
     body_format: TokenBodyFormat::Form,
     client_auth: ClientCredentialMethod::Body,
+    client_id_credential_field: None,
+    token_url_credential_field: None,
 };
 
 /// Refresh config for LinkedIn OAuth API.
@@ -236,6 +263,26 @@ static LINKEDIN_REFRESH: RefreshConfig = RefreshConfig {
     client_secret_env: "LINKEDIN_CLIENT_SECRET",
     body_format: TokenBodyFormat::Form,
     client_auth: ClientCredentialMethod::Body,
+    client_id_credential_field: None,
+    token_url_credential_field: None,
+};
+
+/// Refresh config for Vanta's MCP server OAuth.
+///
+/// A public client: Vanta's authorization-server metadata advertises
+/// `token_endpoint_auth_methods_supported: ["none"]`, so the client is
+/// registered dynamically (RFC 7591) per project and there is no secret. Both
+/// the client id and the regional token endpoint therefore travel in the
+/// connection's own credentials — `token_url` below is only the US default for
+/// credentials predating that field.
+static VANTA_REFRESH: RefreshConfig = RefreshConfig {
+    token_url: "https://api.vanta.com/oauth/token",
+    client_id_env: "VANTA_CLIENT_ID",
+    client_secret_env: "VANTA_CLIENT_SECRET",
+    body_format: TokenBodyFormat::Form,
+    client_auth: ClientCredentialMethod::PublicClient,
+    client_id_credential_field: Some("client_id"),
+    token_url_credential_field: Some("token_url"),
 };
 
 // ── Provider registry ──────────────────────────────────────────────────
@@ -1107,6 +1154,46 @@ static APP_PROVIDERS: &[AppProvider] = &[
         finalizer: None,
         body_transform: None,
     },
+    AppProvider {
+        provider: "vanta",
+        display_name: "Vanta",
+        // Vanta's MCP server, one host per region. A connection is authorized
+        // against exactly one of them, so `credential_host_field` gates
+        // injection to the region stored on the connection — a US token is
+        // never handed to `mcp.eu.vanta.com`. Vanta's REST API
+        // (`api.vanta.com`) is deliberately absent: these are MCP-scoped
+        // tokens (`mcp-api.*`), which the REST API does not accept.
+        host_rules: &[
+            HostRule {
+                pattern: HostPattern::Exact("mcp.vanta.com"),
+                path_prefix: None,
+                strategy: AuthStrategy::Bearer,
+                intercept: false,
+                credential_host_field: Some("mcp_host"),
+            },
+            HostRule {
+                pattern: HostPattern::Exact("mcp.eu.vanta.com"),
+                path_prefix: None,
+                strategy: AuthStrategy::Bearer,
+                intercept: false,
+                credential_host_field: Some("mcp_host"),
+            },
+            HostRule {
+                pattern: HostPattern::Exact("mcp.aus.vanta.com"),
+                path_prefix: None,
+                strategy: AuthStrategy::Bearer,
+                intercept: false,
+                credential_host_field: Some("mcp_host"),
+            },
+        ],
+        refresh: Some(&VANTA_REFRESH),
+        metadata_headers: &[],
+        credential_headers: &[],
+        credential_params: &[],
+        host_rewrite: None,
+        finalizer: None,
+        body_transform: None,
+    },
 ];
 
 // ── Public API ─────────────────────────────────────────────────────────
@@ -1532,26 +1619,41 @@ pub(crate) fn is_intercept_target(hostname: &str, path: &str) -> bool {
 /// Returns (new_access_token, expires_at, optional_new_refresh_token).
 ///
 /// Client credentials are resolved in order:
-/// 1. Explicit `client_id`/`client_secret` (from BYOC AppConfig)
+/// 1. Explicit `client_id`/`client_secret` (from BYOC AppConfig, or — for public
+///    clients — the connection's own credentials)
 /// 2. Env vars from `RefreshConfig` (platform defaults)
+///
+/// `token_url_override` carries a per-connection token endpoint for providers
+/// with regional deployments; `config.token_url` is the default.
+///
+/// A `PublicClient` provider has no secret at all: none is read from env and
+/// none is sent, so `byoc_client_secret` is ignored for those.
 pub(crate) async fn refresh_access_token(
     config: &RefreshConfig,
     refresh_token: &str,
     byoc_client_id: Option<&str>,
     byoc_client_secret: Option<&str>,
+    token_url_override: Option<&str>,
 ) -> anyhow::Result<(String, i64, Option<String>)> {
+    let is_public_client = matches!(config.client_auth, ClientCredentialMethod::PublicClient);
+
     let client_id = match byoc_client_id {
         Some(id) => id.to_string(),
         None => std::env::var(config.client_id_env)
             .map_err(|_| anyhow::anyhow!("{} env var not set", config.client_id_env))?,
     };
-    let client_secret = match byoc_client_secret {
-        Some(secret) => secret.to_string(),
-        None => std::env::var(config.client_secret_env)
-            .map_err(|_| anyhow::anyhow!("{} env var not set", config.client_secret_env))?,
+    let client_secret = if is_public_client {
+        String::new()
+    } else {
+        match byoc_client_secret {
+            Some(secret) => secret.to_string(),
+            None => std::env::var(config.client_secret_env)
+                .map_err(|_| anyhow::anyhow!("{} env var not set", config.client_secret_env))?,
+        }
     };
 
-    let mut req = reqwest::Client::new().post(config.token_url);
+    let token_url = token_url_override.unwrap_or(config.token_url);
+    let mut req = reqwest::Client::new().post(token_url);
 
     if matches!(config.client_auth, ClientCredentialMethod::BasicAuth) {
         let b64 = base64::engine::general_purpose::STANDARD;
@@ -1560,6 +1662,18 @@ pub(crate) async fn refresh_access_token(
     }
 
     let req = match (&config.body_format, &config.client_auth) {
+        (TokenBodyFormat::Form, ClientCredentialMethod::PublicClient) => req.form(&[
+            ("client_id", client_id.as_str()),
+            ("refresh_token", refresh_token),
+            ("grant_type", "refresh_token"),
+        ]),
+        (TokenBodyFormat::Json, ClientCredentialMethod::PublicClient) => {
+            req.json(&serde_json::json!({
+                "client_id": client_id,
+                "refresh_token": refresh_token,
+                "grant_type": "refresh_token",
+            }))
+        }
         (TokenBodyFormat::Form, ClientCredentialMethod::Body) => req.form(&[
             ("client_id", client_id.as_str()),
             ("client_secret", client_secret.as_str()),
@@ -3232,6 +3346,62 @@ mod tests {
     #[test]
     fn jfrog_has_no_refresh_config() {
         assert!(refresh_config("jfrog-artifactory").is_none());
+    }
+
+    // ── Vanta (MCP) ───────────────────────────────────────────────────
+
+    #[test]
+    fn providers_for_vanta_mcp_hosts() {
+        assert_eq!(providers_for_host("mcp.vanta.com"), vec!["vanta"]);
+        assert_eq!(providers_for_host("mcp.eu.vanta.com"), vec!["vanta"]);
+        assert_eq!(providers_for_host("mcp.aus.vanta.com"), vec!["vanta"]);
+    }
+
+    #[test]
+    fn vanta_rest_api_is_not_a_provider_host() {
+        // MCP-scoped tokens (`mcp-api.*`) are not REST API credentials, so
+        // `api.vanta.com` must never receive an injection.
+        assert!(providers_for_host("api.vanta.com").is_empty());
+        assert!(providers_for_host("app.vanta.com").is_empty());
+    }
+
+    #[test]
+    fn vanta_mcp_uses_bearer() {
+        let injections = build_app_injections("vanta", "mcp.vanta.com", "vanta_tok");
+        assert_eq!(injections.len(), 1);
+        assert_eq!(
+            injections[0],
+            Injection::SetHeader {
+                name: "authorization".to_string(),
+                value: "Bearer vanta_tok".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn vanta_regions_are_host_gated() {
+        // Every region carries the gate, so a connection minted for one region
+        // can never have its token injected into another's host.
+        for host in ["mcp.vanta.com", "mcp.eu.vanta.com", "mcp.aus.vanta.com"] {
+            assert_eq!(credential_host_field("vanta", host), Some("mcp_host"));
+        }
+    }
+
+    #[test]
+    fn vanta_refresh_is_a_public_client_with_credential_sourced_endpoint() {
+        let config = refresh_config("vanta").expect("vanta should have refresh config");
+        assert!(matches!(config.body_format, TokenBodyFormat::Form));
+        assert!(matches!(
+            config.client_auth,
+            ClientCredentialMethod::PublicClient
+        ));
+        assert_eq!(config.client_id_credential_field, Some("client_id"));
+        assert_eq!(config.token_url_credential_field, Some("token_url"));
+    }
+
+    #[test]
+    fn vanta_needs_access_token() {
+        assert!(needs_access_token("vanta"));
     }
 
     // ── credential_host_field ─────────────────────────────────────────

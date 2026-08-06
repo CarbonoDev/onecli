@@ -125,6 +125,14 @@ impl CertificateAuthority {
         der_to_pem(self.ca_cert_der.as_ref())
     }
 
+    /// Return the raw CA certificate DER.
+    /// Used by `client_ca::MtlsConfig::from_env` to reject a `GATEWAY_CLIENT_CA`
+    /// that is (accidentally or maliciously) this same CA — see the SECURITY
+    /// note in `client_ca.rs`.
+    pub(crate) fn ca_cert_der(&self) -> &CertificateDer<'static> {
+        &self.ca_cert_der
+    }
+
     /// Load CA from PEM strings (key + certificate).
     /// Used when CA is provided via environment variables (cloud mode).
     fn load_from_pem(key_pem: &str, cert_pem: &str) -> Result<Self> {
@@ -333,9 +341,11 @@ mod tests {
 
     fn ensure_crypto_provider() {
         INIT_CRYPTO.call_once(|| {
-            rustls::crypto::ring::default_provider()
-                .install_default()
-                .expect("install CryptoProvider");
+            // Ignore the error: it just means another test module (e.g.
+            // `client_ca`) already installed the process-wide default in this
+            // same test binary — a no-op for our purposes either way, since
+            // it's the same `ring` provider.
+            let _ = rustls::crypto::ring::default_provider().install_default();
         });
     }
 

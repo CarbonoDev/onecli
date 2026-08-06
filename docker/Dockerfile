@@ -117,7 +117,7 @@ VOLUME ["/app/data"]
 
 USER node
 
-EXPOSE 10254 10255
+EXPOSE 10254 10255 10256
 
 HEALTHCHECK --interval=10s --timeout=5s --start-period=60s --retries=3 \
   CMD wget -qO- http://127.0.0.1:10254/v1/health && wget -qO- http://127.0.0.1:10255/healthz || exit 1

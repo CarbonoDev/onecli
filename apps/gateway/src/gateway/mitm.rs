@@ -489,10 +489,8 @@ mod tests {
         ProxyContext {
             project_id: Some("p1".to_string()),
             organization_id: Some("o1".to_string()),
-            agent_id: None,
-            agent_name: None,
-            agent_identifier: None,
             agent_token: Some("tok".to_string()),
+            ..Default::default()
         }
     }
 

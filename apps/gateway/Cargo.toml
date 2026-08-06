@@ -26,6 +26,9 @@ tokio-rustls = "0.26"
 rustls = { version = "0.23", features = ["ring"] }
 rustls-pemfile = "2"
 
+# X.509 parsing (mTLS client-certificate identity extraction — CN/URI SANs)
+x509-parser = "0.16"
+
 # WebSocket upstream TLS root certificates
 webpki-roots = "0.26"
 

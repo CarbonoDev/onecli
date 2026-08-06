@@ -9,6 +9,7 @@ mod auth;
 #[path = "ee/auth.rs"]
 mod auth;
 
+mod binding;
 mod ca;
 mod client_ca;
 mod client_ca_authority;
@@ -315,6 +316,13 @@ async fn main() -> Result<()> {
         None => info!("mTLS disabled (GATEWAY_MTLS_PORT not set)"),
     }
 
+    // Phase 5: cert↔token tenant binding enforcement posture. Defaults to
+    // `Off` (unset `GATEWAY_BINDING_ENFORCEMENT`) — byte-for-byte identical
+    // to every prior phase until an operator opts in, first to `log` (compute
+    // + audit, never deny) and then to `enforce`.
+    let binding_mode = binding::BindingMode::from_env();
+    info!(mode = ?binding_mode, "cert/token tenant binding enforcement mode");
+
     // Connect to PostgreSQL
     // Support both DATABASE_URL (OSS) and individual DB_* vars (cloud ECS from Secrets Manager)
     let database_url = match std::env::var("DATABASE_URL") {
@@ -395,6 +403,7 @@ async fn main() -> Result<()> {
         approval_store,
         mtls,
         client_ca,
+        binding_mode,
     )?;
     let result = server.run().await;
 

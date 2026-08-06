@@ -87,11 +87,16 @@ futures-util = "0.3"
 # Error handling
 anyhow = "1"
 
-# Time (for certificate validity + RFC 3339 parsing)
-time = { version = "0.3", features = ["parsing"] }
+# Time (for certificate validity + RFC 3339 parsing). `serde` (Phase 5): lets
+# `db::ClientHostRow.revoked_at` (an `Option<PrimitiveDateTime>`) ride the same
+# JSON cache-serialization path every other cached DB row uses.
+time = { version = "0.3", features = ["parsing", "serde"] }
 
-# Direct database access
-sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls", "postgres"] }
+# Direct database access. `time` (Phase 5): maps the Postgres TIMESTAMP column
+# (`client_hosts.revoked_at`, no time zone) to `time::PrimitiveDateTime` for
+# `db::ClientHostRow` — sqlx maps TIMESTAMP→PrimitiveDateTime (TIMESTAMPTZ would
+# be OffsetDateTime).
+sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls", "postgres", "time"] }
 
 # Agent Access (Bitwarden vault credential injection)
 ap-client = "0.9.0"

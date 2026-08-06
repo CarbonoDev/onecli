@@ -1,0 +1,33 @@
+{
+  "$comment": "Anchor for the recurring upstream review. See ./README.md and .agents/skills/upstream-sync/SKILL.md.",
+  "upstream": "https://github.com/onecli/onecli.git",
+  "lastReviewedCommit": "84ccaf74ce6350f8925675457b48272c29f32c1a",
+  "lastReviewedTag": "v1.45.0",
+  "lastReviewedAt": "2026-08-05",
+  "forkBase": "v1.44.0",
+  "forkBaseCommit": "c1668eb1fa67a06072958a2aa5b9c709f7de0ccd",
+  "forkBranch": "open-edition/reconciled",
+  "pendingAdoption": [
+    {
+      "item": "v1.45.0 adoption",
+      "review": "reviews/2026-08-05-v1.45.0.md",
+      "status": "reviewed, not merged",
+      "blocker": "ee_apps::has_request_guard must return true for github-app/github/dropbox before the merge builds, or granular resource scoping silently stops injecting credentials"
+    }
+  ],
+  "reviews": [
+    {
+      "date": "2026-08-05",
+      "range": "v1.44.0..v1.45.0",
+      "doc": "reviews/2026-08-05-v1.45.0.md",
+      "commits": 2,
+      "conflicts": 6,
+      "decisions": {
+        "take": 9,
+        "takeWithAdaptation": 7,
+        "skip": 0,
+        "needsDecision": 1
+      }
+    }
+  ]
+}

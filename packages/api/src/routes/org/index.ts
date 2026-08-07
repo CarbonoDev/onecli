@@ -7,6 +7,7 @@ import { orgRoleMappingRoutes } from "./role-mappings";
 import { ossOrgPolicyRoutes } from "./policy";
 import { ossOrgBudgetRoutes } from "./budgets";
 import { ossProjectRoutes } from "./projects";
+import { ossOrganizationRoutes } from "./organizations";
 
 /**
  * The OSS edition's EDITION SURFACE: `/v1/org/*` PLUS `/v1/projects/*`.
@@ -38,4 +39,5 @@ export const registerOssOrgRoutes = (app: Hono<ApiEnv>) => {
   app.route("/org/policy", ossOrgPolicyRoutes());
   app.route("/org/budgets", ossOrgBudgetRoutes());
   app.route("/projects", ossProjectRoutes());
+  app.route("/organizations", ossOrganizationRoutes());
 };

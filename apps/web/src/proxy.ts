@@ -11,6 +11,7 @@ import {
   PROJECT_PATH_RE,
   ORG_PATH_RE,
   DEFAULT_PROJECT_COOKIE,
+  DEFAULT_ORG_COOKIE,
 } from "@/lib/navigation";
 import { isConnectOnlyAllowed } from "@/lib/connect-surface";
 
@@ -89,9 +90,13 @@ export const proxy = (request: NextRequest) => {
     requestHeaders.set("x-project-id", projectId);
   }
 
+  // Same precedence as the project id above, and the same safety argument:
+  // `resolveOrganizationId` re-validates the id against the caller's ACTIVE
+  // memberships, so a forged cookie resolves to nothing.
   const orgId =
     pathname.match(ORG_PATH_RE)?.[1] ||
-    (fromQuery ? searchParams.get("orgId") : null);
+    (fromQuery ? searchParams.get("orgId") : null) ||
+    request.cookies.get(DEFAULT_ORG_COOKIE)?.value;
   if (orgId) {
     requestHeaders.set("x-organization-id", orgId);
   }

@@ -68,6 +68,10 @@ export const queryKeys = {
     list: (organizationId?: string) =>
       [...queryKeys.projects.all(), "list", organizationId ?? "url"] as const,
   },
+  organizations: {
+    all: () => ["organizations"] as const,
+    list: () => [...queryKeys.organizations.all(), "list"] as const,
+  },
   projectAccess: {
     all: () => ["project-access", ...scope()] as const,
     list: (projectId: string) =>

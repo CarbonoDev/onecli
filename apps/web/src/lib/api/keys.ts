@@ -58,6 +58,7 @@ export const queryKeys = {
     all: () => ["projects", ...scope()] as const,
     detail: (projectId: string) =>
       [...queryKeys.projects.all(), projectId] as const,
+    list: () => [...queryKeys.projects.all(), "list"] as const,
   },
   projectAccess: {
     all: () => ["project-access", ...scope()] as const,

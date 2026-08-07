@@ -8,8 +8,8 @@
 
 | #   | Slice                         | Size | State                                    |
 | --- | ----------------------------- | ---- | ---------------------------------------- |
-| 1   | `GET /v1/projects` — list     | S    | in progress                              |
-| 2   | `POST /v1/projects` — create  | M    | not started                              |
+| 1   | `GET /v1/projects` — list     | S    | PR open                                  |
+| 2   | `POST /v1/projects` — create  | M    | PR open                                  |
 | 3   | Web: switcher + create dialog | M    | not started                              |
 | 4   | Org switching (follow-up)     | M–L  | not started, blocked on v1.45.0 adoption |
 

@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Hono } from "hono";
 import type { ApiEnv } from "../../types";
+import { MAX_PROJECTS_PER_ORG } from "../../validations/project";
 
 // `/v1/projects` end-to-end through the real app: the OSS routes mounted on
 // the `eeRoutes` seam, the OSS role resolver wired as the RoleResolver, and
@@ -154,12 +155,24 @@ vi.mock("@onecli/db", () => {
   interface ProjectWhere {
     id?: string | StringFilter;
     organizationId?: string;
+    slug?: { startsWith: string };
     createdByUserId?: string;
     organization?: {
       members: { some: { userId: string; status?: { not?: string } } };
     };
     accessBindings?: { some: { OR: BindingClause[] } };
     OR?: ProjectWhere[];
+  }
+  interface ProjectCreateData {
+    id: string;
+    name?: string | null;
+    slug?: string | null;
+    organizationId: string;
+    createdByUserId?: string | null;
+    createdByUserEmail?: string | null;
+    accessBindings?: { create: { userId: string; role: string } };
+    apiKeys?: { create: { key: string } };
+    agents?: { create: unknown };
   }
   interface AccessWhere {
     projectId?: string;
@@ -217,6 +230,11 @@ vi.mock("@onecli/db", () => {
     if (
       where.createdByUserId !== undefined &&
       row.createdByUserId !== where.createdByUserId
+    )
+      return false;
+    if (
+      where.slug?.startsWith !== undefined &&
+      !(row.slug ?? "").startsWith(where.slug.startsWith)
     )
       return false;
     if (where.organization) {
@@ -477,6 +495,65 @@ vi.mock("@onecli/db", () => {
           }
           return picked;
         });
+      },
+      // Mirrors the nested create `createProject` issues: the project row plus
+      // its owner binding, api key and default agent land together, which is
+      // exactly the atomicity Guard G depends on.
+      create: async ({
+        data,
+        select,
+      }: {
+        data: ProjectCreateData;
+        select?: Record<string, boolean>;
+      }) => {
+        if (
+          store.projects.some(
+            (p) =>
+              p.organizationId === data.organizationId && p.slug === data.slug,
+          )
+        ) {
+          // Prisma's @@unique([organizationId, slug]).
+          throw Object.assign(new Error("Unique constraint failed"), {
+            code: "P2002",
+          });
+        }
+        const row: ProjectRow = {
+          id: data.id,
+          organizationId: data.organizationId,
+          name: data.name ?? null,
+          slug: data.slug ?? null,
+          createdByUserId: data.createdByUserId ?? null,
+          createdAt: new Date(),
+        };
+        store.projects.push(row);
+        if (data.accessBindings?.create) {
+          const b = data.accessBindings.create;
+          store.projectAccess.push(
+            access(
+              `pa-new-${row.id}`,
+              row.id,
+              { userId: b.userId },
+              b.role,
+              row.createdAt,
+            ),
+          );
+        }
+        if (data.apiKeys?.create) {
+          store.apiKeys.push({
+            id: `k-new-${row.id}`,
+            projectId: row.id,
+            key: data.apiKeys.create.key,
+          });
+        }
+        if (data.agents?.create) {
+          store.agents.push({ id: `ag-new-${row.id}`, projectId: row.id });
+        }
+        if (!select) return { ...row };
+        const picked: Record<string, unknown> = {};
+        for (const key of Object.keys(select)) {
+          if (select[key]) picked[key] = row[key as keyof ProjectRow];
+        }
+        return picked;
       },
       count: async ({ where }: { where: ProjectWhere }) =>
         store.projects.filter((p) => matchesProject(p, where)).length,
@@ -1092,6 +1169,140 @@ describe("GET /projects (list)", () => {
   it("reads nothing and audits nothing", async () => {
     await list();
     expect(store.audits).toHaveLength(0);
+  });
+});
+
+describe("POST /projects (create)", () => {
+  const create = (body: unknown, init: RequestInit = asAdmin) =>
+    app.request("/v1/projects", {
+      ...init,
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+
+  it("401s an unauthenticated caller and 403s a project-scoped key", async () => {
+    expect((await create({ name: "New" }, {})).status).toBe(401);
+    expect((await create({ name: "New" }, asProjectKey)).status).toBe(403);
+    expect(store.projects).toHaveLength(5);
+    expect(store.audits).toHaveLength(0);
+  });
+
+  it("creates the project and seeds the caller as OWNER in the same write", async () => {
+    // Guard G's precondition: a project that exists without an owner binding
+    // can never be managed by anyone but an org admin.
+    store.sessionUserId = MEMBER;
+    const res = await create({ name: "Fresh Start" }, {});
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as ProjectBody;
+
+    const row = projectRow(body.id);
+    expect(row?.organizationId).toBe(ORG);
+    expect(row?.createdByUserId).toBe(MEMBER);
+    expect(userBinding(body.id, MEMBER)?.role).toBe("owner");
+  });
+
+  it("makes the new project immediately manageable by its creator", async () => {
+    // The end-to-end point of the owner seed: a plain member creates a project
+    // and can then rename it, with no admin involvement.
+    store.sessionUserId = MEMBER;
+    const body = (await (
+      await create({ name: "Mine" }, {})
+    ).json()) as ProjectBody;
+    expect((await patch(body.id, { name: "Renamed" }, {})).status).toBe(200);
+    expect(projectRow(body.id)?.name).toBe("Renamed");
+  });
+
+  it("makes the new project appear in the creator's list", async () => {
+    store.sessionUserId = MEMBER;
+    const body = (await (
+      await create({ name: "Listed" }, {})
+    ).json()) as ProjectBody;
+    expect(await listIds({})).toContain(body.id);
+  });
+
+  it("derives a slug from the name", async () => {
+    const body = (await (
+      await create({ name: "My New Project" })
+    ).json()) as ProjectBody;
+    expect(projectRow(body.id)?.slug).toBe("my-new-project");
+  });
+
+  it("disambiguates a colliding slug instead of failing — names are not unique", async () => {
+    // `projectNameSchema` deliberately allows duplicate names, so two projects
+    // called "Alpha" must both be creatable; only the slug has to differ.
+    const first = (await (
+      await create({ name: "Alpha" })
+    ).json()) as ProjectBody;
+    const second = (await (
+      await create({ name: "Alpha" })
+    ).json()) as ProjectBody;
+    // "alpha" is already taken by the seeded proj-1.
+    expect(projectRow(first.id)?.slug).toBe("alpha-2");
+    expect(projectRow(second.id)?.slug).toBe("alpha-3");
+    expect(projectRow(first.id)?.name).toBe("Alpha");
+  });
+
+  it("falls back to a usable slug when the name has no slug characters", async () => {
+    const body = (await (await create({ name: "!!!" })).json()) as ProjectBody;
+    expect(projectRow(body.id)?.slug).toBe("project");
+  });
+
+  it("422s an empty or missing name and writes nothing", async () => {
+    expect((await create({ name: "" })).status).toBe(422);
+    expect((await create({})).status).toBe(422);
+    expect((await create({ name: "x".repeat(101) })).status).toBe(422);
+    expect(store.projects).toHaveLength(5);
+    expect(store.audits).toHaveLength(0);
+  });
+
+  it("401s a caller with no active membership, and writes nothing", async () => {
+    // Rejected a layer earlier than `createProject`'s own gate: an org key
+    // whose user has lost their membership fails key authentication outright
+    // (the org-key branch re-checks role >= admin on every request), and a
+    // suspended session resolves neither project nor org. So the service's
+    // `if (!role) throw FORBIDDEN` is defence-in-depth for direct callers
+    // rather than a path this route reaches — kept so the service is correct
+    // on its own terms, not because the route depends on it.
+    store.members = store.members.filter((m) => m.userId !== ADMIN);
+    const res = await create({ name: "Nope" });
+    expect(res.status).toBe(401);
+    expect(store.projects).toHaveLength(5);
+    expect(store.audits).toHaveLength(0);
+  });
+
+  it("409s at the per-org cap, counting only this org", async () => {
+    // Fill ORG to the ceiling; OTHER_ORG's project must not count toward it.
+    for (let n = store.projects.length; n < MAX_PROJECTS_PER_ORG + 1; n++) {
+      store.projects.push({
+        id: `bulk-${n}`,
+        organizationId: ORG,
+        name: `Bulk ${n}`,
+        slug: `bulk-${n}`,
+        createdByUserId: ADMIN,
+        createdAt: at(100 + n),
+      });
+    }
+    const res = await create({ name: "One Too Many" });
+    expect(res.status).toBe(409);
+  });
+
+  it("audits the create with the new project's id and name", async () => {
+    const body = (await (
+      await create({ name: "Audited" })
+    ).json()) as ProjectBody;
+    const row = store.audits.at(-1);
+    expect(row?.action).toBe("create");
+    expect(row?.projectId).toBe(body.id);
+    expect(row?.organizationId).toBe(ORG);
+    expect(row?.metadata).toMatchObject({
+      projectId: body.id,
+      name: "Audited",
+    });
+  });
+
+  it("flushes the gateway org cache — ProjectAccess is authorization data", async () => {
+    await create({ name: "Flushed" });
+    expect(flushes.orgs).toContain(ORG);
   });
 });
 

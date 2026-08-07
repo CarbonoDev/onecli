@@ -27,8 +27,14 @@ export class ApiError extends Error {
 const toApiError = (body: Record<string, unknown>, status: number) =>
   new ApiError(extractErrorMessage(body, status), status);
 
-export const apiGet = async <T>(path: string): Promise<T> => {
-  const res = await apiFetch(path);
+// `init` is forwarded so a caller can set a per-request header — the
+// account-route project picker overrides `X-Organization-Id`. Deliberately NOT
+// added to the other verbs: nothing calls them that way.
+export const apiGet = async <T>(
+  path: string,
+  init?: RequestInit,
+): Promise<T> => {
+  const res = await apiFetch(path, init);
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
     throw toApiError(body, res.status);

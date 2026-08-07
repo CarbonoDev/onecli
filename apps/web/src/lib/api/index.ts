@@ -78,6 +78,7 @@ export type {
   AgentGrantSecret,
   ConnectionGrants,
   ConnectionGrantInput,
+  GrantResources,
   AgentGrantsSummary,
   AgentWithGrantsSummary,
   GrantsSummaryEntry,

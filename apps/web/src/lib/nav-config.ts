@@ -1,5 +1,6 @@
 import {
   LayoutDashboard,
+  Download,
   Bot,
   Settings,
   Plug,
@@ -26,6 +27,7 @@ export interface SettingsNavSection {
 
 export const navItems: NavItem[] = [
   { title: "Overview", url: "/overview", icon: LayoutDashboard },
+  { title: "Install", url: "/install", icon: Download },
   { title: "Agents", url: "/agents", icon: Bot },
   { title: "Connections", url: "/connections", icon: Plug },
   // Always visible: the organization policy surface degrades for non-admins

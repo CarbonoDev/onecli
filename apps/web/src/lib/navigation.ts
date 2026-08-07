@@ -94,6 +94,22 @@ export const readDefaultOrgCookie = (): string | undefined =>
     .find((c) => c.startsWith(`${DEFAULT_ORG_COOKIE}=`))
     ?.split("=")[1];
 
+/** Persist the selected org. Same shape as the project cookie — `SameSite=Lax`,
+ * no `Secure`, since self-hosted installs are routinely plain HTTP. */
+export const writeDefaultOrgCookie = (organizationId: string): void => {
+  const oneYear = 60 * 60 * 24 * 365;
+  document.cookie = `${DEFAULT_ORG_COOKIE}=${encodeURIComponent(
+    organizationId,
+  )}; path=/; max-age=${oneYear}; SameSite=Lax`;
+};
+
+/** Clear the project selection. Switching org MUST do this: a project cookie
+ * from the previous org would otherwise win over the new org's default (the
+ * project header takes precedence, and the org is derived from it). */
+export const clearDefaultProjectCookie = (): void => {
+  document.cookie = `${DEFAULT_PROJECT_COOKIE}=; path=/; max-age=0; SameSite=Lax`;
+};
+
 /**
  * Resolve a path inside the connections section, scoped to the current edition
  * and page. Single source of truth so callers never hardcode the bare OSS

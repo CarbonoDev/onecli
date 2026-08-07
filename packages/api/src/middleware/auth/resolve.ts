@@ -96,7 +96,16 @@ export const resolveProjectId = async (
   const headerProjectId = request.headers.get("x-project-id");
   if (!headerProjectId) {
     if (CAPS.tenancy === "multi-org") return null;
-    const fallback = await findUserDefaultProject(userId);
+    // No explicit project, but possibly an explicit ORG (the org switcher's
+    // cookie, via the proxy). Prefer that org's default project — otherwise
+    // `x-organization-id` is inert on flat editions, because a project always
+    // resolves here and `session.ts` derives the org FROM the project.
+    // `findUserDefaultProject` validates membership and falls back to the
+    // unfenced answer, so a bogus header cannot strand or mis-scope the caller.
+    const fallback = await findUserDefaultProject(
+      userId,
+      request.headers.get("x-organization-id") ?? undefined,
+    );
     return fallback?.id ?? null;
   }
 

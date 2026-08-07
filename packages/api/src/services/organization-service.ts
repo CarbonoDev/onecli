@@ -51,6 +51,7 @@ export const activeMembershipWhere = {
  */
 export const findUserDefaultProject = async (
   userId: string,
+  preferredOrgId?: string,
 ): Promise<{ id: string; organizationId: string } | null> => {
   // Cheap early-out for the pre-bootstrap user, and the reason both arms below
   // can assume at least one active membership exists.
@@ -65,31 +66,58 @@ export const findUserDefaultProject = async (
     organization: { members: { some: { userId, ...activeMembershipWhere } } },
   };
 
-  const created = await db.project.findFirst({
-    where: { ...inActiveMemberOrg, createdByUserId: userId },
-    select: { id: true, organizationId: true },
-    orderBy: [{ createdAt: "asc" }, { id: "asc" }],
-  });
-  if (created) return created;
+  // Both arms, optionally fenced to one organization. `preferredOrgId` is the
+  // org switcher's selection: it NARROWS which projects are candidates, it
+  // never widens them — the active-membership fence still applies, so an org
+  // the caller does not belong to simply yields nothing and we fall through to
+  // the unfenced pass below.
+  const resolve = async (organizationId?: string) => {
+    const orgFence = organizationId ? { organizationId } : {};
+    const created = await db.project.findFirst({
+      where: { ...inActiveMemberOrg, ...orgFence, createdByUserId: userId },
+      select: { id: true, organizationId: true },
+      orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+    });
+    if (created) return created;
 
-  return db.project.findFirst({
-    where: {
-      ...inActiveMemberOrg,
-      accessBindings: {
-        some: {
-          OR: [{ userId }, { group: { members: { some: { userId } } } }],
+    return db.project.findFirst({
+      where: {
+        ...inActiveMemberOrg,
+        ...orgFence,
+        accessBindings: {
+          some: {
+            OR: [{ userId }, { group: { members: { some: { userId } } } }],
+          },
         },
       },
-    },
-    select: { id: true, organizationId: true },
-    orderBy: [{ createdAt: "asc" }, { id: "asc" }],
-  });
+      select: { id: true, organizationId: true },
+      orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+    });
+  };
+
+  // A selection that resolves nothing (org left, membership suspended, its
+  // last project deleted) must not strand the caller with no project at all —
+  // that is the lockout `hasResolvableProjectExcluding` exists to prevent. Fall
+  // back to the unfenced answer, which is exactly the pre-switcher behaviour.
+  if (preferredOrgId) {
+    const preferred = await resolve(preferredOrgId);
+    if (preferred) return preferred;
+  }
+  return resolve();
 };
 
 /**
  * Whether `userId` would still resolve SOME project if `excludeProjectId`
  * disappeared — the delete guard's lockout oracle
  * (`deleteProject`, project-service).
+ *
+ * Deliberately takes NO `preferredOrgId`. The org fence in
+ * `findUserDefaultProject` only ever narrows, and always falls back to the
+ * unfenced answer, so the set of projects that can EVER resolve is unchanged —
+ * which is precisely the set this predicate has to describe. Adding a fence
+ * here would make it answer a narrower question than the one the delete guard
+ * asks ("will this user resolve SOMETHING afterwards?") and reintroduce the
+ * lockout.
  *
  * THESE TWO MUST AGREE: this is exactly `findUserDefaultProject`'s disjunction
  * (created-by-them, OR bound directly / through a group), fenced to orgs the
@@ -436,4 +464,44 @@ export const ensureProjectSeeds = async (
       },
     });
   }
+};
+
+export interface OrganizationRow {
+  id: string;
+  name: string;
+  slug: string;
+  role: string;
+}
+
+/**
+ * Organizations the caller is an ACTIVE member of, oldest membership first —
+ * the org switcher's source.
+ *
+ * Fenced by `activeMembershipWhere` for the usual reason: a suspended member is
+ * a non-member to every authorization check, so listing their old org would
+ * offer a switch that resolves to nothing.
+ *
+ * Multi-org membership is ordinary here, not exotic: `bootstrapOrganization`
+ * gives every user their own org as `owner`, and accepting an invitation adds a
+ * membership in someone else's — so anyone who has accepted an invite belongs
+ * to at least two.
+ */
+export const listUserOrganizations = async (
+  userId: string,
+): Promise<OrganizationRow[]> => {
+  const rows = await db.organizationMember.findMany({
+    where: { userId, ...activeMembershipWhere },
+    select: {
+      role: true,
+      organization: { select: { id: true, name: true, slug: true } },
+    },
+    orderBy: [{ createdAt: "asc" }],
+  });
+
+  return rows.map((row) => ({
+    id: row.organization.id,
+    name: row.organization.name,
+    slug: row.organization.slug,
+    role: row.role,
+  }));
 };

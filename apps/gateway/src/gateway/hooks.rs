@@ -8,6 +8,13 @@
 //!   applies it tees a bounded copy of the response stream, parses the provider
 //!   `usage` at stream end, prices it, and attaches a `BudgetCharge` to the
 //!   emitted `RequestEvent` (the telemetry flush accumulates it).
+//!
+//! Not budgets, but the same seam:
+//! - [`refuse_empty_scope`] refuses a request whose resource scope allows
+//!   nothing, before any credential is materialized. A no-op here: this fork
+//!   enforces resource scope at the REQUEST layer in `policy_engine::scope`,
+//!   not by minting a narrowed credential, so there is no empty-scope mint to
+//!   refuse. See `ee_apps::has_request_guard`.
 
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -96,6 +103,18 @@ pub(crate) fn needs_request_body(
     _path: &str,
 ) -> bool {
     false
+}
+
+/// Refuse a request whose resource scope allows nothing, before any credential
+/// is materialized or served. OSS stores no resource scopes → always allowed.
+pub(crate) fn refuse_empty_scope(
+    _rules: &ResolvedRules,
+    _proxy_ctx: &ProxyContext,
+    _host: &str,
+    _method: &str,
+    _path: &str,
+) -> Option<Response<ForwardResponseBody>> {
+    None
 }
 
 /// PRE-request budget gate. For each metered budget binding, read the running

@@ -15,6 +15,9 @@ export interface ScopeTextListProps {
    * unenforceable entry would silently brick or no-op the restriction. */
   validate?: (value: string) => string | null;
   onChange: (values: string[]) => void;
+  /** Render the current entries without allowing edits. Still VISIBLE — the
+   * scope must remain legible on an org-granted or mid-save row. */
+  readOnly?: boolean;
 }
 
 /** Free-text resource list for providers that can't be enumerated at
@@ -26,6 +29,7 @@ export const ScopeTextList = ({
   placeholder,
   validate,
   onChange,
+  readOnly = false,
 }: ScopeTextListProps): React.JSX.Element => {
   const [draft, setDraft] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -65,16 +69,18 @@ export const ScopeTextList = ({
               className="flex items-center justify-between gap-2 rounded-md border px-2 py-1 text-xs"
             >
               <span className="truncate font-mono">{value}</span>
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                className="size-6"
-                aria-label={`Remove ${itemLabel.singular} ${value}`}
-                onClick={() => remove(value)}
-              >
-                <X className="size-3.5" />
-              </Button>
+              {!readOnly && (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  className="size-6"
+                  aria-label={`Remove ${itemLabel.singular} ${value}`}
+                  onClick={() => remove(value)}
+                >
+                  <X className="size-3.5" />
+                </Button>
+              )}
             </li>
           ))}
         </ul>
@@ -83,36 +89,38 @@ export const ScopeTextList = ({
           All {itemLabel.plural} (no restriction)
         </p>
       )}
-      <div className="flex items-center gap-2">
-        <Input
-          value={draft}
-          placeholder={placeholder}
-          aria-label={`Add a ${itemLabel.singular}`}
-          aria-invalid={error != null}
-          onChange={(event) => {
-            setDraft(event.target.value);
-            if (error) {
-              setError(null);
-            }
-          }}
-          onKeyDown={(event) => {
-            if (event.key === "Enter") {
-              event.preventDefault();
-              add();
-            }
-          }}
-        />
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          disabled={!draft.trim()}
-          onClick={add}
-        >
-          <Plus className="size-3.5" />
-          Add
-        </Button>
-      </div>
+      {!readOnly && (
+        <div className="flex items-center gap-2">
+          <Input
+            value={draft}
+            placeholder={placeholder}
+            aria-label={`Add a ${itemLabel.singular}`}
+            aria-invalid={error != null}
+            onChange={(event) => {
+              setDraft(event.target.value);
+              if (error) {
+                setError(null);
+              }
+            }}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                event.preventDefault();
+                add();
+              }
+            }}
+          />
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            disabled={!draft.trim()}
+            onClick={add}
+          >
+            <Plus className="size-3.5" />
+            Add
+          </Button>
+        </div>
+      )}
       {error ? (
         <p className="text-xs text-destructive" role="alert">
           {error}

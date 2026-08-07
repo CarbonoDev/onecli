@@ -1,10 +1,19 @@
 import { db } from "@onecli/db";
 import { ServiceError } from "./errors";
-import { getRoleResolver, ROLE_HIERARCHY } from "../providers";
+import {
+  getRoleResolver,
+  ROLE_HIERARCHY,
+  getNewOrgPolicySeeder,
+} from "../providers";
 import {
   activeMembershipWhere,
+  defaultProjectSeed,
   hasResolvableProjectExcluding,
+  slugify,
 } from "./organization-service";
+import { generateProjectId } from "../lib/ids";
+import { logger } from "../lib/logger";
+import { MAX_PROJECTS_PER_ORG } from "../validations/project";
 import { invalidateGatewayCacheForKeys } from "../lib/gateway-invalidate";
 import { CAPS } from "../lib/env";
 
@@ -221,6 +230,126 @@ export const listProjects = async (
       orderBy: [{ createdAt: "asc" }, { id: "asc" }],
     })
   ).map(toProjectRow);
+};
+
+/** Prisma's unique-constraint code, same test as `org-group-service.ts`. */
+const isUniqueViolation = (err: unknown) =>
+  typeof err === "object" &&
+  err !== null &&
+  (err as { code?: string }).code === "P2002";
+
+/**
+ * A free slug for `name` within the org. Slugs are
+ * `@@unique([organizationId, slug])` but project NAMES are deliberately not
+ * unique (see `projectNameSchema`), so a collision here is an ordinary,
+ * expected state — never a user-facing error. Disambiguate silently.
+ */
+const freeSlug = async (
+  organizationId: string,
+  name: string,
+): Promise<string> => {
+  const base = slugify(name) || "project";
+  const taken = new Set(
+    (
+      await db.project.findMany({
+        where: { organizationId, slug: { startsWith: base } },
+        select: { slug: true },
+      })
+    ).map((row) => row.slug),
+  );
+  if (!taken.has(base)) return base;
+  for (let n = 2; n <= taken.size + 2; n++) {
+    const candidate = `${base}-${n}`;
+    if (!taken.has(candidate)) return candidate;
+  }
+  // Unreachable by construction (the loop bound exceeds the taken set), but a
+  // random tail is a safer fallback than throwing on a naming detail.
+  return `${base}-${generateProjectId().slice(0, 8)}`;
+};
+
+/**
+ * Create a project, with the caller as its `owner`.
+ *
+ * The owner binding is a NESTED create, not a follow-up write, so it lands in
+ * the same statement as the project row. That is Guard G's precondition: a
+ * project with no owner binding can never be renamed, shared or deleted by
+ * anyone but an org admin, so a create that succeeded and a binding that
+ * failed would leave an orphan no member could manage.
+ *
+ * Seeded like every other project-creation site (`bootstrapOrganization`,
+ * `ensureMemberDefaultProject`): an API key and a default agent, so the project
+ * is usable the moment it exists rather than being an empty shell. Policy
+ * seeding is best-effort for the same reason it is there — a seeding hiccup
+ * must not fail the create.
+ *
+ * Authorization is HERE rather than in the route because there is no resource
+ * to resolve yet. Any active member may create; a suspended member reads as no
+ * role and is refused, the same suspension invariant every other gate applies.
+ */
+export const createProject = async (
+  organizationId: string,
+  userId: string,
+  userEmail: string,
+  name: string,
+): Promise<ProjectRow> => {
+  if (CAPS.rbac) {
+    const resolver = getRoleResolver();
+    const role = resolver
+      ? await resolver.getUserRole(userId, organizationId)
+      : null;
+    if (!role) {
+      throw new ServiceError(
+        "FORBIDDEN",
+        "You do not have permission to create a project.",
+      );
+    }
+  }
+
+  const count = await db.project.count({ where: { organizationId } });
+  if (count >= MAX_PROJECTS_PER_ORG) {
+    throw new ServiceError(
+      "CONFLICT",
+      `This organization has reached its limit of ${MAX_PROJECTS_PER_ORG} projects.`,
+    );
+  }
+
+  const create = (slug: string) =>
+    db.project.create({
+      data: {
+        id: generateProjectId(),
+        name,
+        slug,
+        organizationId,
+        createdByUserId: userId,
+        createdByUserEmail: userEmail,
+        ...defaultProjectSeed(userId, userEmail),
+        accessBindings: { create: { userId, role: "owner" } },
+      },
+      select: projectSelect,
+    });
+
+  let row;
+  try {
+    row = await create(await freeSlug(organizationId, name));
+  } catch (err) {
+    // A concurrent create took the slug between our read and our write. Retry
+    // once with a random tail; a second failure is a genuine error.
+    if (!isUniqueViolation(err)) throw err;
+    row = await create(
+      `${slugify(name) || "project"}-${generateProjectId().slice(0, 8)}`,
+    );
+  }
+
+  try {
+    await getNewOrgPolicySeeder().seed(organizationId, row.id);
+  } catch (err) {
+    logger.warn(
+      { err, organizationId, projectId: row.id },
+      "created project policy seed failed",
+    );
+  }
+
+  return toProjectRow(row);
 };
 
 /**

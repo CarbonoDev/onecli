@@ -6,12 +6,12 @@
 
 ## Status
 
-| # | Slice | Size | State |
-| --- | --- | --- | --- |
-| 1 | `GET /v1/projects` — list | S | in progress |
-| 2 | `POST /v1/projects` — create | M | not started |
-| 3 | Web: switcher + create dialog | M | not started |
-| 4 | Org switching (follow-up) | M–L | not started, blocked on v1.45.0 adoption |
+| #   | Slice                         | Size | State                                    |
+| --- | ----------------------------- | ---- | ---------------------------------------- |
+| 1   | `GET /v1/projects` — list     | S    | in progress                              |
+| 2   | `POST /v1/projects` — create  | M    | not started                              |
+| 3   | Web: switcher + create dialog | M    | not started                              |
+| 4   | Org switching (follow-up)     | M–L  | not started, blocked on v1.45.0 adoption |
 
 ## The gap in one line
 
@@ -19,16 +19,16 @@ Everything below the UI is already multi-project. What's missing is the ability 
 
 ## What already works — do not rebuild
 
-| Layer | State |
-| --- | --- |
-| `Project` model | Multi-project ready: `slug` with `@@unique([organizationId, slug])`, `createdByUserId`, org FK |
-| `ProjectAccess` | User + group bindings, `owner`/`member` role, cascade deletes |
-| Ownership of data | `Agent`, `Secret`, `AppConnection`, `PolicyRuleV2`, `ApiKey`, `Budget`, `AuditLog` all FK to `Project` |
-| Gateway | Fully project-aware — `agent.project_id` drives secrets, connections and policy resolution |
-| API keys | Already `scope: "project" | "organization"` with a `projectId` FK |
-| **Switching (transport)** | `resolveProjectId` already honours `x-project-id`, gated by `canAccessProjectAsUser` |
-| **Switching (authz)** | `canAccessProjectAsUser` + `hasProjectBinding` — built and tested in #13 |
-| Management | `renameProject`, `deleteProject`, `listProjectAccess`, `setProjectAccess` — all shipped |
+| Layer                     | State                                                                                                  |
+| ------------------------- | ------------------------------------------------------------------------------------------------------ |
+| `Project` model           | Multi-project ready: `slug` with `@@unique([organizationId, slug])`, `createdByUserId`, org FK         |
+| `ProjectAccess`           | User + group bindings, `owner`/`member` role, cascade deletes                                          |
+| Ownership of data         | `Agent`, `Secret`, `AppConnection`, `PolicyRuleV2`, `ApiKey`, `Budget`, `AuditLog` all FK to `Project` |
+| Gateway                   | Fully project-aware — `agent.project_id` drives secrets, connections and policy resolution             |
+| API keys                  | Already `scope: "project" \| "organization"` with a `projectId` FK                                     |
+| **Switching (transport)** | `resolveProjectId` already honours `x-project-id`, gated by `canAccessProjectAsUser`                   |
+| **Switching (authz)**     | `canAccessProjectAsUser` + `hasProjectBinding` — built and tested in #13                               |
+| Management                | `renameProject`, `deleteProject`, `listProjectAccess`, `setProjectAccess` — all shipped                |
 
 Multi-project is not a new capability. It is already happening: `ensureMemberDefaultProject` creates one project per invited member, which is exactly why `projectNameSchema` is deliberately non-unique per org.
 
@@ -51,11 +51,11 @@ Multi-project is not a new capability. It is already happening: `ensureMemberDef
 
 `proxy.ts` derives project from a `/p/<id>` path prefix, but **strips that prefix entirely when `!CAPS.orgScopedUI`** — which covers `oss` and `onprem-slim`. On those editions the only ways to set project context today are the `?projectId=` query bridge (scoped to `/app-connect`) and the `findUserDefaultProject` fallback. **A switcher on OSS currently has no transport.**
 
-| Option | Assessment |
-| --- | --- |
-| **A. Default-project cookie**, read by `proxy.ts` → `x-project-id` | **Recommended.** Keeps flat editions flat (no URL change), works on every edition, and mirrors a precedent upstream is *actively building*: `DEFAULT_ORG_COOKIE = "onecli-default-org"` plus `readDefaultOrgCookie()` land in `navigation.ts` in **v1.45.0** (absent from our v1.44.0 base). Define `onecli-default-project` alongside it in the same file, honouring upstream's own comment there — *"One definition so writer and reader can't drift."* Server still validates via `canAccessProjectAsUser`, so the cookie is a hint, never authority. **Note the extension**: upstream's cookie is read client-side only (`document.cookie`); ours must also be read server-side in `proxy.ts` to become transport. |
-| B. Enable `/p/<id>` namespacing on flat editions | Changes every URL on OSS, touches proxy + nav + every link. Large blast radius for a feature that doesn't need it. |
-| C. Extend the `?projectId=` query bridge | Ugly to carry across navigations; the bridge exists for a popup with no path, not general use. |
+| Option                                                             | Assessment                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| ------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **A. Default-project cookie**, read by `proxy.ts` → `x-project-id` | **Recommended.** Keeps flat editions flat (no URL change), works on every edition, and mirrors a precedent upstream is _actively building_: `DEFAULT_ORG_COOKIE = "onecli-default-org"` plus `readDefaultOrgCookie()` land in `navigation.ts` in **v1.45.0** (absent from our v1.44.0 base). Define `onecli-default-project` alongside it in the same file, honouring upstream's own comment there — _"One definition so writer and reader can't drift."_ Server still validates via `canAccessProjectAsUser`, so the cookie is a hint, never authority. **Note the extension**: upstream's cookie is read client-side only (`document.cookie`); ours must also be read server-side in `proxy.ts` to become transport. |
+| B. Enable `/p/<id>` namespacing on flat editions                   | Changes every URL on OSS, touches proxy + nav + every link. Large blast radius for a feature that doesn't need it.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| C. Extend the `?projectId=` query bridge                           | Ugly to carry across navigations; the bridge exists for a popup with no path, not general use.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 
 ### 2. Does `GET /` match upstream's contract?
 
@@ -74,7 +74,7 @@ Options: any active org member, or admins only. **Recommend any active member**,
 ## Invariants that must not break
 
 1. **`findUserDefaultProject` and `hasResolvableProjectExcluding` MUST stay in sync.** The comment in `organization-service.ts` is emphatic: drift is a lockout — a user whose last project is deleted resolves no project and session auth 401s them everywhere. Adding create/list touches project resolution; both predicates must be re-checked together.
-2. **Default-project resolution is stable under creation.** Arm 1 is "oldest project you created" (`orderBy: createdAt asc`), so creating a second project does not silently move your default. Preserve that — and note it means there is currently no way to *change* your default, which Decision 1's cookie would effectively provide.
+2. **Default-project resolution is stable under creation.** Arm 1 is "oldest project you created" (`orderBy: createdAt asc`), so creating a second project does not silently move your default. Preserve that — and note it means there is currently no way to _change_ your default, which Decision 1's cookie would effectively provide.
 3. **Guard G — a project must always keep an owner.** Creation must seed the creator's `owner` binding in the same transaction, or a freshly created project is immediately unmanageable.
 4. **Slug uniqueness per org.** `@@unique([organizationId, slug])` — creation needs slug generation with collision handling (`slugify` already exists in `organization-service.ts`). A P2002 race must surface as a 409, matching the group-create precedent.
 5. **Audit + gateway invalidation.** Per `CLAUDE.md`, create must use `withAudit`. `withAudit` handles gateway cache invalidation when `organizationId`/`projectId` are present.
@@ -117,17 +117,17 @@ if (projectId) {
 organizationId = resolveOrganizationId(request, userId)          // header only reached here
 ```
 
-And `resolveProjectId` falls back to `findUserDefaultProject` whenever `CAPS.tenancy !== "multi-org"`. On `oss` (`org-per-user`) and `onprem-slim` (`single-org-shared`) a project therefore *always* resolves — so **`x-organization-id` is dead on flat editions.** Org switching there is not a missing-UI problem; the resolution order defeats it. On `cloud` (`multi-org`) it already works, because no project header means `resolveProjectId` returns null and the org header gets its turn.
+And `resolveProjectId` falls back to `findUserDefaultProject` whenever `CAPS.tenancy !== "multi-org"`. On `oss` (`org-per-user`) and `onprem-slim` (`single-org-shared`) a project therefore _always_ resolves — so **`x-organization-id` is dead on flat editions.** Org switching there is not a missing-UI problem; the resolution order defeats it. On `cloud` (`multi-org`) it already works, because no project header means `resolveProjectId` returns null and the org header gets its turn.
 
 This is why org switching is a genuine follow-up rather than a sibling of the project work: it changes the most security-sensitive resolution path in the app.
 
 ### How to fix it
 
-| Option | Assessment |
-| --- | --- |
-| **A. Make the default-project fallback org-aware** — `findUserDefaultProject(userId, preferredOrgId?)`, with `preferredOrgId` from the org cookie/header | **Recommended.** Switching org then means "land on my default project *within that org*." Precedence is untouched, `x-organization-id` stops being dead without inverting anything, and org and project can never disagree because org is still derived from the winning project. Falls back to today's unfiltered behaviour when the selected org has no reachable project, so the lockout invariant holds. |
-| B. Invert precedence — org header wins, project must belong to it | Touches the lockout invariant and the resolution path every request depends on. Also introduces a genuine mismatch class: `resolveProjectId` validates a project against *any* org the user belongs to, not the selected one, so a stale project header from org A would need explicit rejection under org B. |
-| C. No org switcher — switch org implicitly by picking a project in it | Zero new mechanism, and the project switcher (PR 3) already spans orgs. But it's poor UX for an org where you hold no project binding yet, and it leaves `x-organization-id` dead. Reasonable interim if PR 4 slips. |
+| Option                                                                                                                                                   | Assessment                                                                                                                                                                                                                                                                                                                                                                                                   |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **A. Make the default-project fallback org-aware** — `findUserDefaultProject(userId, preferredOrgId?)`, with `preferredOrgId` from the org cookie/header | **Recommended.** Switching org then means "land on my default project _within that org_." Precedence is untouched, `x-organization-id` stops being dead without inverting anything, and org and project can never disagree because org is still derived from the winning project. Falls back to today's unfiltered behaviour when the selected org has no reachable project, so the lockout invariant holds. |
+| B. Invert precedence — org header wins, project must belong to it                                                                                        | Touches the lockout invariant and the resolution path every request depends on. Also introduces a genuine mismatch class: `resolveProjectId` validates a project against _any_ org the user belongs to, not the selected one, so a stale project header from org A would need explicit rejection under org B.                                                                                                |
+| C. No org switcher — switch org implicitly by picking a project in it                                                                                    | Zero new mechanism, and the project switcher (PR 3) already spans orgs. But it's poor UX for an org where you hold no project binding yet, and it leaves `x-organization-id` dead. Reasonable interim if PR 4 slips.                                                                                                                                                                                         |
 
 **Option A keeps the invariant that org is always derived from the resolved project** — which is what makes the current design coherent. Preserve it.
 
@@ -137,7 +137,7 @@ This is why org switching is a genuine follow-up rather than a sibling of the pr
 
 ## Scope of PR 4
 
-1. `GET /v1/organizations` — list orgs where the caller is an *active* member (`activeMembershipWhere`), returning id/name/slug/role. New file `routes/org/organizations.ts`, or extend `organization-service.ts` with `listUserOrganizations`.
+1. `GET /v1/organizations` — list orgs where the caller is an _active_ member (`activeMembershipWhere`), returning id/name/slug/role. New file `routes/org/organizations.ts`, or extend `organization-service.ts` with `listUserOrganizations`.
 2. `findUserDefaultProject(userId, preferredOrgId?)` — Decision A. **`hasResolvableProjectExcluding` must be updated in lockstep** (invariant 1); the two predicates are required to agree.
 3. `proxy.ts` — read the org cookie into `x-organization-id` on flat editions, mirroring the project cookie from PR 3.
 4. Web — `api/organizations.ts`, `use-organizations` hook, org switcher in the dashboard nav (alongside the project switcher), writing the cookie on switch.

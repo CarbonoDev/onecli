@@ -6,6 +6,7 @@ import {
   hasResolvableProjectExcluding,
 } from "./organization-service";
 import { invalidateGatewayCacheForKeys } from "../lib/gateway-invalidate";
+import { CAPS } from "../lib/env";
 
 // Project administration: read, rename, delete. Three rules, same as
 // `org-group-service.ts`:
@@ -158,6 +159,69 @@ export const getProject = async (
   projectId: string,
 ): Promise<ProjectRow> =>
   toProjectRow(await requireProject(organizationId, projectId));
+
+const listAllProjects = async (organizationId: string): Promise<ProjectRow[]> =>
+  (
+    await db.project.findMany({
+      where: { organizationId },
+      select: projectSelect,
+      orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+    })
+  ).map(toProjectRow);
+
+/**
+ * Every project in `organizationId` the caller may USE, oldest first.
+ *
+ * THIS MUST MIRROR `canAccessProjectAsUser` — it is that per-row predicate
+ * expressed as a query, arm for arm, and the two are required to agree. Drift
+ * either way is a bug with teeth: a project listed here but rejected by the
+ * usage gate leaks a name past its ProjectAccess bindings, and one allowed
+ * there but omitted here is a project the caller can reach but never discover.
+ *
+ * The arms, in the same order and for the same reasons as the gate:
+ *
+ *  1. No RBAC — the gate no-ops (allows), so the list is the whole org.
+ *  2. No role — suspended or not a member. Empty, and the binding arm is
+ *     INSIDE this gate, so a suspended user's stale binding is never consulted
+ *     (the suspension invariant).
+ *  3. Admin/owner — the whole org.
+ *  4. Otherwise — projects carrying a binding for this user, direct or through
+ *     a group. `role` is deliberately not filtered: usage is role-blind, and a
+ *     plain `member` binding is a full use grant.
+ *
+ * Ordering matches `findUserDefaultProject` (`createdAt asc, id asc`) so the
+ * project a caller lands on by default is the first one a switcher shows.
+ */
+export const listProjects = async (
+  organizationId: string,
+  userId: string,
+): Promise<ProjectRow[]> => {
+  if (!CAPS.rbac) return listAllProjects(organizationId);
+
+  const resolver = getRoleResolver();
+  const role = resolver
+    ? await resolver.getUserRole(userId, organizationId)
+    : null;
+  if (!role) return [];
+  if (ROLE_HIERARCHY[role] >= ROLE_HIERARCHY.admin) {
+    return listAllProjects(organizationId);
+  }
+
+  return (
+    await db.project.findMany({
+      where: {
+        organizationId,
+        accessBindings: {
+          some: {
+            OR: [{ userId }, { group: { members: { some: { userId } } } }],
+          },
+        },
+      },
+      select: projectSelect,
+      orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+    })
+  ).map(toProjectRow);
+};
 
 /**
  * Rename. `name` ONLY — `slug` is immutable (it is write-only provenance,

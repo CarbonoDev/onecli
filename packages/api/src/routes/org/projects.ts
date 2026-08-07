@@ -8,6 +8,7 @@ import { canAccessProjectAsUser } from "../../middleware/auth/resolve";
 import {
   deleteProject,
   getProject,
+  listProjects,
   renameProject,
   requireManageableProject,
   requireProject,
@@ -96,6 +97,21 @@ export const ossProjectRoutes = () => {
     }
     return project;
   };
+
+  // GET /projects — every project the caller may use, for a switcher and for
+  // upstream's Get Started picker. Deliberately matches upstream's client
+  // contract (`Project[]`, optional `X-Organization-Id` override): upstream
+  // serves this route from its closed cloud backend, so the OSS build 404s it
+  // without this handler.
+  //
+  // No authorization here on purpose. Unlike every other route in this file
+  // there is no id to resolve, so there is nothing to 404 and nothing to 403 —
+  // `listProjects` IS the authorization, returning only what the caller may
+  // reach. A member of the org with no bindings correctly gets `[]`, not a 403.
+  app.get("/", async (c) => {
+    const auth = c.get("auth");
+    return c.json(await listProjects(auth.organizationId, auth.userId));
+  });
 
   // GET /projects/:projectId — the sharing page's name/slug source. Nothing
   // else in the API exposes a project's name (the session route returns only

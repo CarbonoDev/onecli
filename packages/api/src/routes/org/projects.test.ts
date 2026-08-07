@@ -451,6 +451,33 @@ vi.mock("@onecli/db", () => {
         }
         return picked;
       },
+      findMany: async ({
+        where,
+        select,
+      }: {
+        where: ProjectWhere;
+        select?: Record<string, boolean>;
+        orderBy?: unknown;
+      }) => {
+        // Always `createdAt asc, id asc` — the only ordering `listProjects`
+        // asks for, and the same one `findUserDefaultProject` uses.
+        const rows = store.projects
+          .slice()
+          .sort(
+            (a, b) =>
+              a.createdAt.getTime() - b.createdAt.getTime() ||
+              a.id.localeCompare(b.id),
+          )
+          .filter((p) => matchesProject(p, where));
+        if (!select) return rows.map((r) => ({ ...r }));
+        return rows.map((row) => {
+          const picked: Record<string, unknown> = {};
+          for (const key of Object.keys(select)) {
+            if (select[key]) picked[key] = row[key as keyof ProjectRow];
+          }
+          return picked;
+        });
+      },
       count: async ({ where }: { where: ProjectWhere }) =>
         store.projects.filter((p) => matchesProject(p, where)).length,
       updateMany: async ({
@@ -927,6 +954,15 @@ interface AccessBody {
 const get = (id: string, init: RequestInit = asAdmin) =>
   app.request(`/v1/projects/${id}`, init);
 
+const list = (init: RequestInit = asAdmin) => app.request("/v1/projects", init);
+
+/** Ids from a `GET /v1/projects` body, in response order. */
+const listIds = async (init: RequestInit = asAdmin): Promise<string[]> => {
+  const res = await list(init);
+  expect(res.status).toBe(200);
+  return ((await res.json()) as ProjectBody[]).map((p) => p.id);
+};
+
 const patch = (id: string, body: unknown, init: RequestInit = asAdmin) =>
   app.request(`/v1/projects/${id}`, {
     ...init,
@@ -946,6 +982,118 @@ const putAccess = (id: string, body: unknown, init: RequestInit = asAdmin) =>
     method: "PUT",
     body: JSON.stringify(body),
   });
+
+describe("GET /projects (list)", () => {
+  it("401s an unauthenticated caller", async () => {
+    expect((await list({})).status).toBe(401);
+  });
+
+  it("403s a project-scoped key — an agent credential must not enumerate projects", async () => {
+    expect((await list(asProjectKey)).status).toBe(403);
+  });
+
+  it("returns every project in the org to an admin, oldest first", async () => {
+    expect(await listIds()).toEqual(["proj-1", "proj-2", "proj-3", "proj-4"]);
+  });
+
+  it("never leaks another organization's projects", async () => {
+    expect(await listIds()).not.toContain("proj-x");
+    store.sessionUserId = OUTSIDER; // admin of OTHER_ORG only
+    expect(await listIds({})).toEqual(["proj-x"]);
+  });
+
+  it("returns the whole org to an OWNER, not just their bindings", async () => {
+    // OWNER holds one binding (proj-2) but is org owner — the admin arm wins,
+    // so a project they hold no binding on (proj-4) must still be listed.
+    store.sessionUserId = OWNER;
+    expect(await listIds({})).toEqual(["proj-1", "proj-2", "proj-3", "proj-4"]);
+  });
+
+  it("returns ONLY bound projects to a plain member", async () => {
+    store.sessionUserId = MEMBER; // owner binding on proj-1 only
+    expect(await listIds({})).toEqual(["proj-1"]);
+  });
+
+  it("counts a GROUP binding, not just a direct one", async () => {
+    // MEMBER2: direct `member` row on proj-2, plus proj-1 through group g-a.
+    // Ordering is by createdAt, so the group-derived project comes first.
+    store.sessionUserId = MEMBER2;
+    expect(await listIds({})).toEqual(["proj-1", "proj-2"]);
+  });
+
+  it("omits a project with no bindings from a member's list", async () => {
+    // proj-4 is the legacy zero-binding shape: visible to admins, unreachable
+    // for a plain member, so it must not appear.
+    store.sessionUserId = MEMBER;
+    expect(await listIds({})).not.toContain("proj-4");
+  });
+
+  it("401s a SUSPENDED member before the handler runs, binding notwithstanding", async () => {
+    // The suspension invariant, enforced a layer earlier than you might
+    // expect: session auth resolves the default project through
+    // `activeMembershipWhere`, which a suspended member fails, so no project
+    // AND no org resolve and the request 401s. MEMBER's owner binding on
+    // proj-1 never gets a chance to rescue them.
+    //
+    // `listProjects`'s own `if (!role) return []` arm is therefore
+    // defence-in-depth for direct service callers, not a path this route can
+    // reach — it exists so the function mirrors `canAccessProjectAsUser` arm
+    // for arm rather than relying on its caller to have gated first.
+    const row = store.members.find((m) => m.userId === MEMBER);
+    if (row) row.status = "suspended";
+    store.sessionUserId = MEMBER;
+    expect((await list({})).status).toBe(401);
+  });
+
+  it("401s a non-member holding a stale binding", async () => {
+    // STRANGER has a real ProjectAccess row on proj-3 but no membership at
+    // all, so nothing resolves and auth rejects — the binding is inert.
+    store.sessionUserId = STRANGER;
+    expect((await list({})).status).toBe(401);
+  });
+
+  it("returns [] — not 403 — for a member with no bindings at all", async () => {
+    // There is no id to authorize against, so an empty list IS the answer.
+    store.projectAccess = store.projectAccess.filter(
+      (pa) => pa.userId !== MEMBER,
+    );
+    store.sessionUserId = MEMBER;
+    const res = await list({});
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual([]);
+  });
+
+  it("returns the client Project shape and leaks no internal columns", async () => {
+    const res = await list();
+    const [first] = (await res.json()) as ProjectBody[];
+    expect(first).toEqual({
+      id: "proj-1",
+      name: "Alpha",
+      slug: "alpha",
+      createdAt: expect.any(String),
+    });
+    // `projectSelect` also reads createdByUserId (resolveAuthority needs it);
+    // `toProjectRow` must not pass it through, nor the org id.
+    expect(Object.keys(first ?? {})).not.toContain("createdByUserId");
+    expect(Object.keys(first ?? {})).not.toContain("organizationId");
+  });
+
+  it("agrees with GET /:projectId — everything listed is readable, and vice versa", async () => {
+    // The invariant `listProjects` exists to hold: it must mirror
+    // `canAccessProjectAsUser` arm for arm. Drift either way is a bug.
+    store.sessionUserId = MEMBER2;
+    const listed = new Set(await listIds({}));
+    for (const id of ["proj-1", "proj-2", "proj-3", "proj-4"]) {
+      const readable = (await get(id, {})).status === 200;
+      expect(listed.has(id)).toBe(readable);
+    }
+  });
+
+  it("reads nothing and audits nothing", async () => {
+    await list();
+    expect(store.audits).toHaveLength(0);
+  });
+});
 
 describe("guard stack", () => {
   it("401s an unauthenticated caller on every route", async () => {

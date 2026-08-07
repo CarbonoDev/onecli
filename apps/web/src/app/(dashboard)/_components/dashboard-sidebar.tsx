@@ -5,6 +5,7 @@ import Image from "next/image";
 import Link from "next/link";
 import { NavMain } from "./nav-main";
 import { NavUser } from "./nav-user";
+import { ProjectSwitcher } from "./project-switcher";
 import { navItems } from "@/lib/nav-config";
 import {
   Sidebar,
@@ -51,6 +52,9 @@ export const DashboardSidebar = ({
         </Link>
       </SidebarHeader>
       <SidebarContent>
+        <div className="px-2 group-data-[collapsible=icon]:px-0">
+          <ProjectSwitcher />
+        </div>
         <NavMain items={navItems} />
       </SidebarContent>
       <SidebarFooter className="justify-center group-data-[collapsible=icon]:px-0">

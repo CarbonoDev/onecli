@@ -7,7 +7,11 @@ import {
   NEXTAUTH_SECRET,
   SECRET_ENCRYPTION_KEY,
 } from "@/lib/env";
-import { PROJECT_PATH_RE, ORG_PATH_RE } from "@/lib/navigation";
+import {
+  PROJECT_PATH_RE,
+  ORG_PATH_RE,
+  DEFAULT_PROJECT_COOKIE,
+} from "@/lib/navigation";
 import { isConnectOnlyAllowed } from "@/lib/connect-surface";
 
 type SetupErrorCode = "oauth-misconfigured" | "missing-encryption-key";
@@ -69,9 +73,18 @@ export const proxy = (request: NextRequest) => {
   const { searchParams } = request.nextUrl;
   const fromQuery = pathname.startsWith("/app-connect");
 
+  // Precedence: URL path, then the popup's query bridge, then the switcher's
+  // cookie. The cookie is LAST on purpose — an explicit `/p/<id>` or an
+  // `?projectId=` must always beat a stale selection, and on flat editions
+  // (where the path never carries scope) it is the only source there is.
+  //
+  // Safe to apply on every edition: this only ever SETS the header, and
+  // `resolveProjectId` re-validates the id against the caller's memberships,
+  // so a forged cookie resolves to no project rather than to someone else's.
   const projectId =
     pathname.match(PROJECT_PATH_RE)?.[1] ||
-    (fromQuery ? searchParams.get("projectId") : null);
+    (fromQuery ? searchParams.get("projectId") : null) ||
+    request.cookies.get(DEFAULT_PROJECT_COOKIE)?.value;
   if (projectId) {
     requestHeaders.set("x-project-id", projectId);
   }

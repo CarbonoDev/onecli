@@ -80,6 +80,10 @@ vi.mock("@onecli/db", () => ({
       findFirst: async () => (state.hasBinding ? { id: "binding-1" } : null),
     },
     agent: { findMany: async () => [] },
+    // Upstream v1.45.0 gave listAgents a last-seen aggregate
+    // (agent-service.ts -> db.requestLog.groupBy). No request history in these
+    // fixtures, so every agent reads as "never used".
+    requestLog: { groupBy: async () => [] },
   },
 }));
 

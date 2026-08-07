@@ -8,6 +8,18 @@ import { queryKeys } from "@/lib/api/keys";
 import { apiFetch } from "@/lib/api-fetch";
 import { readDefaultProjectCookie } from "@/lib/navigation";
 
+/** The caller's visible projects. Org comes from the URL scope by default; the
+ * explicit organizationId override serves the account-route Get Started picker
+ * (org from the default-org cookie, validated server-side). */
+export const useProjectsList = (
+  options: { organizationId?: string; enabled?: boolean } = {},
+) =>
+  useQuery({
+    queryKey: queryKeys.projects.list(options.organizationId),
+    queryFn: () => projects.list({ organizationId: options.organizationId }),
+    enabled: options.enabled ?? true,
+  });
+
 // Project rename/delete go through the audited `/v1/projects/:id` routes. Delete
 // flushes the gateway cache for the removed keys server-side, so there is
 // nothing to flush client-side. The projects list is server-rendered, so
@@ -20,20 +32,6 @@ export const useProject = (projectId: string | undefined) =>
     queryKey: queryKeys.projects.detail(projectId ?? ""),
     queryFn: () => projects.get(projectId ?? ""),
     enabled: Boolean(projectId),
-  });
-
-/**
- * Every project the caller may use — the switcher's source.
- *
- * The API returns only what the caller can reach (`listProjects` mirrors
- * `canAccessProjectAsUser`), so there is nothing to filter here. A member with
- * no bindings gets an empty list rather than an error, which the switcher reads
- * as "nothing to switch to".
- */
-export const useProjectsList = () =>
-  useQuery({
-    queryKey: queryKeys.projects.list(),
-    queryFn: () => projects.list(),
   });
 
 /**

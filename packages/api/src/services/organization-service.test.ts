@@ -150,6 +150,33 @@ vi.mock("@onecli/db", () => {
         },
       },
       organizationMember: {
+        // listUserOrganizations: active memberships joined to their org.
+        findMany: async ({
+          where,
+        }: {
+          where: { userId: string; status?: { not?: string } };
+        }) =>
+          store.members
+            .filter((m) => {
+              if (m.userId !== where.userId) return false;
+              if (
+                where.status?.not !== undefined &&
+                (m.status ?? "active") === where.status.not
+              )
+                return false;
+              return true;
+            })
+            .map((m) => {
+              const org = store.orgs.find((o) => o.id === m.organizationId);
+              return {
+                role: m.role,
+                organization: {
+                  id: m.organizationId,
+                  name: org?.name ?? "",
+                  slug: org?.slug ?? "",
+                },
+              };
+            }),
         upsert: async ({
           where: { organizationId_userId },
           create,
@@ -259,6 +286,8 @@ vi.mock("../lib/logger", () => ({
 import {
   joinSharedOrganization,
   hasResolvableProjectExcluding,
+  findUserDefaultProject,
+  listUserOrganizations,
   SHARED_ORG_SLUG,
 } from "./organization-service";
 
@@ -510,5 +539,128 @@ describe("hasResolvableProjectExcluding", () => {
     await expect(hasResolvableProjectExcluding(GUEST, "proj-a")).resolves.toBe(
       false,
     );
+  });
+});
+
+// ── org switching ───────────────────────────────────────────────────────────
+
+const OTHER_ORG = "org-other";
+
+const seedOtherOrgWithMember = (userId: string, role = "member") => {
+  store.orgs.push({ id: OTHER_ORG, slug: "other", name: "Other" });
+  store.members.push({
+    organizationId: OTHER_ORG,
+    userId,
+    userEmail: `${userId}@example.com`,
+    role,
+  });
+};
+
+const seedProjectIn = (
+  id: string,
+  organizationId: string,
+  createdByUserId: string | null,
+) => {
+  store.projects.push({
+    id,
+    name: "Default",
+    slug: id,
+    organizationId,
+    createdByUserId,
+    createdByUserEmail: null,
+    seq: store.seq++,
+  });
+};
+
+describe("findUserDefaultProject with a preferred organization", () => {
+  it("resolves the preferred org's project over an older one elsewhere", async () => {
+    // Without the preference the OLDER project (in ORG) wins on createdAt, so
+    // this proves the fence is doing the work rather than the ordering.
+    seedOrgWithMember(GUEST);
+    seedOtherOrgWithMember(GUEST);
+    seedProjectIn("proj-host", ORG, GUEST);
+    seedProjectIn("proj-other", OTHER_ORG, GUEST);
+
+    await expect(findUserDefaultProject(GUEST)).resolves.toMatchObject({
+      id: "proj-host",
+    });
+    await expect(
+      findUserDefaultProject(GUEST, OTHER_ORG),
+    ).resolves.toMatchObject({ id: "proj-other" });
+  });
+
+  it("falls back rather than stranding the caller when the preference resolves nothing", async () => {
+    // THE LOCKOUT GUARD. A stale selection — org left, membership suspended,
+    // its last project deleted — must not resolve to no project at all, or
+    // session auth 401s the user everywhere.
+    seedOrgWithMember(GUEST);
+    seedProjectIn("proj-host", ORG, GUEST);
+
+    await expect(
+      findUserDefaultProject(GUEST, "org-that-does-not-exist"),
+    ).resolves.toMatchObject({ id: "proj-host" });
+  });
+
+  it("does not let a preference reach an org the caller does not belong to", async () => {
+    // The fence only narrows: the active-membership gate still applies, so a
+    // forged X-Organization-Id cannot promote a stranger's project.
+    seedOrgWithMember(GUEST);
+    seedProjectIn("proj-host", ORG, GUEST);
+    store.orgs.push({ id: OTHER_ORG, slug: "other", name: "Other" });
+    seedProjectIn("proj-foreign", OTHER_ORG, HOST);
+
+    await expect(
+      findUserDefaultProject(GUEST, OTHER_ORG),
+    ).resolves.toMatchObject({ id: "proj-host" });
+  });
+
+  it("still agrees with hasResolvableProjectExcluding", async () => {
+    // The two predicates must describe the same set. The preference narrows
+    // which project WINS, never which projects can resolve at all — so the
+    // lockout oracle stays correct without learning about orgs.
+    seedOrgWithMember(GUEST);
+    seedOtherOrgWithMember(GUEST);
+    seedProjectIn("proj-host", ORG, GUEST);
+    seedProjectIn("proj-other", OTHER_ORG, GUEST);
+
+    await expect(
+      hasResolvableProjectExcluding(GUEST, "proj-other"),
+    ).resolves.toBe(true);
+    expect(await findUserDefaultProject(GUEST, OTHER_ORG)).not.toBeNull();
+  });
+});
+
+describe("listUserOrganizations", () => {
+  it("returns every org the caller actively belongs to, with their role", async () => {
+    seedOrgWithMember(GUEST, "admin");
+    seedOtherOrgWithMember(GUEST, "member");
+
+    const rows = await listUserOrganizations(GUEST);
+    expect(rows.map((r) => r.id).sort()).toEqual([OTHER_ORG, ORG].sort());
+    expect(rows.find((r) => r.id === ORG)?.role).toBe("admin");
+  });
+
+  it("omits a suspended membership — a switch there would resolve nothing", async () => {
+    seedOrgWithMember(GUEST);
+    seedOtherOrgWithMember(GUEST);
+    const row = store.members.find((m) => m.organizationId === OTHER_ORG);
+    if (row) row.status = "suspended";
+
+    const rows = await listUserOrganizations(GUEST);
+    expect(rows.map((r) => r.id)).toEqual([ORG]);
+  });
+
+  it("never returns an org the caller has no membership in", async () => {
+    seedOrgWithMember(GUEST);
+    store.orgs.push({ id: OTHER_ORG, slug: "other", name: "Other" });
+    store.members.push({
+      organizationId: OTHER_ORG,
+      userId: HOST,
+      userEmail: "host@example.com",
+      role: "owner",
+    });
+
+    const rows = await listUserOrganizations(GUEST);
+    expect(rows.map((r) => r.id)).toEqual([ORG]);
   });
 });

@@ -428,3 +428,11 @@ export interface AgentGrantsSummary {
 export interface AgentWithGrantsSummary extends Agent {
   grantsSummary: AgentGrantsSummary;
 }
+
+/** An org the caller belongs to, with their role in it (`GET /v1/organizations`). */
+export interface Organization {
+  id: string;
+  name: string;
+  slug: string;
+  role: string;
+}

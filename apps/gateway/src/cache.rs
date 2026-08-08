@@ -41,6 +41,18 @@ pub(crate) trait CacheStore: Send + Sync {
     /// Sets TTL only on first increment (new key / expired key).
     /// Returns the new count, or `None` on error (graceful fallback).
     async fn incr(&self, key: &str, ttl_secs: u64) -> Option<u64>;
+
+    /// Add `delta` to a signed counter, returning the new total.
+    ///
+    /// Distinct from [`incr`], which is a +1 rate-limit counter over `u64`.
+    /// Spend counters are signed nano-dollar totals and move by a per-request
+    /// amount, so they need their own primitive rather than a loop over `incr`.
+    ///
+    /// Atomic per key: the read-modify-write happens under the entry lock, so
+    /// concurrent charges against one budget accumulate instead of racing on a
+    /// read-then-set. That is the whole point of having it — a
+    /// `get_raw`/`set_raw` pair would lose every charge but the last.
+    async fn incr_by(&self, key: &str, delta: i64, ttl_secs: u64) -> Option<i64>;
 }
 
 /// Extension methods for typed get/set on any `CacheStore`.
@@ -151,6 +163,32 @@ impl CacheStore for InMemoryCacheStore {
         entry.data = count.to_string();
         Some(count)
     }
+
+    async fn incr_by(&self, key: &str, delta: i64, ttl_secs: u64) -> Option<i64> {
+        let now = Instant::now();
+        let ttl = Duration::from_secs(ttl_secs);
+
+        // `entry` holds the shard lock for the whole read-modify-write, so two
+        // concurrent charges on one budget cannot both read the same total.
+        let mut entry = self.map.entry(key.to_string()).or_insert(CachedEntry {
+            data: "0".to_string(),
+            expires_at: now + ttl,
+        });
+
+        if entry.expires_at <= now {
+            entry.data = "0".to_string();
+            entry.expires_at = now + ttl;
+        }
+
+        // An unparseable value is treated as 0 rather than propagating: this is
+        // a cache, and the durable BudgetSpend row is the floor that corrects it.
+        let total = entry.data.parse::<i64>().unwrap_or(0).saturating_add(delta);
+        entry.data = total.to_string();
+        // Refresh the window on write so an actively-charged period never
+        // expires mid-period.
+        entry.expires_at = now + ttl;
+        Some(total)
+    }
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────
@@ -187,6 +225,49 @@ mod tests {
         // TTL=0 means already expired
         let result: Option<u64> = store.get("key1").await;
         assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn incr_by_accumulates_concurrent_charges() {
+        // THE POINT OF incr_by. A get_raw/set_raw pair would let two concurrent
+        // charges both read 0 and both write their own delta, keeping only the
+        // last — which is exactly how spend used to slip past a cap.
+        let store = new_store();
+        let key = "budget:spent:sec:org:m:2026-08";
+
+        let tasks: Vec<_> = (0..64)
+            .map(|_| {
+                let store = Arc::clone(&store);
+                let key = key.to_string();
+                tokio::spawn(async move { store.incr_by(&key, 1_000, 60).await })
+            })
+            .collect();
+        for t in tasks {
+            t.await.unwrap();
+        }
+
+        let total: i64 = store.get_raw(key).await.unwrap().parse().unwrap();
+        assert_eq!(total, 64_000, "every concurrent charge must be counted");
+    }
+
+    #[tokio::test]
+    async fn incr_by_starts_from_zero_and_survives_a_set_floor() {
+        let store = new_store();
+        let key = "budget:spent:sec:org:total";
+
+        assert_eq!(store.incr_by(key, 250, 60).await, Some(250));
+        // A durable floor arriving from PostgreSQL, then more charges on top.
+        store.set_raw(key, "1000", 60).await;
+        assert_eq!(store.incr_by(key, 25, 60).await, Some(1025));
+    }
+
+    #[tokio::test]
+    async fn incr_by_treats_an_unparseable_value_as_zero() {
+        // The counter shares a namespace with JSON-valued caches; a stray value
+        // must not poison spend accounting. The durable row is the floor.
+        let store = new_store();
+        store.set_raw("budget:spent:x", "not-a-number", 60).await;
+        assert_eq!(store.incr_by("budget:spent:x", 7, 60).await, Some(7));
     }
 
     #[tokio::test]

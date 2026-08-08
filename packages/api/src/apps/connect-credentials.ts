@@ -70,7 +70,7 @@ export const resolveConnectCredentials = async (
   if (activeMethod.type === "cloud_only") {
     return {
       ok: false,
-      error: `Provider "${provider}" is only available in OneCLI Cloud`,
+      error: `Provider "${provider}" is not yet available in this build`,
     };
   }
 

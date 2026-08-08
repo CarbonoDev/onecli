@@ -13,10 +13,11 @@ import { cn } from "@onecli/ui/lib/utils";
 import { getApp } from "@onecli/api/apps/registry";
 import { AppSelect } from "./app-select";
 import { AppToolsPicker } from "./app-tools-picker";
-import { TeamBadge } from "@/lib/components/team-badge";
+import { UnavailableBadge } from "@/lib/components/unavailable-badge";
 // Edition seam: EE aliases to the real granular resource editor; the OSS
-// module is a locked "available on OneCLI Cloud" hint. Alias key on purpose —
-// a relative import would bypass turbopack resolveAlias in EE builds.
+// module is a locked "not available in this build" hint. Alias key on
+// purpose — a relative import would bypass turbopack resolveAlias in EE
+// builds.
 import { ResourceScopeFields } from "@/lib/policy-editor/resource-scope";
 import type { Connection } from "@/lib/api";
 
@@ -144,18 +145,10 @@ export const AppTargetFields = ({
           role="status"
           className="flex items-center gap-2.5 rounded-md border border-dashed px-3 py-2.5"
         >
-          <TeamBadge />
+          <UnavailableBadge />
           <p className="text-muted-foreground text-xs">
-            {providerName(value.provider)} connections are available on{" "}
-            <a
-              href="https://app.onecli.sh"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="underline"
-            >
-              OneCLI Cloud
-            </a>
-            .
+            {providerName(value.provider)} connections are not yet available in
+            this build.
           </p>
         </div>
       ) : (

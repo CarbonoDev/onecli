@@ -5,13 +5,10 @@ import * as connections from "./connections";
 import * as grants from "./grants";
 import * as projects from "./projects";
 import * as projectAccess from "./project-access";
-import * as domains from "./domains";
 import * as orgMembers from "./org-members";
+import * as invitations from "./invitations";
 import * as groups from "./groups";
 import * as roleMappings from "./role-mappings";
-import * as ssoConnections from "./sso-connections";
-import * as ssoEnforcement from "./sso-enforcement";
-import * as scimTokens from "./scim-tokens";
 import * as counts from "./counts";
 import * as appBlocklist from "./app-blocklist";
 import * as appConfig from "./app-config";
@@ -19,6 +16,7 @@ import * as appAvailability from "./app-availability";
 import * as appPermissions from "./app-permissions";
 import * as vaults from "./vaults";
 import * as dropbox from "./dropbox";
+import * as budgets from "./budgets";
 
 export {
   agents,
@@ -28,13 +26,10 @@ export {
   grants,
   projects,
   projectAccess,
-  domains,
   orgMembers,
+  invitations,
   groups,
   roleMappings,
-  ssoConnections,
-  ssoEnforcement,
-  scimTokens,
   counts,
   appBlocklist,
   appConfig,
@@ -42,6 +37,7 @@ export {
   appPermissions,
   vaults,
   dropbox,
+  budgets,
 };
 export type {
   Agent,
@@ -54,10 +50,11 @@ export type {
   ProjectAccessUserRow,
   ProjectAccessGroupRow,
   SetProjectAccessInput,
-  OrgDomain,
-  OrgSsoEnforcement,
   OrgMemberRow,
+  UpdatedOrgMember,
   UpdateOrgMemberInput,
+  InvitationRow,
+  CreateInvitationInput,
   DirectoryPage,
   DirectoryListParams,
   GroupRow,
@@ -67,12 +64,6 @@ export type {
   UpdateRoleMappingInput,
   RoleMappingImpact,
   OrgMemberListRow,
-  OrgSsoConnection,
-  SsoTestResult,
-  CreateSsoConnectionInput,
-  UpdateSsoConnectionInput,
-  ScimToken,
-  CreatedScimToken,
   ResourceCounts,
   CreateAgentInput,
   CreateSecretInput,
@@ -92,6 +83,12 @@ export type {
   GrantsSummaryEntry,
 } from "./types";
 export type { CreatePolicyRuleInput, UpdatePolicyRuleInput } from "./policy";
+export type {
+  Budget,
+  BudgetPeriod,
+  CreateBudgetInput,
+  UpdateBudgetInput,
+} from "./budgets";
 export { appsPath } from "./scope";
 export type { PageScope } from "./scope";
 export type { AppConfigStatus } from "./app-config";
@@ -103,4 +100,5 @@ export type {
   AppPermissionDefinitionSummary,
 } from "@onecli/api/apps/app-permissions/types";
 export { apiGet, apiPost, apiPatch, apiPut, apiDelete } from "./client";
+export { ApiError } from "./client";
 export { queryKeys } from "./keys";

@@ -102,95 +102,12 @@ export interface SetProjectAccessInput {
   groupIds: string[];
 }
 
-export type SsoConnectionStatus = "pending" | "active" | "disabled";
-
-// An org's SSO/IdP connection — the redacted API shape (the OIDC client
-// secret never leaves the server).
-export interface OrgSsoConnection {
-  id: string;
-  type: "saml" | "oidc";
-  status: SsoConnectionStatus;
-  displayName: string;
-  cognitoProviderName: string;
-  config: {
-    metadataUrl?: string;
-    metadataXml?: string;
-    issuer?: string;
-    clientId?: string;
-    certExpiresAt?: string | null;
-  };
-  createdAt: string;
-  updatedAt: string;
-}
-
-export interface SsoTestCheck {
-  name: string;
-  ok: boolean;
-  detail?: string;
-}
-
-export interface SsoTestResult {
-  ok: boolean;
-  checks: SsoTestCheck[];
-}
-
-export interface CreateSsoConnectionInput {
-  type: "saml" | "oidc";
-  displayName: string;
-  metadataUrl?: string;
-  metadataXml?: string;
-  issuer?: string;
-  clientId?: string;
-  clientSecret?: string;
-}
-
-export interface UpdateSsoConnectionInput {
-  displayName?: string;
-  enabled?: boolean;
-  metadataUrl?: string;
-  metadataXml?: string;
-  issuer?: string;
-  clientId?: string;
-  clientSecret?: string;
-}
-
-// An org's claimed email domain. `verifiedAt` null = pending the DNS TXT
-// check; the token is published in DNS, so it's safe to expose here.
-export interface OrgDomain {
-  id: string;
-  domain: string;
-  verificationToken: string;
-  verifiedAt: string | null;
-  createdAt: string;
-}
-
-// A bearer token for the org's /scim/v2 provisioning endpoint. Reads only
-// ever carry metadata — the plaintext exists solely in the create response.
-export interface ScimToken {
-  id: string;
-  label: string;
-  lastUsedAt: string | null;
-  createdAt: string;
-}
-
-// POST /v1/org/scim/tokens — `token` is shown once and never retrievable.
-export interface CreatedScimToken extends ScimToken {
-  token: string;
-}
-
-// Require-SSO enforcement state (GET/PATCH /v1/org/sso/enforcement).
-export interface OrgSsoEnforcement {
-  ssoRequired: boolean;
-  hasActiveConnection: boolean;
-  hasVerifiedDomain: boolean;
-  canRequire: boolean;
-  exemptMemberCount: number;
-}
-
-// PATCH /v1/org/members/:userId — exactly one change per request.
+// PATCH /v1/org/members/:userId — exactly one change per request. `owner` is
+// not assignable here (owner transfer is a separate operation); the `ssoExempt`
+// arm is gone with the SSO feature it belonged to.
 export type UpdateOrgMemberInput =
   | { status: "active" | "suspended" }
-  | { ssoExempt: boolean };
+  | { role: "admin" | "member" };
 
 export interface OrgMemberRow {
   userId: string;
@@ -199,6 +116,14 @@ export interface OrgMemberRow {
   /** Present on status changes: what happened on the Cognito side. */
   revocation?: string;
 }
+
+/**
+ * PATCH /v1/org/members/:userId response. The server echoes back only the
+ * facet it changed, so the response mirrors the request's single-change shape.
+ */
+export type UpdatedOrgMember =
+  | Pick<OrgMemberRow, "userId" | "status" | "ssoExempt">
+  | { userId: string; role: string };
 
 export interface ResourceCounts {
   agents: number;
@@ -293,10 +218,31 @@ export interface OrgMemberListRow {
   joinedAt: string;
 }
 
+// Link-based org invitations (`/v1/org/invitations`).
+export interface InvitationRow {
+  id: string;
+  email: string;
+  role: string;
+  /** Projected: a stored "pending" past its expiresAt reads "expired". */
+  status: "pending" | "accepted" | "cancelled" | "expired";
+  invitedByEmail: string;
+  expiresAt: string;
+  createdAt: string;
+  /** Raw link token — admin-only surface; the UI composes /join/<token>. */
+  token: string;
+}
+
+export interface CreateInvitationInput {
+  email: string;
+  role: "admin" | "member";
+}
+
 // ── Shared policy identity/condition shapes ──────────────────────────────────
 // Used by the editor's PolicyRuleV2. Project rules target a specific agent or
 // "any" (empty); org rules target directory identities (user / user-group).
-// Conditions are body-contains.
+// Conditions are body OR header matches (contains/equals/regex/exists) — the
+// wire shape mirrors the authoritative RuleCondition: `key` names the header
+// (header target only) and `value` is absent for `exists`.
 
 export type ProjectionIdentity =
   | { type: "agent"; id: string }
@@ -306,7 +252,8 @@ export type ProjectionIdentity =
 export interface ProjectionCondition {
   target: string;
   operator: string;
-  value: string;
+  value?: string;
+  key?: string;
 }
 
 // ── Editable policy rules (policy_rules_v2) ──────────────────────────────────

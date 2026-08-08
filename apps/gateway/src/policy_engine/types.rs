@@ -1,7 +1,9 @@
-//! Shapes for the OSS project-level policy core: the decoded rule, the request
-//! context, and the evaluation outcome. Project scope only — OSS has no org
-//! layer, no directory identities, and no granular conditions; those live in
-//! the EE engine this module replaces under `edition_oss`.
+//! Shapes for the OSS policy core: the decoded rule, the request context, and
+//! the evaluation outcome. Org + project scopes with agent and directory
+//! (user/group) identities — granular conditions stay vacuous here; those live
+//! in the EE engine this module replaces under `edition_oss`. There is no
+//! agent-group concept: it was deleted, so no identity kind, principal column,
+//! or loader references one.
 
 /// The rule verdict: the v2 binary. Approval and rate limits are modifiers on
 /// `Allow` (see `Rule`).
@@ -29,14 +31,34 @@ impl RateWindow {
     }
 }
 
-/// A rule identity. OSS rules target a specific agent or all agents (empty
-/// identity list = "any"). `Other` covers every non-agent identity row a
-/// permissive API client might have stored (user/group are OneCLI Cloud
-/// capabilities) — it NEVER matches, so such a row narrows to nothing
-/// instead of silently widening to "any" (fail-closed).
+/// Which scope a decoded rule came from. Drives `MatchedRule.scope` (telemetry
+/// attribution) and the org-first tie-break in the two-level evaluator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RuleScope {
+    Organization,
+    Project,
+}
+
+impl RuleScope {
+    pub(super) fn as_str(self) -> &'static str {
+        match self {
+            RuleScope::Organization => "organization",
+            RuleScope::Project => "project",
+        }
+    }
+}
+
+/// A rule identity (empty identity list = "any"). `Agent` matches the acting
+/// agent by id; the directory kinds (`User`/`Group`) match against the
+/// connection's resolved `PrincipalSet`. `Other` covers a row naming NO
+/// principal the OSS engine understands (malformed, or a future kind) — it
+/// NEVER matches, so such a row narrows to nothing instead of silently
+/// widening to "any" (fail-closed).
 #[derive(Debug, Clone)]
 pub(super) enum Identity {
     Agent(String),
+    User(String),
+    Group(String),
     Other,
 }
 
@@ -73,11 +95,12 @@ pub(super) enum Target {
     Unresolved,
 }
 
-/// A decoded project rule the evaluator walks. No `scope` field — everything
-/// here is project scope (`MatchedRule.scope` is the constant "project").
+/// A decoded rule the evaluator walks, tagged with the scope it came from.
 #[derive(Debug, Clone)]
 pub(super) struct Rule {
     pub id: String,
+    /// The level (org guardrail vs project) this rule decides for.
+    pub scope: RuleScope,
     /// Generation-stable identity — the shared rate counter keys on it, so the
     /// count survives republishes.
     pub logical_id: String,
@@ -90,9 +113,10 @@ pub(super) struct Rule {
     pub require_approval: bool,
     pub rate_limit: Option<u64>,
     pub rate_limit_window: Option<RateWindow>,
-    /// Carried for structural fidelity and routed through the edition-swapped
-    /// `condition_match` — which is the no-op arm in OSS, so conditions are
-    /// never evaluated here (matching the legacy OSS gateway exactly).
+    /// The rule's behavioral conditions (body/header), routed through the
+    /// edition-swapped `condition_match`. In OSS (Tier 3a) they are EVALUATED
+    /// byte-level over the buffered body and request headers, carrying the
+    /// rule's Block-ness so an unevaluable condition fails closed by action.
     pub conditions: Option<serde_json::Value>,
 }
 
@@ -115,14 +139,14 @@ pub(super) struct Request {
 
 impl Request {
     /// The deny-default carve: only credentialed, non-LLM traffic can be
-    /// blocked by the Default Rule. Mirrors `forward.rs`'s `enforce_deny`.
+    /// blocked by a Default Rule. Mirrors `forward.rs`'s `enforce_deny`.
     pub(super) fn enforce_deny(&self) -> bool {
         self.has_injections && !self.is_llm_host
     }
 }
 
-/// The winning outcome of an evaluation: an explicit matching rule, the
-/// project Default Rule's enforced Block (carrying THAT rule, so telemetry can
+/// The winning outcome of an evaluation: an explicit matching rule, a level's
+/// Default Rule's enforced Block (carrying THAT rule, so telemetry can
 /// attribute it — always concrete, never anonymous), or a plain allow.
 pub(super) enum Outcome<'a> {
     Rule(&'a Rule),

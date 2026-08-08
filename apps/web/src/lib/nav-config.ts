@@ -5,6 +5,8 @@ import {
   Plug,
   Activity,
   User,
+  Users,
+  UsersRound,
   KeyRound,
   ShieldCheck,
   Globe,
@@ -26,7 +28,18 @@ export const navItems: NavItem[] = [
   { title: "Overview", url: "/overview", icon: LayoutDashboard },
   { title: "Agents", url: "/agents", icon: Bot },
   { title: "Connections", url: "/connections", icon: Plug },
+  // Always visible: the organization policy surface degrades for non-admins
+  // (the API's 403 is the authority), so hiding it would require a session role
+  // field. Org rules are the guardrails every project is evaluated against.
+  { title: "Policy", url: "/policy", icon: ShieldCheck },
   { title: "Activity", url: "/activity", icon: Activity },
+  // Always visible (D-J): the page itself degrades for non-admins and in
+  // local auth mode — hiding the item would require a session role field.
+  { title: "Team", url: "/team", icon: Users },
+  // Always visible (D-J): the page itself degrades for non-admins and gates
+  // groups in local auth mode — hiding the item would require a session role
+  // field.
+  { title: "Groups", url: "/groups", icon: UsersRound },
   { title: "Settings", url: "/settings", icon: Settings },
 ];
 

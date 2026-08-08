@@ -22,10 +22,6 @@ export const queryKeys = {
     lastPublish: (pageScope: PageScope = "project") =>
       [...queryKeys.policy.all(), "last-publish", pageScope] as const,
   },
-  domains: {
-    all: () => ["domains", ...scope()] as const,
-    list: () => [...queryKeys.domains.all(), "list"] as const,
-  },
   groups: {
     all: () => ["groups", ...scope()] as const,
     list: () => [...queryKeys.groups.all(), "list"] as const,
@@ -40,17 +36,9 @@ export const queryKeys = {
     all: () => ["org-members", ...scope()] as const,
     list: () => [...queryKeys.orgMembers.all(), "list"] as const,
   },
-  ssoConnections: {
-    all: () => ["sso-connections", ...scope()] as const,
-    list: () => [...queryKeys.ssoConnections.all(), "list"] as const,
-  },
-  ssoEnforcement: {
-    all: () => ["sso-enforcement", ...scope()] as const,
-    get: () => [...queryKeys.ssoEnforcement.all(), "get"] as const,
-  },
-  scimTokens: {
-    all: () => ["scim-tokens", ...scope()] as const,
-    list: () => [...queryKeys.scimTokens.all(), "list"] as const,
+  invitations: {
+    all: () => ["invitations", ...scope()] as const,
+    list: () => [...queryKeys.invitations.all(), "list"] as const,
   },
   grants: {
     all: () => ["grants", ...scope()] as const,
@@ -65,6 +53,11 @@ export const queryKeys = {
       [...queryKeys.connections.all(), "list", pageScope] as const,
     byProvider: (provider: string) =>
       [...queryKeys.connections.all(), "provider", provider] as const,
+  },
+  projects: {
+    all: () => ["projects", ...scope()] as const,
+    detail: (projectId: string) =>
+      [...queryKeys.projects.all(), projectId] as const,
   },
   projectAccess: {
     all: () => ["project-access", ...scope()] as const,
@@ -112,6 +105,10 @@ export const queryKeys = {
     all: () => ["appBlocklist", ...scope()] as const,
     byProvider: (provider: string) =>
       [...queryKeys.appBlocklist.all(), provider] as const,
+  },
+  budgets: {
+    all: () => ["budgets", ...scope()] as const,
+    list: () => [...queryKeys.budgets.all(), "list"] as const,
   },
   billing: {
     all: () => ["billing", ...scope()] as const,

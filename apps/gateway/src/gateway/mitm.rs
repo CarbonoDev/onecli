@@ -234,10 +234,15 @@ pub(crate) struct ResolvedRules {
     /// Cloud-only: pending claim token when the org is in claim mode. Inert in OSS.
     #[cfg_attr(not(edition_cloud), allow(dead_code))]
     pub claim_token: Option<String>,
+    /// Provider of the app connection that won injection (e.g. "github-app",
+    /// "dropbox"), or `None` when no app connection served the request (secret /
+    /// vault injection). Threaded so the request-time resource-scope gate can
+    /// dispatch `session_policy` to the right per-provider extractor.
+    pub provider: Option<String>,
     /// Per-agent resource policy (e.g. Dropbox folder allowlist) for the
-    /// connection serving this host. Consumed by the cloud request guard to
-    /// enforce granular access; `None` in the common, unrestricted case.
-    #[cfg_attr(not(edition_cloud), allow(dead_code))]
+    /// connection serving this host. Enforced by the granular resource-scope
+    /// gate (`policy_engine::apply_resource_scope`); `None` in the common,
+    /// unrestricted case.
     pub session_policy: Option<serde_json::Value>,
     /// Id of the app connection that won injection for this request; `None`
     /// when no connection serves it (secret/vault/uncredentialed traffic, the
@@ -324,6 +329,8 @@ async fn resolve_rules(
     let mut body_transform: Option<crate::apps::BodyTransform> = None;
     // Granular-access policy of the connection that wins injection (if any).
     let mut session_policy: Option<serde_json::Value> = None;
+    // Provider of that connection — dispatches the resource-scope gate.
+    let mut provider: Option<String> = None;
     // Id of the connection that wins injection (if any) — rides with
     // `session_policy` under the same attribution law.
     let mut winning_connection_id: Option<String> = None;
@@ -358,6 +365,7 @@ async fn resolve_rules(
                 finalizer: f,
                 body_transform: bt,
                 session_policy: sp,
+                provider: prov,
                 connection_id: cid,
                 ..
             }) => {
@@ -368,6 +376,7 @@ async fn resolve_rules(
                 finalizer = f;
                 body_transform = bt;
                 session_policy = sp;
+                provider = Some(prov);
                 winning_connection_id = cid;
             }
             Ok(AppConnectionResult::Ambiguous { connections }) => {
@@ -458,6 +467,7 @@ async fn resolve_rules(
             finalizer,
             body_transform,
             claim_token: resp.claim_token,
+            provider,
             session_policy,
             winning_connection_id,
             budget_bindings: resp.budget_bindings,

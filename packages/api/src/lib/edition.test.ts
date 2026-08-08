@@ -48,7 +48,7 @@ describe("capabilitiesFor", () => {
       billing: false,
       orgScopedUI: false,
       webSurface: "full",
-      rbac: false,
+      rbac: true,
     });
   });
 

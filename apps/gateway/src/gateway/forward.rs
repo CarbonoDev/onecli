@@ -21,7 +21,7 @@ use crate::apps;
 use crate::cache::CacheStore;
 use crate::default_interceptions;
 use crate::inject;
-use crate::policy::{self, PolicyDecision};
+use crate::policy::{self, BodyCapture, MatchInput, PolicyDecision};
 use crate::policy_engine;
 
 use super::hooks;
@@ -162,36 +162,43 @@ pub(crate) async fn forward_request(
         default_interceptions::match_target(super::strip_port(host), &path, &method)
             .filter(|_| content_length_at_most(req.headers(), MAX_DEFAULT_INTERCEPT_BODY));
 
-    // Buffer the request body for condition matching, when the request guard needs
-    // to inspect it (e.g. Dropbox folder scoping reads the JSON body), or for a
-    // matched default interception. In OSS, both predicates return false → zero
-    // overhead unless a default interception matched.
-    let (condition_buffer, req) = if crate::policy_engine::needs_body_buffer(&rules.policy_rules_v2)
-        || hooks::needs_request_body(rules, host, method.as_str(), &path)
-    {
-        let (parts, incoming) = req.into_parts();
-        let (buf, fwd_body) =
-            crate::condition_match::prepare_body(incoming, method.as_str(), &url).await?;
-        (buf, hyper::Request::from_parts(parts, fwd_body))
-    } else if default_target.is_some() {
-        // OSS-safe: fully buffer the known-small body, keeping the bytes for both
-        // the interception check and (if it declines) forwarding.
-        let (parts, incoming) = req.into_parts();
-        let bytes = incoming
-            .collect()
-            .await
-            .context("buffering request body for default interception")?
-            .to_bytes();
-        let req = hyper::Request::from_parts(parts, reqwest::Body::from(bytes.clone()));
-        (Some(bytes.to_vec()), req)
-    } else {
-        (None, req.map(reqwest::Body::wrap))
-    };
+    // Buffer the request body for condition matching, when a body-conditioned
+    // rule could govern this host (`needs_body_buffer` is host-scoped), when the
+    // request guard needs to inspect it (e.g. Dropbox folder scoping reads the
+    // JSON body), or for a matched default interception. Unconditioned traffic
+    // keeps streaming → zero overhead.
+    let (capture, req) =
+        if crate::policy_engine::needs_body_buffer(&rules.policy_rules_v2, policy_host)
+            || crate::policy_engine::needs_scope_body(
+                rules.provider.as_deref().unwrap_or(""),
+                host,
+                rules.session_policy.as_ref(),
+            )
+            || hooks::needs_request_body(rules, host, method.as_str(), &path)
+        {
+            let (parts, incoming) = req.into_parts();
+            let (capture, fwd_body) =
+                crate::condition_match::prepare_body(incoming, method.as_str(), &url).await?;
+            (capture, hyper::Request::from_parts(parts, fwd_body))
+        } else if default_target.is_some() {
+            // OSS-safe: fully buffer the known-small body, keeping the bytes for both
+            // the interception check and (if it declines) forwarding.
+            let (parts, incoming) = req.into_parts();
+            let bytes = incoming
+                .collect()
+                .await
+                .context("buffering request body for default interception")?
+                .to_bytes();
+            let req = hyper::Request::from_parts(parts, reqwest::Body::from(bytes.clone()));
+            (BodyCapture::Full(bytes.to_vec()), req)
+        } else {
+            (BodyCapture::None, req.map(reqwest::Body::wrap))
+        };
 
     // Answer a matched default interception before any forwarding. A handler that
     // declines (e.g. a real refresh token) falls through to normal forwarding.
     if let Some(target) = default_target {
-        if let Some(synth) = target.handle(condition_buffer.as_deref().unwrap_or(&[])) {
+        if let Some(synth) = target.handle(capture.bytes().unwrap_or(&[])) {
             info!(method = %method, url = %url, "default interception — serving synthetic response");
             return Ok(response::json(synth.status, synth.body));
         }
@@ -218,6 +225,12 @@ pub(crate) async fn forward_request(
         ));
     }
 
+    // The per-request condition input: the captured body (only a FULL capture is
+    // matchable — a truncated one fails closed) plus the pre-injection request
+    // headers. Borrows `req`; its last use is the `evaluate` call below, which NLL
+    // releases before `req.into_parts()` later.
+    let match_input = MatchInput::from_capture(&capture, req.headers());
+
     // The first-match engine over the published `policy_rules_v2` is authoritative.
     // `policy_host` is the pre-rewrite rule-match host; `is_llm_host(host)` is the
     // effective host for the deny-default carve.
@@ -226,7 +239,7 @@ pub(crate) async fn forward_request(
         policy_host,
         method.as_str(),
         &path,
-        condition_buffer.as_deref(),
+        &match_input,
         has_injections,
         policy::is_llm_host(host),
         rules.winning_connection_id.as_deref(),
@@ -234,6 +247,30 @@ pub(crate) async fn forward_request(
         &rules.policy_rules_v2,
     )
     .await;
+
+    // ── Granular resource-scope gate (Tier 3b) ────────────────────────────────
+    // Tighten the engine's decision by the winning connection's granular scope
+    // (GitHub repositories / Dropbox folders). Run unconditionally on the final
+    // decision from EITHER engine — session policy is a property of the
+    // connection, not the rule generation, so it must enforce on legacy /
+    // pre-cutover projects too. A monotone tightening: an allow-family verdict
+    // for an out-of-scope or indeterminate resource becomes `Blocked`; an
+    // existing block is untouched. A scope block is authored by no rule, so it
+    // drops the matched-rule attribution.
+    let (decision, matched_rule) = {
+        let (decision, scope_blocked) = policy_engine::apply_resource_scope(
+            decision,
+            rules.provider.as_deref().unwrap_or(""),
+            host,
+            rules.session_policy.as_ref(),
+            &path,
+            &match_input,
+        );
+        if scope_blocked {
+            warn!(method = %method, url = %url, "BLOCKED by resource scope");
+        }
+        (decision, if scope_blocked { None } else { matched_rule })
+    };
 
     // ── Early return for block / rate-limit / default-deny (no body needed) ───
     match &decision {
@@ -346,7 +383,7 @@ pub(crate) async fn forward_request(
         method.as_str(),
         &path,
         &headers,
-        condition_buffer.as_deref(),
+        capture.bytes(),
     )
     .await
     {
@@ -378,8 +415,8 @@ pub(crate) async fn forward_request(
             // Peek a bounded prefix of the body for the summary + preview, then
             // build the forwarding body. If condition buffering already captured
             // the body, reuse that buffer instead of peeking the stream again.
-            let (summary_bytes, fwd_body): (Cow<'_, [u8]>, reqwest::Body) = if let Some(ref buf) =
-                condition_buffer
+            let (summary_bytes, fwd_body): (Cow<'_, [u8]>, reqwest::Body) = if let Some(buf) =
+                capture.bytes()
             {
                 // Body already buffered for condition matching — borrow its prefix
                 // for the summary instead of copying it again.

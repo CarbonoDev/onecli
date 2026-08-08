@@ -38,6 +38,84 @@ pub(crate) struct PolicyRule {
     pub conditions_raw: Option<serde_json::Value>,
 }
 
+/// Everything a rule condition can look at for one request. Built once per
+/// request (forward.rs / websocket.rs) and borrowed through the whole
+/// evaluation — the shared matcher and the v2 two-level walk.
+///
+/// Lives here (not in `condition_match`) because `condition_match` is
+/// edition-swapped and the shared call sites need one stable shape.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct MatchInput<'a> {
+    /// The fully buffered request body, when condition buffering captured it.
+    /// `None` means the request genuinely has no (buffered) body — GETs,
+    /// WebSocket upgrades, or the streaming path (`needs_body_buffer` is a
+    /// superset of "some body condition could be consulted", so a
+    /// body-conditioned rule never sees `None` for a request that had a body).
+    pub body: Option<&'a [u8]>,
+    /// The body exceeded the buffer cap: body conditions become unevaluable
+    /// and fail closed per the condition failure law (`condition_match`).
+    pub body_truncated: bool,
+    /// The request headers at evaluation time (pre-injection).
+    pub headers: Option<&'a hyper::HeaderMap>,
+}
+
+impl<'a> MatchInput<'a> {
+    /// No body, no headers — for call sites (and tests) with nothing to match
+    /// conditions against.
+    #[allow(dead_code)] // production paths build real inputs; tests + EE use this
+    pub(crate) const fn empty() -> Self {
+        MatchInput {
+            body: None,
+            body_truncated: false,
+            headers: None,
+        }
+    }
+
+    /// The per-request input: what `prepare_body` captured plus the request
+    /// headers.
+    pub(crate) fn from_capture(capture: &'a BodyCapture, headers: &'a hyper::HeaderMap) -> Self {
+        MatchInput {
+            body: capture.bytes_for_matching(),
+            body_truncated: matches!(capture, BodyCapture::Truncated(_)),
+            headers: Some(headers),
+        }
+    }
+}
+
+/// What `condition_match::prepare_body` captured of a request body.
+#[derive(Debug)]
+pub(crate) enum BodyCapture {
+    /// Nothing buffered (the streaming path).
+    None,
+    /// The complete body (within the cap).
+    Full(Vec<u8>),
+    /// The first cap(+ε) bytes; the rest streams to the upstream untouched.
+    /// Body conditions never match on a truncated capture — a prefix-only
+    /// match would let a needle pushed past the cap dodge a Block rule.
+    Truncated(Vec<u8>),
+}
+
+impl BodyCapture {
+    /// The captured bytes, full or truncated — for consumers that only peek
+    /// (default interception, approval summaries).
+    pub(crate) fn bytes(&self) -> Option<&[u8]> {
+        match self {
+            BodyCapture::None => None,
+            BodyCapture::Full(b) | BodyCapture::Truncated(b) => Some(b),
+        }
+    }
+
+    /// The bytes condition matching may consult: only a FULL capture. A
+    /// truncated capture exposes nothing here — matching a prefix is exactly
+    /// the bypass the failure law refuses.
+    pub(crate) fn bytes_for_matching(&self) -> Option<&[u8]> {
+        match self {
+            BodyCapture::Full(b) => Some(b),
+            _ => None,
+        }
+    }
+}
+
 /// The v2 rule that decided a request — recorded into telemetry so Activity
 /// can say "decided by rule X". `logical_id` is the generation-stable identity
 /// (row ids regenerate on every publish); the name is a display snapshot;
@@ -139,14 +217,14 @@ pub(crate) fn matches_request(
     rule: &PolicyRule,
     method: &str,
     path: &str,
-    body: Option<&[u8]>,
+    input: &MatchInput<'_>,
 ) -> bool {
     let direct = path_matches(path, &rule.path_pattern)
         && rule
             .method
             .as_ref()
             .is_none_or(|m| m.eq_ignore_ascii_case(method))
-        && crate::condition_match::matches(rule, body);
+        && crate::condition_match::matches(rule, input);
     if direct {
         return true;
     }
@@ -157,7 +235,7 @@ pub(crate) fn matches_request(
         && method.eq_ignore_ascii_case("GET")
         && is_git_push_discovery(path)
     {
-        return crate::condition_match::matches(rule, body);
+        return crate::condition_match::matches(rule, input);
     }
     false
 }
@@ -191,12 +269,12 @@ pub(crate) fn is_llm_host(host: &str) -> bool {
 pub(crate) fn is_blocked(
     request_method: &str,
     request_path: &str,
-    request_body: Option<&[u8]>,
+    input: &MatchInput<'_>,
     rules: &[PolicyRule],
 ) -> bool {
     rules.iter().any(|rule| {
         matches!(rule.action, PolicyAction::Block)
-            && matches_request(rule, request_method, request_path, request_body)
+            && matches_request(rule, request_method, request_path, input)
     })
 }
 
@@ -224,7 +302,7 @@ mod tests {
         assert!(is_blocked(
             "POST",
             "/gmail/v1/users/me/messages/send",
-            None,
+            &MatchInput::empty(),
             &rules
         ));
     }
@@ -235,7 +313,7 @@ mod tests {
         assert!(!is_blocked(
             "GET",
             "/gmail/v1/users/me/messages/send",
-            None,
+            &MatchInput::empty(),
             &rules
         ));
     }
@@ -246,7 +324,7 @@ mod tests {
         assert!(!is_blocked(
             "POST",
             "/gmail/v1/users/me/messages",
-            None,
+            &MatchInput::empty(),
             &rules
         ));
     }
@@ -254,9 +332,24 @@ mod tests {
     #[test]
     fn blocks_all_methods_when_none() {
         let rules = vec![block_rule("/admin/*", None)];
-        assert!(is_blocked("GET", "/admin/users", None, &rules));
-        assert!(is_blocked("POST", "/admin/users", None, &rules));
-        assert!(is_blocked("DELETE", "/admin/settings", None, &rules));
+        assert!(is_blocked(
+            "GET",
+            "/admin/users",
+            &MatchInput::empty(),
+            &rules
+        ));
+        assert!(is_blocked(
+            "POST",
+            "/admin/users",
+            &MatchInput::empty(),
+            &rules
+        ));
+        assert!(is_blocked(
+            "DELETE",
+            "/admin/settings",
+            &MatchInput::empty(),
+            &rules
+        ));
     }
 
     #[test]
@@ -265,36 +358,56 @@ mod tests {
         assert!(is_blocked(
             "POST",
             "/gmail/v1/users/me/messages/send",
-            None,
+            &MatchInput::empty(),
             &rules
         ));
-        assert!(!is_blocked("POST", "/calendar/v1/events", None, &rules));
+        assert!(!is_blocked(
+            "POST",
+            "/calendar/v1/events",
+            &MatchInput::empty(),
+            &rules
+        ));
     }
 
     #[test]
     fn blocks_all_paths() {
         let rules = vec![block_rule("*", Some("DELETE"))];
-        assert!(is_blocked("DELETE", "/anything", None, &rules));
-        assert!(!is_blocked("GET", "/anything", None, &rules));
+        assert!(is_blocked(
+            "DELETE",
+            "/anything",
+            &MatchInput::empty(),
+            &rules
+        ));
+        assert!(!is_blocked(
+            "GET",
+            "/anything",
+            &MatchInput::empty(),
+            &rules
+        ));
     }
 
     #[test]
     fn method_matching_is_case_insensitive() {
         let rules = vec![block_rule("*", Some("POST"))];
-        assert!(is_blocked("post", "/path", None, &rules));
-        assert!(is_blocked("Post", "/path", None, &rules));
+        assert!(is_blocked("post", "/path", &MatchInput::empty(), &rules));
+        assert!(is_blocked("Post", "/path", &MatchInput::empty(), &rules));
     }
 
     #[test]
     fn no_rules_allows_everything() {
-        assert!(!is_blocked("POST", "/anything", None, &[]));
+        assert!(!is_blocked("POST", "/anything", &MatchInput::empty(), &[]));
     }
 
     #[test]
     fn blocks_with_default_wildcard_path() {
         let rules = vec![block_rule("*", Some("POST"))];
-        assert!(is_blocked("POST", "/any/path/here", None, &rules));
-        assert!(is_blocked("POST", "/", None, &rules));
+        assert!(is_blocked(
+            "POST",
+            "/any/path/here",
+            &MatchInput::empty(),
+            &rules
+        ));
+        assert!(is_blocked("POST", "/", &MatchInput::empty(), &rules));
     }
 
     #[test]
@@ -303,8 +416,18 @@ mod tests {
             block_rule("/safe/*", Some("GET")),
             block_rule("/danger/*", Some("POST")),
         ];
-        assert!(!is_blocked("POST", "/safe/path", None, &rules));
-        assert!(is_blocked("POST", "/danger/path", None, &rules));
+        assert!(!is_blocked(
+            "POST",
+            "/safe/path",
+            &MatchInput::empty(),
+            &rules
+        ));
+        assert!(is_blocked(
+            "POST",
+            "/danger/path",
+            &MatchInput::empty(),
+            &rules
+        ));
     }
 
     // ── Git push discovery tests ────────────────────────────────────
@@ -315,7 +438,7 @@ mod tests {
         assert!(is_blocked(
             "GET",
             "/owner/repo.git/info/refs?service=git-receive-pack",
-            None,
+            &MatchInput::empty(),
             &rules
         ));
     }
@@ -326,7 +449,7 @@ mod tests {
         assert!(!is_blocked(
             "GET",
             "/owner/repo.git/info/refs?service=git-upload-pack",
-            None,
+            &MatchInput::empty(),
             &rules
         ));
     }
@@ -337,7 +460,7 @@ mod tests {
         assert!(is_blocked(
             "POST",
             "/owner/repo.git/git-receive-pack",
-            None,
+            &MatchInput::empty(),
             &rules
         ));
     }

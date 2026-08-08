@@ -51,9 +51,18 @@ export const AUDIT_SERVICES = {
   DOMAIN: "domain",
   // EE-only (identity): org SSO/IdP connections
   SSO_CONNECTION: "sso-connection",
-  // EE-only (identity): org membership rows (e.g. SSO JIT joins)
+  // Org membership rows: suspend/reinstate and role changes via
+  // `PATCH /v1/org/members/:userId` (OSS), plus EE identity writes (SSO JIT
+  // joins, SCIM deprovisioning) and the member role changes role mappings drive.
   MEMBER: "member",
-  // EE-only (directory): human groups (manual + SCIM-provisioned)
+  // Link-based org invitations (create / revoke via `/v1/org/invitations`).
+  // ACCEPTANCE is deliberately not here: accepting creates a membership, so it
+  // audits as a MEMBER create with `via: "invitation"` metadata.
+  INVITATION: "invitation",
+  // Directory: human groups. OSS writes them via `/v1/org/groups` (create /
+  // rename / delete; membership changes audit as UPDATE with
+  // `change: "members"` — there is deliberately no GROUP_MEMBER service,
+  // matching the INVITATION→MEMBER precedent); EE adds SCIM-provisioned writes.
   GROUP: "group",
   // EE-only (directory): group→org-role mappings (the mapping config itself;
   // the member role changes it drives are audited under MEMBER).

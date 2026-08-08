@@ -1,29 +1,39 @@
-//! Decode the loaded published project rows into the evaluator's `Rule` list.
-//! The rows are already new-model; this maps shapes and resolves
-//! connection/secret targets through the fenced connect-time maps.
+//! Decode the loaded published rows of ONE scope (org or project) into the
+//! evaluator's `Rule` list. The rows are already new-model; this maps shapes
+//! and resolves connection/secret targets through the fenced connect-time maps.
 
 use crate::db::{
     ConnectionProviders, PolicyIdentityRow, PolicyRuleV2Row, PolicyTargetRow, SecretHosts,
 };
 
-use super::types::{Action, Identity, RateWindow, Rule, Target};
+use super::types::{Action, Identity, RateWindow, Rule, RuleScope, Target};
 
-/// Agent identities match by id; every other principal kind is a OneCLI Cloud
-/// capability and decodes to `Other`, which never matches — a stored directory
-/// identity narrows its rule to nothing rather than widening it (fail-closed).
+/// Decode each identity row to its principal kind (the DB `one_principal`
+/// CHECK guarantees at most one column is set). `agent_id`/`user_id`/`group_id`
+/// decode to the matching directory kind; a row naming NO principal the OSS
+/// engine understands decodes to `Other`, which never matches — it narrows its
+/// rule to nothing rather than widening it (fail-closed). There is no
+/// agent-group column, so no agent-group case exists.
 fn decode_identities(rows: &[PolicyIdentityRow]) -> Vec<Identity> {
     rows.iter()
-        .map(|r| match &r.agent_id {
-            Some(id) => Identity::Agent(id.clone()),
-            None => Identity::Other,
+        .map(|r| {
+            if let Some(id) = &r.agent_id {
+                Identity::Agent(id.clone())
+            } else if let Some(id) = &r.user_id {
+                Identity::User(id.clone())
+            } else if let Some(id) = &r.group_id {
+                Identity::Group(id.clone())
+            } else {
+                Identity::Other
+            }
         })
         .collect()
 }
 
 /// Resolve a `secret` target to the host pattern(s) it gates: a specific
 /// `secret_id` via the fenced by-id map (absent/deleted → none → never
-/// matches), or a `secret_scope` level union. The maps are project-fenced at
-/// load, so a forged/foreign id resolves to nothing.
+/// matches), or a `secret_scope` level union. The maps are org+project-fenced
+/// at load, so a forged/foreign id resolves to nothing.
 fn secret_target_hosts(r: &PolicyTargetRow, secret_hosts: &SecretHosts) -> Vec<String> {
     if let Some(id) = &r.secret_id {
         secret_hosts.by_id.get(id).cloned().unwrap_or_default()
@@ -93,11 +103,13 @@ fn rate_window(name: Option<&str>) -> Option<RateWindow> {
 
 fn decode_row(
     row: &PolicyRuleV2Row,
+    scope: RuleScope,
     secret_hosts: &SecretHosts,
     connection_providers: &ConnectionProviders,
 ) -> Rule {
     Rule {
         id: row.id.clone(),
+        scope,
         logical_id: row.logical_id.clone(),
         name: row.name.clone(),
         priority: usize::try_from(row.priority).unwrap_or(0),
@@ -121,20 +133,23 @@ fn decode_row(
     }
 }
 
-/// Assemble the loaded project rows for the evaluator. `source="equipment"`
-/// rows are injection-only — their connection/secret target names a credential
-/// to inject at connect, not a policy grant — and are DROPPED here. That drop
-/// is load-bearing: a `secret` target PERMITS its host, so an undropped
-/// equipment rule would silently grant network access alongside its injection.
+/// Assemble one scope's loaded rows for the evaluator, tagging each with the
+/// scope it came from. `source="equipment"` rows are injection-only — their
+/// connection/secret target names a credential to inject at connect, not a
+/// policy grant — and are DROPPED here. That drop is load-bearing: a `secret`
+/// target PERMITS its host, so an undropped equipment rule would silently
+/// grant network access alongside its injection. Org secret/connection targets
+/// resolve through the SAME fenced maps as project ones (`find_secret_hosts` /
+/// `find_connection_providers` already fetch org+project).
 pub(super) fn assemble(
-    project_rows: &[PolicyRuleV2Row],
+    rows: &[PolicyRuleV2Row],
+    scope: RuleScope,
     secret_hosts: &SecretHosts,
     connection_providers: &ConnectionProviders,
 ) -> Vec<Rule> {
-    project_rows
-        .iter()
+    rows.iter()
         .filter(|row| row.source != "equipment")
-        .map(|row| decode_row(row, secret_hosts, connection_providers))
+        .map(|row| decode_row(row, scope, secret_hosts, connection_providers))
         .collect()
 }
 
@@ -176,6 +191,7 @@ mod tests {
         ];
         let rules = assemble(
             &rows,
+            RuleScope::Project,
             &SecretHosts::default(),
             &ConnectionProviders::default(),
         );
@@ -183,20 +199,78 @@ mod tests {
         assert_eq!(rules[0].id, "keep");
     }
 
+    /// Test #12: agent-group is provably absent — every directory identity kind
+    /// the DB carries (agent/user/group) decodes to a live variant, a group id
+    /// decodes to `Group` (never a swallowed agent-group), and a principal-less
+    /// row is `Other`. There is no agent-group column or variant to decode.
     #[test]
-    fn directory_identities_decode_to_other_never_agent() {
+    fn agent_user_and_group_identities_decode_and_a_no_principal_row_is_other() {
         let rows = vec![row(|r| {
-            r.identities = Json(vec![serde_json::from_value(
-                json!({"agentId": null, "userId": null, "groupId": "g1"}),
-            )
-            .expect("identity row")]);
+            r.identities = Json(
+                serde_json::from_value(json!([
+                    {"agentId": "a1", "userId": null, "groupId": null},
+                    {"agentId": null, "userId": "u1", "groupId": null},
+                    {"agentId": null, "userId": null, "groupId": "g1"},
+                    {"agentId": null, "userId": null, "groupId": null},
+                ]))
+                .expect("identity rows"),
+            );
         })];
         let rules = assemble(
             &rows,
+            RuleScope::Project,
             &SecretHosts::default(),
             &ConnectionProviders::default(),
         );
-        assert!(matches!(rules[0].identities[0], Identity::Other));
+        assert!(matches!(&rules[0].identities[0], Identity::Agent(id) if id == "a1"));
+        assert!(matches!(&rules[0].identities[1], Identity::User(id) if id == "u1"));
+        assert!(matches!(&rules[0].identities[2], Identity::Group(id) if id == "g1"));
+        assert!(matches!(rules[0].identities[3], Identity::Other));
+    }
+
+    #[test]
+    fn rules_are_tagged_with_the_scope_they_were_assembled_for() {
+        let rows = vec![row(|_| {})];
+        let org = assemble(
+            &rows,
+            RuleScope::Organization,
+            &SecretHosts::default(),
+            &ConnectionProviders::default(),
+        );
+        let project = assemble(
+            &rows,
+            RuleScope::Project,
+            &SecretHosts::default(),
+            &ConnectionProviders::default(),
+        );
+        assert_eq!(org[0].scope, RuleScope::Organization);
+        assert_eq!(project[0].scope, RuleScope::Project);
+    }
+
+    #[test]
+    fn org_scope_targets_resolve_through_the_same_fenced_maps() {
+        let mut hosts = SecretHosts::default();
+        hosts
+            .by_id
+            .insert("s1".to_string(), vec!["api.example.com".to_string()]);
+        let mut providers = ConnectionProviders::default();
+        providers
+            .by_id
+            .insert("c1".to_string(), "github".to_string());
+        let rows = vec![row(|r| {
+            r.targets = Json(vec![
+                target(json!({"kind": "secret", "secretId": "s1"})),
+                target(json!({"kind": "connection", "appConnectionId": "c1", "appTools": []})),
+            ]);
+        })];
+        let rules = assemble(&rows, RuleScope::Organization, &hosts, &providers);
+        assert!(
+            matches!(&rules[0].targets[0], Target::Secret { host_patterns } if host_patterns == &["api.example.com".to_string()])
+        );
+        assert!(matches!(
+            &rules[0].targets[1],
+            Target::Connection { id, provider, .. } if id == "c1" && provider == "github"
+        ));
     }
 
     #[test]
@@ -211,7 +285,12 @@ mod tests {
                 target(json!({"kind": "connection", "appConnectionId": "missing", "appTools": []})),
             ]);
         })];
-        let rules = assemble(&rows, &SecretHosts::default(), &providers);
+        let rules = assemble(
+            &rows,
+            RuleScope::Project,
+            &SecretHosts::default(),
+            &providers,
+        );
         assert!(matches!(
             &rules[0].targets[0],
             Target::Connection { id, provider, .. } if id == "c1" && provider == "github"
@@ -233,7 +312,12 @@ mod tests {
                 target(json!({"kind": "secret", "secretId": "deleted"})),
             ]);
         })];
-        let rules = assemble(&rows, &hosts, &ConnectionProviders::default());
+        let rules = assemble(
+            &rows,
+            RuleScope::Project,
+            &hosts,
+            &ConnectionProviders::default(),
+        );
         assert!(
             matches!(&rules[0].targets[0], Target::Secret { host_patterns } if host_patterns == &["api.example.com".to_string()])
         );
@@ -259,7 +343,12 @@ mod tests {
         let rows = vec![row(|r| {
             r.targets = Json(vec![target(json!({"kind": "secret", "secretId": "s1"}))]);
         })];
-        let rules = assemble(&rows, &hosts, &ConnectionProviders::default());
+        let rules = assemble(
+            &rows,
+            RuleScope::Project,
+            &hosts,
+            &ConnectionProviders::default(),
+        );
         let Target::Secret { host_patterns } = &rules[0].targets[0] else {
             panic!("expected a secret target");
         };
@@ -292,6 +381,7 @@ mod tests {
         ];
         let rules = assemble(
             &rows,
+            RuleScope::Project,
             &SecretHosts::default(),
             &ConnectionProviders::default(),
         );

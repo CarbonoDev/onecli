@@ -47,7 +47,10 @@ import { useScopedSecrets } from "@/hooks/use-secrets";
 // them to the real editors; the OSS modules are locked "available in OneCLI
 // Cloud" surfaces (conditions) or inert (the org picker — OSS mounts no org
 // scope).
-import { ConditionBuilder } from "@/lib/components/condition-builder";
+import {
+  ConditionBuilder,
+  isConditionsValid,
+} from "@/lib/components/condition-builder";
 // Alias key on purpose (see editor-chrome's note): a relative import would
 // bypass the edition seam.
 import { OrgIdentityPicker } from "@/lib/policy-editor/identity-picker";
@@ -882,29 +885,14 @@ export const PolicyRuleForm = ({
           {!(targetKind === "app" && appTarget.mode === "specific") && (
             <fieldset className="space-y-2">
               <legend className="text-sm font-medium">Conditions</legend>
+              {/* Every target kind honors conditions in the gateway — network
+                verbatim, app targets through the catalog fan-out (whole-app
+                included), secrets on their resolved hosts — so no per-target
+                carve-out note is needed. */}
               <ConditionBuilder
                 conditions={conditions}
                 onChange={setConditions}
               />
-              {/* Whether conditions gate matching depends on the target: a
-                secret, or a WHOLE-app (no-tools) app/connection target, matches
-                host-only and ignores conditions; a tool-narrowed target runs
-                the tool fan-out, which honors conditions like a network rule
-                (so no note is shown then). */}
-              {targetKind === "secret" && (
-                <p className="text-xs text-muted-foreground">
-                  Conditions don&apos;t apply to this target type — it matches
-                  its hosts regardless of request content.
-                </p>
-              )}
-              {targetKind === "app" &&
-                appTarget.tools.length === 0 &&
-                appTarget.mode === "all" && (
-                  <p className="text-xs text-muted-foreground">
-                    Conditions don&apos;t apply to a whole-app target — it
-                    matches the app&apos;s hosts regardless of request content.
-                  </p>
-                )}
             </fieldset>
           )}
           {/* The Conditions editor is hidden for a specific-connection target, but
@@ -933,7 +921,16 @@ export const PolicyRuleForm = ({
           <Button
             onClick={handleSubmit}
             loading={saving}
-            disabled={appCloudLocked}
+            // Invalid condition rows show inline errors; gating submit keeps
+            // the API 422 from being the first feedback. Only gate when the
+            // builder is shown — a specific-connection target preserves its
+            // conditions untouched, and an uneditable set must never brick
+            // Save.
+            disabled={
+              appCloudLocked ||
+              (!(targetKind === "app" && appTarget.mode === "specific") &&
+                !isConditionsValid(conditions))
+            }
           >
             {saving
               ? isEdit

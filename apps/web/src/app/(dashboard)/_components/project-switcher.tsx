@@ -33,16 +33,23 @@ export const ProjectSwitcher = () => {
   const router = useRouter();
   const queryClient = useQueryClient();
   const { data: projects = [], isLoading } = useProjectsList();
-  const currentId = useCurrentProjectId();
+  const resolvedId = useCurrentProjectId();
+  // `useCurrentProjectId` reads the cookie in a mount effect, so it does NOT
+  // re-run when we write a new one — router.refresh() re-renders server
+  // components but leaves client state alone. Without this the trigger kept
+  // showing the old project until a full reload.
+  const [pendingId, setPendingId] = useState<string | undefined>();
+  const currentId = pendingId ?? resolvedId;
   const [createOpen, setCreateOpen] = useState(false);
 
   const switchTo = (projectId: string) => {
     if (projectId === currentId) return;
+    setPendingId(projectId);
     writeDefaultProjectCookie(projectId);
-    // Every cached query has to go, not just the project list. Query keys are
-    // scoped by `getProjectId()`, which is an `undefined` stub in this edition,
-    // so switching projects does NOT change any key — cached agents, secrets
-    // and policy would otherwise be served for the previous project.
+    // Belt and braces. `getProjectId()` now returns the cookie, so `scope()`
+    // already re-keys every query on switch; clearing also drops the old
+    // project's entries instead of leaving them cached under a key nobody
+    // will ask for again.
     queryClient.clear();
     // The cookie only reaches the server on the next request, and most of this
     // dashboard is server-rendered, so refresh rather than re-render.

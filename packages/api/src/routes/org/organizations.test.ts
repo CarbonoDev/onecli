@@ -382,7 +382,7 @@ describe("PATCH /v1/organizations/:organizationId", () => {
       action: "update",
       service: "organization",
       source: "api",
-      metadata: { change: "name", name: "Acme Prime" },
+      metadata: { organizationId: ORG, change: "name", name: "Acme Prime" },
     });
     expect(store.audits[0]?.projectId).toBeUndefined();
   });
@@ -416,6 +416,15 @@ describe("PATCH /v1/organizations/:organizationId", () => {
     ]) {
       expect((await patch(ORG, body)).status).toBe(422);
     }
+    expect(orgRow(ORG)?.name).toBe("Acme");
+    expect(store.audits).toHaveLength(0);
+  });
+
+  it("422s a non-string name rather than coercing it", async () => {
+    // `{ name: 123 }` would stringify to "123" under a coercing schema — a
+    // silent rename to a number. Zod rejects the type outright.
+    const res = await patch(ORG, { name: 123 });
+    expect(res.status).toBe(422);
     expect(orgRow(ORG)?.name).toBe("Acme");
     expect(store.audits).toHaveLength(0);
   });

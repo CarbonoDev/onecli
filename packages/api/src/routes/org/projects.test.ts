@@ -2057,6 +2057,30 @@ describe("DELETE /v1/projects/:projectId", () => {
     expect(projectRow("proj-1")).toBeTruthy();
   });
 
+  // The /projects page renders these refusals verbatim inline in the delete
+  // dialog, so the EXACT wording is UI contract, not just substring flavour.
+  it("pins the exact last-project refusal message", async () => {
+    store.projects = store.projects.filter(
+      (p) => p.id === "proj-1" || p.organizationId === OTHER_ORG,
+    );
+    const res = await remove("proj-1");
+    expect(res.status).toBe(409);
+    const body = (await res.json()) as { error: { message: string } };
+    expect(body.error.message).toBe(
+      "An organization must keep at least one project.",
+    );
+  });
+
+  it("pins the exact stranded-actor refusal message", async () => {
+    store.sessionUserId = MEMBER; // owner binding on proj-1, their only project
+    const res = await remove("proj-1", {});
+    expect(res.status).toBe(409);
+    const body = (await res.json()) as { error: { message: string } };
+    expect(body.error.message).toBe(
+      "Deleting this project would leave you with no project.",
+    );
+  });
+
   it("200s when the bound users resolve another project through a BINDING", async () => {
     // proj-2's candidates: OWNER (also created proj-4) and MEMBER2 (bound to
     // proj-1 through g-a) — `hasResolvableProjectExcluding`'s binding arm.

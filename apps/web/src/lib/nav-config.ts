@@ -5,13 +5,13 @@ import {
   Settings,
   Plug,
   Activity,
+  FolderKanban,
   User,
   Users,
   UsersRound,
   KeyRound,
   ShieldCheck,
   Globe,
-  FolderKanban,
   Building2,
 } from "lucide-react";
 import type { NavItem } from "@/app/(dashboard)/_components/nav-main";
@@ -44,6 +44,9 @@ export const navItems: NavItem[] = [
   // groups in local auth mode — hiding the item would require a session role
   // field.
   { title: "Groups", url: "/groups", icon: UsersRound },
+  // Always visible (D-J): the page itself degrades — a member sees only their
+  // bound projects and the API's 403 is the authority on any mutation.
+  { title: "Projects", url: "/projects", icon: FolderKanban },
   { title: "Settings", url: "/settings", icon: Settings },
 ];
 

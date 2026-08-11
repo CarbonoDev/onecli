@@ -1,8 +1,6 @@
 "use client";
 
 import { useState } from "react";
-import { useRouter } from "next/navigation";
-import { useQueryClient } from "@tanstack/react-query";
 import { Check, ChevronsUpDown, FolderOpen, Plus } from "lucide-react";
 import {
   DropdownMenu,
@@ -18,7 +16,7 @@ import {
 } from "@onecli/ui/components/sidebar";
 import { cn } from "@onecli/ui/lib/utils";
 import { useCurrentProjectId, useProjectsList } from "@/hooks/use-projects";
-import { writeDefaultProjectCookie } from "@/lib/navigation";
+import { useSwitchProject } from "@/hooks/use-switch-project";
 import { CreateProjectDialog } from "./create-project-dialog";
 
 /**
@@ -30,30 +28,20 @@ import { CreateProjectDialog } from "./create-project-dialog";
  * simply renders nothing.
  */
 export const ProjectSwitcher = () => {
-  const router = useRouter();
-  const queryClient = useQueryClient();
   const { data: projects = [], isLoading } = useProjectsList();
   const resolvedId = useCurrentProjectId();
-  // `useCurrentProjectId` reads the cookie in a mount effect, so it does NOT
-  // re-run when we write a new one — router.refresh() re-renders server
-  // components but leaves client state alone. Without this the trigger kept
-  // showing the old project until a full reload.
+  // `useCurrentProjectId` re-reads the cookie after the switch's cache clear,
+  // but that refetch is asynchronous — without this the trigger flashed the
+  // old project until it settled.
   const [pendingId, setPendingId] = useState<string | undefined>();
   const currentId = pendingId ?? resolvedId;
   const [createOpen, setCreateOpen] = useState(false);
+  const doSwitch = useSwitchProject();
 
   const switchTo = (projectId: string) => {
     if (projectId === currentId) return;
     setPendingId(projectId);
-    writeDefaultProjectCookie(projectId);
-    // Belt and braces. `getProjectId()` now returns the cookie, so `scope()`
-    // already re-keys every query on switch; clearing also drops the old
-    // project's entries instead of leaving them cached under a key nobody
-    // will ask for again.
-    queryClient.clear();
-    // The cookie only reaches the server on the next request, and most of this
-    // dashboard is server-rendered, so refresh rather than re-render.
-    router.refresh();
+    doSwitch(projectId);
   };
 
   // Nothing to switch between and nothing loaded yet — stay out of the way

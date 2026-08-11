@@ -31,7 +31,7 @@ import { ApiError, type ProjectAccessBindings } from "@/lib/api";
 import { useOrgMembersList } from "@/hooks/use-org-members";
 import { useGroups } from "@/hooks/use-groups";
 import { useSetProjectAccess } from "@/hooks/use-project-access";
-import { AdminOnlyNotice } from "./admin-only-notice";
+import { AdminOnlyNotice } from "./project-access-admin-notice";
 
 export interface ProjectAccessDialogProps {
   projectId: string;

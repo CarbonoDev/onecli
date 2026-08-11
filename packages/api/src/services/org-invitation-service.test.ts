@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 // Accept-path invariants for the invitation service, exercised DIRECTLY (no
 // HTTP): the accept surface is a Server Action, so these behaviors have no
 // route test to live in. In-memory `@onecli/db` mock; the project provisioner
-// (`ensureMemberDefaultProject`) is a spy — its own behavior is covered by
+// (`attachMemberToProject`) is a spy — its own behavior is covered by
 // organization-service.test.ts.
 
 vi.hoisted(() => {
@@ -38,6 +38,8 @@ interface InvitationRow {
   status: string;
   invitedById: string;
   invitedByEmail: string;
+  /** Nullable column: the project the inviter chose, null = org's oldest. */
+  projectId: string | null;
   expiresAt: Date;
   createdAt: Date;
 }
@@ -50,7 +52,7 @@ const store = vi.hoisted(() => ({
   seq: 0,
 }));
 
-const ensureMemberDefaultProject = vi.hoisted(() =>
+const attachMemberToProject = vi.hoisted(() =>
   vi.fn(async (organizationId: string) => ({
     id: `proj-of-${organizationId}`,
     organizationId,
@@ -58,7 +60,7 @@ const ensureMemberDefaultProject = vi.hoisted(() =>
 );
 
 vi.mock("./organization-service", () => ({
-  ensureMemberDefaultProject,
+  attachMemberToProject,
 }));
 
 vi.mock("@onecli/db", () => {
@@ -217,6 +219,7 @@ const invitation = (overrides: Partial<InvitationRow> = {}): InvitationRow => ({
   status: "pending",
   invitedById: "user-admin",
   invitedByEmail: "admin@example.com",
+  projectId: null,
   expiresAt: daysFromNow(5),
   createdAt: new Date(),
   ...overrides,
@@ -238,7 +241,7 @@ beforeEach(() => {
   store.members = [];
   store.invitations = [invitation()];
   store.seq = 0;
-  ensureMemberDefaultProject.mockClear();
+  attachMemberToProject.mockClear();
 });
 
 const membershipsOf = (userId: string) =>
@@ -267,10 +270,13 @@ describe("acceptInvitation", () => {
     ]);
     expect(store.invitations[0]?.status).toBe("accepted");
     // NOT best-effort: awaited, and its project id is what the caller returns.
-    expect(ensureMemberDefaultProject).toHaveBeenCalledExactlyOnceWith(
+    // The 4th argument is the project the INVITER chose; null here means "the
+    // organization's oldest", resolved inside attachMemberToProject.
+    expect(attachMemberToProject).toHaveBeenCalledExactlyOnceWith(
       ORG,
       "user-dev",
       "dev@example.com",
+      null,
     );
   });
 
@@ -291,7 +297,7 @@ describe("acceptInvitation", () => {
     ).rejects.toMatchObject({ code: "GONE" });
     expect(store.invitations[0]?.status).toBe("expired");
     expect(membershipsOf("user-dev")).toHaveLength(0);
-    expect(ensureMemberDefaultProject).not.toHaveBeenCalled();
+    expect(attachMemberToProject).not.toHaveBeenCalled();
   });
 
   it("410s a cancelled invitation", async () => {
@@ -321,7 +327,7 @@ describe("acceptInvitation", () => {
     // The failed attempt must not consume the invitation or create state.
     expect(store.invitations[0]?.status).toBe("pending");
     expect(membershipsOf("user-dev")).toHaveLength(0);
-    expect(ensureMemberDefaultProject).not.toHaveBeenCalled();
+    expect(attachMemberToProject).not.toHaveBeenCalled();
   });
 
   it("creates the membership in the TOKEN'S org only", async () => {
@@ -358,7 +364,7 @@ describe("acceptInvitation", () => {
     expect(membershipsOf("user-dev")[0]?.role).toBe("member");
     expect(store.invitations[0]?.status).toBe("accepted");
     // The find-or-create still runs: the member needs a project to land on.
-    expect(ensureMemberDefaultProject).toHaveBeenCalledOnce();
+    expect(attachMemberToProject).toHaveBeenCalledOnce();
   });
 
   it("409s a suspended member and leaves everything untouched", async () => {
@@ -375,7 +381,7 @@ describe("acceptInvitation", () => {
     ).rejects.toMatchObject({ code: "CONFLICT" });
     expect(store.invitations[0]?.status).toBe("pending");
     expect(membershipsOf("user-dev")[0]?.status).toBe("suspended");
-    expect(ensureMemberDefaultProject).not.toHaveBeenCalled();
+    expect(attachMemberToProject).not.toHaveBeenCalled();
   });
 
   it("404s an unknown token with a generic message", async () => {

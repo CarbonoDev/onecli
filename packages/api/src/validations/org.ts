@@ -58,6 +58,13 @@ export type InvitationListQuery = z.infer<typeof invitationListQuerySchema>;
 export const createInvitationSchema = z.object({
   email: z.string().trim().toLowerCase().pipe(z.email().max(255)),
   role: orgMemberRoleSchema,
+  /**
+   * The project the invitee is attached to on accept. Optional: omit it and
+   * they land on the organization's oldest project. The service rejects an id
+   * outside the organization, so this is not a channel for reaching another
+   * org's project.
+   */
+  projectId: z.string().min(1).optional(),
 });
 
 export type CreateInvitationInput = z.infer<typeof createInvitationSchema>;

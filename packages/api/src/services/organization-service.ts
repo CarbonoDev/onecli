@@ -394,18 +394,82 @@ export const joinSharedOrganization = async (
  * an existing org already owns the plain `default` slug, so the member's slug
  * carries their user id.
  */
-export const ensureMemberDefaultProject = async (
+/**
+ * Give an invited member a project to land on, by ATTACHING them to an existing
+ * one rather than minting a personal one.
+ *
+ * The old behaviour (`ensureMemberDefaultProject`) created a project named
+ * "Default" per invitee, slug `default-<userId>`. That is why project names are
+ * deliberately non-unique per org, and why an org accumulated one project per
+ * person while nobody landed anywhere shared.
+ *
+ * Resolution order:
+ *  1. A project the member can ALREADY reach — created by them, or bound
+ *     directly/through a group. Keeps accept idempotent and never re-binds on a
+ *     second click.
+ *  2. `preferredProjectId`, when the inviter chose one and it is still in this
+ *     org. Silently ignored otherwise: a project deleted between invite and
+ *     accept must not fail the accept.
+ *  3. The organization's OLDEST project — its de-facto default. Deterministic,
+ *     and the same ordering `findUserDefaultProject` uses.
+ *  4. Only if the org has no project at all: create one. This is the bootstrap
+ *     edge (an org whose every project was deleted), not the common path.
+ *
+ * The binding is `member`, never `owner`: being invited grants use of a
+ * project, not authority over it. An org admin already has management authority
+ * through their role.
+ */
+export const attachMemberToProject = async (
   organizationId: string,
   userId: string,
   userEmail: string,
+  preferredProjectId?: string | null,
 ) => {
-  const existing = await db.project.findFirst({
-    where: { organizationId, createdByUserId: userId },
+  // 1. Already reachable — the idempotent path.
+  const reachable = await db.project.findFirst({
+    where: {
+      organizationId,
+      OR: [
+        { createdByUserId: userId },
+        {
+          accessBindings: {
+            some: {
+              OR: [{ userId }, { group: { members: { some: { userId } } } }],
+            },
+          },
+        },
+      ],
+    },
     select: { id: true, organizationId: true },
-    orderBy: { createdAt: "asc" },
+    orderBy: [{ createdAt: "asc" }, { id: "asc" }],
   });
-  if (existing) return existing;
+  if (reachable) return reachable;
 
+  // 2/3. The chosen project if it still belongs to this org, else the oldest.
+  const target =
+    (preferredProjectId
+      ? await db.project.findFirst({
+          where: { id: preferredProjectId, organizationId },
+          select: { id: true, organizationId: true },
+        })
+      : null) ??
+    (await db.project.findFirst({
+      where: { organizationId },
+      select: { id: true, organizationId: true },
+      orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+    }));
+
+  if (target) {
+    // `createMany` + skipDuplicates rather than `create`: two accepts racing on
+    // the same invitation must not collide on @@unique([projectId, userId]).
+    await db.projectAccess.createMany({
+      data: [{ projectId: target.id, userId, role: "member" }],
+      skipDuplicates: true,
+    });
+    return target;
+  }
+
+  // 4. Bootstrap edge only: an organization with no projects at all.
   const project = await db.project.create({
     data: {
       id: generateProjectId(),

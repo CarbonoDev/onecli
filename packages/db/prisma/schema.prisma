@@ -106,14 +106,21 @@ model Invitation {
   status         String   @default("pending") // "pending" | "accepted" | "cancelled" | "expired"
   invitedById    String   @map("invited_by_id")
   invitedByEmail String   @map("invited_by_email")
+  /// The project the invitee is attached to on accept. Null = the
+  /// organization's oldest project, resolved at accept time. Set null rather
+  /// than cascading when the project is deleted: a pending invitation should
+  /// fall back to the default, not disappear.
+  projectId      String?  @map("project_id")
   expiresAt      DateTime @map("expires_at")
   createdAt      DateTime @default(now()) @map("created_at")
 
   organization Organization @relation(fields: [organizationId], references: [id])
   invitedBy    User         @relation("InvitationCreator", fields: [invitedById], references: [id])
+  project      Project?     @relation(fields: [projectId], references: [id], onDelete: SetNull)
 
   @@unique([organizationId, email])
   @@index([token])
+  @@index([projectId])
   @@map("invitations")
 }
 
@@ -208,6 +215,7 @@ model Project {
   appConfigs       AppConfig[]
   budgets          Budget[] // cloud-only: per-secret spend budgets for this project (inert in OSS)
   accessBindings   ProjectAccess[]
+  invitations      Invitation[]
 
   @@unique([organizationId, slug])
   @@index([organizationId])

@@ -13,7 +13,7 @@
 | 3   | Web: switcher + create dialog | M    | PR open (#23 transport / #24 UI)               |
 | 4   | Org switching                 | M–L  | PR open (#26), plus fixes #30/#31 from testing |
 | 5   | Invite to an existing project | M    | PR open (#32)                                  |
-| 6   | Projects view                 | M    | not started                                    |
+| 6   | Projects view                 | M    | built (`feat/projects-view`, stacked on #32)   |
 | 7   | Org settings page (rename)    | S    | PR open (#34)                                  |
 
 Slices 1–4 were built before anyone ran them. Slices 5–7 come from actually
@@ -235,6 +235,26 @@ assembly: `GET` (#21), `POST` (#22), `PATCH`/`DELETE` and `GET/PUT
   rather than a generic error.
 - Switching to a project from this page should go through the same cookie write
   the switcher uses, not a second mechanism.
+
+## Decisions recorded during implementation
+
+- **Nav entry is always visible**, not admin-visible: every caller has a
+  meaningful page (a member sees their bound projects), and hiding it would
+  require a session role field. Same D-J comment as Team/Groups.
+- **The switch sequence is extracted** into `useSwitchProject`
+  (cookie write → `queryClient.clear()` → `router.refresh()`); the sidebar
+  switcher and the page rows both delegate to it.
+- **`useCurrentProjectId`'s cookie read is query-backed** rather than a mount
+  effect — defect 3 fixed at the source: both switch surfaces clear the query
+  cache, so every subscriber re-reads the cookie after a switch from either
+  one. The sidebar switcher keeps its `pendingId` to cover the async refetch.
+- **`ProjectAccessDialog` (and its admin-only notice) moved** from
+  `settings/project/_components/` to the shared `apps/web/src/components/`
+  home; the settings card and the projects rows render the same dialog.
+- **Delete 409s surface twice** — the hook's toast (verbatim server message)
+  plus inline destructive text in the still-open dialog. Accepted as-is.
+- The page stays on `/projects` after a row switch, and after deleting the
+  currently selected project (cookie cleared, server re-resolves a default).
 
 # Slice 7: org settings page (rename)
 

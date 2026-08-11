@@ -93,18 +93,33 @@ export const resolveProjectId = async (
   request: Request,
   userId: string,
 ): Promise<string | null> => {
-  const headerProjectId = request.headers.get("x-project-id");
+  const headerOrgId = request.headers.get("x-organization-id") ?? undefined;
+  let headerProjectId = request.headers.get("x-project-id");
+
+  // A project header left over from a PREVIOUS org must not pin the caller
+  // there. `session.ts` derives the organization FROM the resolved project, so
+  // honouring a stale project id would silently override the org the caller
+  // just selected — the switcher would say one org while every page read from
+  // another. Drop it and let the org-scoped default answer instead.
+  if (headerProjectId && headerOrgId) {
+    const inSelectedOrg = await db.project.findFirst({
+      where: { id: headerProjectId, organizationId: headerOrgId },
+      select: { id: true },
+    });
+    if (!inSelectedOrg) headerProjectId = null;
+  }
+
   if (!headerProjectId) {
     if (CAPS.tenancy === "multi-org") return null;
-    // No explicit project, but possibly an explicit ORG (the org switcher's
-    // cookie, via the proxy). Prefer that org's default project — otherwise
-    // `x-organization-id` is inert on flat editions, because a project always
-    // resolves here and `session.ts` derives the org FROM the project.
-    // `findUserDefaultProject` validates membership and falls back to the
-    // unfenced answer, so a bogus header cannot strand or mis-scope the caller.
+    // No explicit project, but possibly an explicit ORG (the switcher's cookie).
+    // Resolve that org's default project. STRICT when the org was chosen
+    // explicitly: answering with a different org's project would be the same
+    // silent override as above. Returning null is safe — `session.ts` then
+    // resolves org context on its own, giving "this org, no project yet".
     const fallback = await findUserDefaultProject(
       userId,
-      request.headers.get("x-organization-id") ?? undefined,
+      headerOrgId,
+      Boolean(headerOrgId),
     );
     return fallback?.id ?? null;
   }

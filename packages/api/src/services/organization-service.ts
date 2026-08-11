@@ -52,6 +52,18 @@ export const activeMembershipWhere = {
 export const findUserDefaultProject = async (
   userId: string,
   preferredOrgId?: string,
+  /**
+   * Refuse to look outside `preferredOrgId`.
+   *
+   * The unfenced fallback exists so an unusable SELECTION never strands a
+   * caller with no project at all. But when the org was chosen EXPLICITLY (the
+   * switcher's header), silently answering with another org's project is worse
+   * than answering with none: the switcher says one org while every page reads
+   * from another. "No project in this organization" is a legitimate state —
+   * `session.ts` still resolves org context via `resolveOrganizationId`, so
+   * this returns null without a lockout.
+   */
+  strict = false,
 ): Promise<{ id: string; organizationId: string } | null> => {
   // Cheap early-out for the pre-bootstrap user, and the reason both arms below
   // can assume at least one active membership exists.
@@ -102,6 +114,7 @@ export const findUserDefaultProject = async (
   if (preferredOrgId) {
     const preferred = await resolve(preferredOrgId);
     if (preferred) return preferred;
+    if (strict) return null;
   }
   return resolve();
 };

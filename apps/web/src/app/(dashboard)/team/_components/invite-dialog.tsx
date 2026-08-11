@@ -21,8 +21,13 @@ import {
   SelectValue,
 } from "@onecli/ui/components/select";
 import { useCreateInvitation } from "@/hooks/use-invitations";
+import { useProjectsList } from "@/hooks/use-projects";
 import type { InvitationRow } from "@/lib/api";
 import { InviteLinkField } from "./invite-link-field";
+
+/** Radix Select refuses an empty-string item value, so "let the API choose"
+ * needs a sentinel rather than "". */
+const DEFAULT_PROJECT_VALUE = "__default__";
 
 export interface InviteDialogProps {
   open: boolean;
@@ -32,6 +37,11 @@ export interface InviteDialogProps {
 export const InviteDialog = ({ open, onOpenChange }: InviteDialogProps) => {
   const [email, setEmail] = useState("");
   const [role, setRole] = useState<"admin" | "member">("member");
+  // Which project the invitee lands on. Only offered when there is a genuine
+  // choice: with one project the answer is forced, and with none the API falls
+  // back on its own. Empty string = "let the API pick the org's default".
+  const [projectId, setProjectId] = useState<string>("");
+  const { data: projects = [] } = useProjectsList();
   const [created, setCreated] = useState<InvitationRow | null>(null);
   const createInvitation = useCreateInvitation();
 
@@ -41,7 +51,11 @@ export const InviteDialog = ({ open, onOpenChange }: InviteDialogProps) => {
   const handleCreate = () => {
     if (!isEmailPlausible || createInvitation.isPending) return;
     createInvitation.mutate(
-      { email: trimmedEmail, role },
+      {
+        email: trimmedEmail,
+        role,
+        ...(projectId ? { projectId } : {}),
+      },
       { onSuccess: (invitation) => setCreated(invitation) },
     );
   };
@@ -50,6 +64,7 @@ export const InviteDialog = ({ open, onOpenChange }: InviteDialogProps) => {
     if (!value) {
       setEmail("");
       setRole("member");
+      setProjectId("");
       setCreated(null);
     }
     onOpenChange(value);
@@ -130,6 +145,34 @@ export const InviteDialog = ({ open, onOpenChange }: InviteDialogProps) => {
                   </SelectContent>
                 </Select>
               </div>
+              {projects.length > 1 && (
+                <div className="space-y-2">
+                  <Label htmlFor="invite-project">Project</Label>
+                  <Select
+                    value={projectId || DEFAULT_PROJECT_VALUE}
+                    onValueChange={(value) =>
+                      setProjectId(value === DEFAULT_PROJECT_VALUE ? "" : value)
+                    }
+                  >
+                    <SelectTrigger id="invite-project" className="w-full">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value={DEFAULT_PROJECT_VALUE}>
+                        Default project
+                      </SelectItem>
+                      {projects.map((project) => (
+                        <SelectItem key={project.id} value={project.id}>
+                          {project.name ?? project.slug ?? project.id}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <p className="text-muted-foreground text-xs">
+                    They are added to this project as a member.
+                  </p>
+                </div>
+              )}
             </div>
             <DialogFooter>
               <Button variant="ghost" onClick={() => handleClose(false)}>

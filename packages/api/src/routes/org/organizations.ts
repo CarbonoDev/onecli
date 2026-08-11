@@ -36,7 +36,7 @@ export const ossOrganizationRoutes = () => {
     if (c.get("auth").scope === "project") {
       throw new ServiceError(
         "FORBIDDEN",
-        "Listing organizations requires a session or an organization-scoped credential.",
+        "Reading or managing organizations requires a session or an organization-scoped credential.",
       );
     }
     return next();
@@ -73,7 +73,15 @@ export const ossOrganizationRoutes = () => {
         service: AUDIT_SERVICES.ORGANIZATION,
         source: AUDIT_SOURCE.API,
         action: AUDIT_ACTIONS.UPDATE,
-        metadata: { change: "name", name: renamed.name },
+        // `organizationId` is duplicated into the metadata deliberately, as
+        // `renameProject` duplicates `projectId`: the column scopes the row,
+        // the metadata records what the change was ABOUT, and a log reader
+        // filtering on one should not have to know about the other.
+        metadata: {
+          organizationId: auth.organizationId,
+          change: "name",
+          name: renamed.name,
+        },
       }),
     );
     return c.json(organization);

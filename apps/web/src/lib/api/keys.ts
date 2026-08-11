@@ -5,6 +5,18 @@ const scope = () =>
   [getOrganizationId() ?? "default", getProjectId() ?? "default"] as const;
 
 export const queryKeys = {
+  /**
+   * The selection cookies, held in the query cache so a switch re-renders every
+   * subscriber instead of stranding them on a mount-effect read.
+   *
+   * Deliberately NOT `scope()`-prefixed, and this is the one group that must
+   * not be: these keys ARE the scope source, so prefixing them with the scope
+   * they produce would be circular — the key would change identity the moment
+   * its own value did.
+   */
+  scope: {
+    organizationCookie: () => ["scope", "org-cookie"] as const,
+  },
   agents: {
     all: () => ["agents", ...scope()] as const,
     list: () => [...queryKeys.agents.all(), "list"] as const,

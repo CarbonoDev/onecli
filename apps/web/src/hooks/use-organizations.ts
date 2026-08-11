@@ -1,6 +1,5 @@
 "use client";
 
-import { useEffect, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { organizations } from "@/lib/api";
@@ -42,13 +41,27 @@ export const useRenameOrganization = () =>
  * then derives the org FROM the resolved project — so the cookie is upstream of
  * everything and has to win here too.
  *
- * Read in an effect, not during render: the cookie lives on `document`, and
- * reading it while rendering would mismatch the server-rendered HTML.
+ * The cookie is held in the QUERY CACHE rather than in a mount effect. It has to
+ * be: an effect with an empty dep array runs once, and `router.refresh()` — all
+ * the org switcher does after writing the cookie — leaves client state alone. A
+ * page mounted BEFORE the switch would keep resolving the old org forever, and
+ * act on it (the org settings page would PATCH org A while the request carried
+ * org B's header, producing a 404 the user cannot explain). As a query, the
+ * switcher's `setQueryData` re-renders every subscriber at once.
+ *
+ * Still not read during render: the query function runs after hydration, so the
+ * first paint matches the server-rendered HTML and falls back to
+ * `fallbackOrganizationId` until the cookie answers.
  */
 export const useCurrentOrganizationId = (
   fallbackOrganizationId?: string,
 ): string | undefined => {
-  const [cookieId, setCookieId] = useState<string | undefined>();
-  useEffect(() => setCookieId(readDefaultOrgCookie()), []);
+  // `?? null` because react-query forbids `undefined` as query data — "no
+  // cookie" has to be a value it can cache, not an absence it treats as unset.
+  const { data: cookieId } = useQuery({
+    queryKey: queryKeys.scope.organizationCookie(),
+    queryFn: () => readDefaultOrgCookie() ?? null,
+    staleTime: Infinity,
+  });
   return cookieId ?? fallbackOrganizationId;
 };

@@ -1,6 +1,5 @@
 "use client";
 
-import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { useQueryClient } from "@tanstack/react-query";
 import { Building2, Check, ChevronsUpDown } from "lucide-react";
@@ -25,6 +24,7 @@ import {
   clearDefaultProjectCookie,
   writeDefaultOrgCookie,
 } from "@/lib/navigation";
+import { queryKeys } from "@/lib/api/keys";
 
 /**
  * Switch between the organizations a user belongs to.
@@ -42,14 +42,10 @@ export const OrgSwitcher = () => {
   const router = useRouter();
   const queryClient = useQueryClient();
   const { data: orgs = [], isLoading } = useOrganizationsList();
-  const resolvedId = useCurrentOrganizationId();
-  // Same mount-effect caveat as the project switcher.
-  const [pendingId, setPendingId] = useState<string | undefined>();
-  const currentId = pendingId ?? resolvedId;
+  const currentId = useCurrentOrganizationId();
 
   const switchTo = (organizationId: string) => {
     if (organizationId === currentId) return;
-    setPendingId(organizationId);
     writeDefaultOrgCookie(organizationId);
     // Non-negotiable: a project cookie from the PREVIOUS org would otherwise
     // win, because the project header takes precedence over the org header and
@@ -60,6 +56,15 @@ export const OrgSwitcher = () => {
     // returns the cookie so keys do change, but clearing drops the old org's
     // entries rather than leaving them resident.
     queryClient.clear();
+    // Re-seed AFTER the clear (which dropped it too), synchronously: every
+    // `useCurrentOrganizationId` subscriber — this switcher's own label, and
+    // any page already mounted — moves to the new org in the same render. The
+    // cookie query would otherwise not re-read until a remount, and
+    // `router.refresh()` does not remount client components.
+    queryClient.setQueryData(
+      queryKeys.scope.organizationCookie(),
+      organizationId,
+    );
     router.refresh();
   };
 

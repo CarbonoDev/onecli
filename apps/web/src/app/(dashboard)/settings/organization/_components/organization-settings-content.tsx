@@ -10,8 +10,12 @@ import { ReadOnlyNotice } from "../../_components/read-only-notice";
 import { OrganizationNameCard } from "./organization-name-card";
 
 export interface OrganizationSettingsContentProps {
-  /** SSR-resolved org id, used until the cookie can be read in an effect. */
-  fallbackOrganizationId: string;
+  /**
+   * SSR-resolved org id, used only until the cookie query answers. Optional:
+   * the server has no obligation to resolve one (a projectless user in a
+   * cookie-less session resolves nothing), and the client is the authority.
+   */
+  fallbackOrganizationId?: string;
 }
 
 export const OrganizationSettingsContent = ({
@@ -24,7 +28,14 @@ export const OrganizationSettingsContent = ({
   // invalidates exactly the cache the switcher reads.
   const list = useOrganizationsList();
 
-  const organization = list.data?.find((row) => row.id === organizationId);
+  // The one-membership arm is not a convenience: a cookie-less single-org user
+  // whose org has no project resolves NOTHING server-side and nothing from the
+  // cookie either, and their sole membership is unambiguously the org this page
+  // is about. With two or more it genuinely is ambiguous, so that stays an
+  // error rather than a guess.
+  const organization =
+    list.data?.find((row) => row.id === organizationId) ??
+    (list.data?.length === 1 ? list.data[0] : undefined);
 
   if (list.isPending) {
     return (

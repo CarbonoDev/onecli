@@ -1,6 +1,17 @@
-import { apiGet } from "./client";
+import { apiGet, apiPatch } from "./client";
 import type { Organization } from "./types";
 
 // The organizations the caller is an active member of — the org switcher's
 // source. No parameters: the answer depends only on who is asking.
 export const list = () => apiGet<Organization[]>("/v1/organizations");
+
+/**
+ * Rename an organization. Admin-only server-side; the response omits `role`
+ * (the caller's membership is unchanged by a rename) and carries `slug`
+ * unchanged — it is immutable.
+ */
+export const rename = (id: string, name: string) =>
+  apiPatch<Pick<Organization, "id" | "name" | "slug">>(
+    `/v1/organizations/${id}`,
+    { name },
+  );

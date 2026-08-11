@@ -14,7 +14,7 @@
 | 4   | Org switching                 | M–L  | PR open (#26), plus fixes #30/#31 from testing |
 | 5   | Invite to an existing project | M    | PR open (#32)                                  |
 | 6   | Projects view                 | M    | not started                                    |
-| 7   | Org settings page (rename)    | S    | not started                                    |
+| 7   | Org settings page (rename)    | S    | PR open (#34)                                  |
 
 Slices 1–4 were built before anyone ran them. Slices 5–7 come from actually
 using the feature, and 5 is a root-cause fix rather than an addition — see

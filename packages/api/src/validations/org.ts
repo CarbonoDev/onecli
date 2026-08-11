@@ -25,6 +25,17 @@ export const directoryListQuerySchema = z.object({
 
 export type DirectoryListQuery = z.infer<typeof directoryListQuerySchema>;
 
+/**
+ * Organization display name — trimmed, 1–255 chars (the bounds
+ * `validateOrgName` has always enforced service-side). Deliberately NOT unique
+ * across organizations, for the same reason as `projectNameSchema`: two
+ * unrelated tenants may legitimately call themselves the same thing, and the
+ * identity that must stay unique is the immutable `slug`, not the label.
+ */
+export const orgNameSchema = z.string().trim().min(1).max(255);
+
+export const renameOrganizationSchema = z.object({ name: orgNameSchema });
+
 export const orgMemberStatusSchema = z.enum(["active", "suspended"]);
 
 /** Assignable member roles: `owner` is not assignable through this surface. */

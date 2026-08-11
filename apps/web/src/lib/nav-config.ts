@@ -11,6 +11,8 @@ import {
   KeyRound,
   ShieldCheck,
   Globe,
+  FolderKanban,
+  Building2,
 } from "lucide-react";
 import type { NavItem } from "@/app/(dashboard)/_components/nav-main";
 
@@ -52,7 +54,19 @@ export const getSettingsSections = (
 ): SettingsNavSection[] => [
   {
     label: "General",
-    items: [{ title: "Instance", url: "/settings/instance", icon: Globe }],
+    items: [
+      // Project first: it is the thing users manage; the instance is operator
+      // config. Bare paths, no /org/<id> prefix — orgScopedUI stays false.
+      { title: "Project", url: "/settings/project", icon: FolderKanban },
+      // Always visible: the page degrades for non-admins (the API's 403 is the
+      // authority), so hiding it would require a session role field.
+      {
+        title: "Organization",
+        url: "/settings/organization",
+        icon: Building2,
+      },
+      { title: "Instance", url: "/settings/instance", icon: Globe },
+    ],
   },
   {
     label: "Account",

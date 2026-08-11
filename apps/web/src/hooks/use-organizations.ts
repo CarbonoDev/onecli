@@ -1,7 +1,8 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
+import { toast } from "sonner";
 import { organizations } from "@/lib/api";
 import { queryKeys } from "@/lib/api/keys";
 import { readDefaultOrgCookie } from "@/lib/navigation";
@@ -15,6 +16,21 @@ export const useOrganizationsList = () =>
   useQuery({
     queryKey: queryKeys.organizations.list(),
     queryFn: () => organizations.list(),
+  });
+
+/**
+ * Rename an organization. Owns no cache — the invalidation belongs to the
+ * component that knows which queries its rename invalidates (the
+ * `useRenameProject` precedent).
+ */
+export const useRenameOrganization = () =>
+  useMutation({
+    mutationFn: ({ id, name }: { id: string; name: string }) =>
+      organizations.rename(id, name),
+    onError: (err) =>
+      toast.error(
+        err instanceof Error ? err.message : "Failed to rename organization",
+      ),
   });
 
 /**

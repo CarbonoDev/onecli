@@ -8,7 +8,7 @@ import { useOrgMembersList } from "@/hooks/use-org-members";
 import { ProjectNameCard } from "./project-name-card";
 import { ProjectAccessCard } from "./project-access-card";
 import { DeleteProjectCard } from "./delete-project-card";
-import { ReadOnlyNotice } from "./read-only-notice";
+import { ReadOnlyNotice } from "../../_components/read-only-notice";
 
 export interface ProjectSettingsContentProps {
   projectId: string;
@@ -83,7 +83,9 @@ export const ProjectSettingsContent = ({
 
   return (
     <>
-      {!canManage && <ReadOnlyNotice />}
+      {!canManage && (
+        <ReadOnlyNotice description="Only a project owner or an organization admin can rename this project, change who can use it, or delete it." />
+      )}
       <ProjectNameCard project={project.data} canManage={canManage} />
       <ProjectAccessCard
         projectId={projectId}

@@ -48,6 +48,7 @@ export type {
   CreatedSecret,
   Connection,
   Project,
+  Organization,
   ProjectAccessBindings,
   ProjectAccessUserRow,
   ProjectAccessGroupRow,

@@ -664,3 +664,47 @@ describe("listUserOrganizations", () => {
     expect(rows.map((r) => r.id)).toEqual([ORG]);
   });
 });
+
+describe("findUserDefaultProject strict mode (the org switcher's contract)", () => {
+  it("returns null rather than another org's project when strict", async () => {
+    // The bug this exists to prevent: selecting an org you hold no project in
+    // silently resolved your DEFAULT org's project, so the switcher said one
+    // org while every page read from another.
+    seedOrgWithMember(GUEST);
+    seedOtherOrgWithMember(GUEST);
+    seedProjectIn("proj-host", ORG, GUEST);
+    // No project at all in OTHER_ORG.
+
+    await expect(
+      findUserDefaultProject(GUEST, OTHER_ORG, false),
+    ).resolves.toMatchObject({ id: "proj-host" });
+    await expect(
+      findUserDefaultProject(GUEST, OTHER_ORG, true),
+    ).resolves.toBeNull();
+  });
+
+  it("still answers normally when the selected org DOES have a project", async () => {
+    seedOrgWithMember(GUEST);
+    seedOtherOrgWithMember(GUEST);
+    seedProjectIn("proj-host", ORG, GUEST);
+    seedProjectIn("proj-other", OTHER_ORG, GUEST);
+
+    await expect(
+      findUserDefaultProject(GUEST, OTHER_ORG, true),
+    ).resolves.toMatchObject({ id: "proj-other" });
+  });
+
+  it("leaves the no-preference path unfenced — the lockout guard is untouched", async () => {
+    // strict only applies alongside an explicit preference. Without one the
+    // old behaviour must stand, or deleting a last project locks the user out.
+    seedOrgWithMember(GUEST);
+    seedProjectIn("proj-host", ORG, GUEST);
+
+    await expect(findUserDefaultProject(GUEST)).resolves.toMatchObject({
+      id: "proj-host",
+    });
+    await expect(
+      findUserDefaultProject(GUEST, undefined, true),
+    ).resolves.toMatchObject({ id: "proj-host" });
+  });
+});

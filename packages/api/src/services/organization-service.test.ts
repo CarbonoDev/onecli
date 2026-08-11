@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { RoleResolver } from "../providers";
 
 // Minimal in-memory `@onecli/db` mock — just the operations
 // `joinSharedOrganization` touches — so we can assert the single-org invariants
@@ -53,6 +54,8 @@ const store = vi.hoisted(() => ({
   groupMembers: [] as GroupMemberRow[],
   apiKeys: [] as ApiKeyRow[],
   seq: 0,
+  /** What `getRoleResolver()` answers — null models an edition with none. */
+  roleResolver: null as RoleResolver | null,
 }));
 
 vi.mock("@onecli/db", () => {
@@ -138,8 +141,41 @@ vi.mock("@onecli/db", () => {
   return {
     db: {
       organization: {
-        findUnique: async ({ where: { slug } }: { where: { slug: string } }) =>
-          store.orgs.find((o) => o.slug === slug) ?? null,
+        // Two lookup shapes: by `slug` (the onprem bootstrap) and by `id`
+        // (`renameOrganization`'s read-back), the latter honouring `select`.
+        findUnique: async ({
+          where,
+          select,
+        }: {
+          where: { slug?: string; id?: string };
+          select?: Partial<Record<keyof OrgRow, boolean>>;
+        }) => {
+          const org =
+            store.orgs.find(
+              (o) =>
+                (where.slug !== undefined && o.slug === where.slug) ||
+                (where.id !== undefined && o.id === where.id),
+            ) ?? null;
+          if (!org || !select) return org;
+          const picked: Record<string, unknown> = {};
+          for (const key of Object.keys(select) as (keyof OrgRow)[]) {
+            if (select[key]) picked[key] = org[key];
+          }
+          return picked;
+        },
+        // Partial update, like Prisma: only the keys `data` carries are
+        // written, so a rename that leaked `slug` would surface here.
+        updateMany: async ({
+          where,
+          data,
+        }: {
+          where: { id: string };
+          data: Partial<OrgRow>;
+        }) => {
+          const rows = store.orgs.filter((o) => o.id === where.id);
+          for (const row of rows) Object.assign(row, data);
+          return { count: rows.length };
+        },
         findUniqueOrThrow: async ({
           where: { slug },
         }: {
@@ -159,6 +195,19 @@ vi.mock("@onecli/db", () => {
         },
       },
       organizationMember: {
+        // The row `ossRoleResolver` reads — the role source of truth in OSS.
+        findUnique: async ({
+          where: { organizationId_userId },
+        }: {
+          where: {
+            organizationId_userId: { organizationId: string; userId: string };
+          };
+        }) =>
+          store.members.find(
+            (m) =>
+              m.organizationId === organizationId_userId.organizationId &&
+              m.userId === organizationId_userId.userId,
+          ) ?? null,
         // listUserOrganizations: active memberships joined to their org.
         findMany: async ({
           where,
@@ -314,9 +363,23 @@ vi.mock("@onecli/db", () => {
   };
 });
 
-vi.mock("../lib/logger", () => ({
-  logger: { warn: () => {}, info: () => {}, error: () => {} },
-}));
+vi.mock("../lib/logger", () => {
+  const log = {
+    warn: () => {},
+    info: () => {},
+    error: () => {},
+    child: () => log,
+  };
+  return { logger: log };
+});
+
+// `requireOrgAdmin` reads the resolver through this seam, and its fail-closed
+// arm is "no resolver registered" — a state `initRoleResolver` cannot restore
+// once set, so the getter is the thing the tests steer.
+vi.mock("../providers", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../providers")>();
+  return { ...actual, getRoleResolver: () => store.roleResolver };
+});
 
 import {
   attachMemberToProject,
@@ -324,8 +387,13 @@ import {
   hasResolvableProjectExcluding,
   findUserDefaultProject,
   listUserOrganizations,
+  renameOrganization,
+  requireOrgAdmin,
+  validateOrgName,
   SHARED_ORG_SLUG,
 } from "./organization-service";
+import { ServiceError } from "./errors";
+import { ossRoleResolver } from "./org-role-resolver";
 
 beforeEach(() => {
   store.orgs = [];
@@ -335,6 +403,7 @@ beforeEach(() => {
   store.groupMembers = [];
   store.apiKeys = [];
   store.seq = 0;
+  store.roleResolver = ossRoleResolver;
   delete process.env.ONECLI_ORG_API_KEY;
   delete process.env.ONECLI_ORG_API_KEY_FILE;
 });
@@ -849,5 +918,105 @@ describe("attachMemberToProject", () => {
     const result = await attachMemberToProject(ORG, INVITEE, "i@e.com");
     expect(result.organizationId).toBe(ORG);
     expect(store.projects).toHaveLength(1);
+  });
+});
+
+describe("validateOrgName", () => {
+  it("trims and returns the name", () => {
+    expect(validateOrgName("  Acme  ")).toBe("Acme");
+  });
+
+  it("rejects empty, whitespace-only and overlong names as UNPROCESSABLE", () => {
+    for (const raw of ["", "   ", "x".repeat(256)]) {
+      // A plain Error here would surface as a 500 rather than the 422 a bad
+      // name deserves — the code is the contract, not just the throw.
+      expect(() => validateOrgName(raw)).toThrow(ServiceError);
+      try {
+        validateOrgName(raw);
+      } catch (err) {
+        expect((err as ServiceError).code).toBe("UNPROCESSABLE");
+      }
+    }
+  });
+
+  it("accepts a name at exactly the 255-char ceiling", () => {
+    expect(validateOrgName("x".repeat(255))).toHaveLength(255);
+  });
+});
+
+describe("renameOrganization", () => {
+  it("renames and returns id/name/slug", async () => {
+    seedOrgWithMember(GUEST, "admin");
+    const row = await renameOrganization(ORG, "Renamed");
+    expect(row).toEqual({ id: ORG, name: "Renamed", slug: "host" });
+    expect(store.orgs.find((o) => o.id === ORG)?.name).toBe("Renamed");
+  });
+
+  it("trims the name before storing", async () => {
+    seedOrgWithMember(GUEST, "admin");
+    await renameOrganization(ORG, "  Padded  ");
+    expect(store.orgs.find((o) => o.id === ORG)?.name).toBe("Padded");
+  });
+
+  it("never touches slug — it is globally unique AND read by the onprem bootstrap", async () => {
+    seedOrgWithMember(GUEST, "admin");
+    await renameOrganization(ORG, "Renamed");
+    expect(store.orgs.find((o) => o.id === ORG)?.slug).toBe("host");
+  });
+
+  it("404s a vanished organization instead of 500ing", async () => {
+    await expect(
+      renameOrganization("org-gone", "Renamed"),
+    ).rejects.toMatchObject({ code: "NOT_FOUND" });
+  });
+
+  it("422s an invalid name before writing anything", async () => {
+    seedOrgWithMember(GUEST, "admin");
+    await expect(renameOrganization(ORG, "   ")).rejects.toMatchObject({
+      code: "UNPROCESSABLE",
+    });
+    expect(store.orgs.find((o) => o.id === ORG)?.name).toBe("Host");
+  });
+});
+
+describe("requireOrgAdmin", () => {
+  it("passes an admin and an owner", async () => {
+    seedOrgWithMember(GUEST, "admin");
+    await expect(requireOrgAdmin(GUEST, ORG)).resolves.toBeUndefined();
+
+    const row = store.members.find((m) => m.userId === GUEST);
+    if (row) row.role = "owner";
+    await expect(requireOrgAdmin(GUEST, ORG)).resolves.toBeUndefined();
+  });
+
+  it("denies a plain member", async () => {
+    seedOrgWithMember(GUEST, "member");
+    await expect(requireOrgAdmin(GUEST, ORG)).rejects.toMatchObject({
+      code: "FORBIDDEN",
+    });
+  });
+
+  it("denies a non-member", async () => {
+    seedOrgWithMember(HOST, "owner");
+    await expect(requireOrgAdmin(GUEST, ORG)).rejects.toMatchObject({
+      code: "FORBIDDEN",
+    });
+  });
+
+  it("denies a SUSPENDED admin — suspended reads as no role", async () => {
+    seedOrgWithMember(GUEST, "admin");
+    const row = store.members.find((m) => m.userId === GUEST);
+    if (row) row.status = "suspended";
+    await expect(requireOrgAdmin(GUEST, ORG)).rejects.toMatchObject({
+      code: "FORBIDDEN",
+    });
+  });
+
+  it("fails CLOSED when no role resolver is registered", async () => {
+    seedOrgWithMember(GUEST, "owner");
+    store.roleResolver = null;
+    await expect(requireOrgAdmin(GUEST, ORG)).rejects.toMatchObject({
+      code: "FORBIDDEN",
+    });
   });
 });

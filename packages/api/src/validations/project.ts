@@ -14,6 +14,21 @@ export const projectNameSchema = z.string().trim().min(1).max(100);
 
 export const renameProjectSchema = z.object({ name: projectNameSchema });
 
+export const createProjectSchema = z.object({ name: projectNameSchema });
+
+/**
+ * Per-org ceiling on `POST /v1/projects`. Bounds what a single member can mint
+ * — a project is not a cheap row: each one seeds an API key, a default agent
+ * and a policy generation, and every one of them widens the gateway's
+ * per-connect resolution.
+ *
+ * Enforced as count-then-create without a lock, so a burst of concurrent
+ * creates can overshoot by a few. That is deliberate: the cap exists to stop
+ * runaway growth, not to be exact, and a lock on a cold path costs more than
+ * the overshoot is worth.
+ */
+export const MAX_PROJECTS_PER_ORG = 100;
+
 /**
  * The management role on a USER binding (step 13c): "owner" may
  * rename/share/delete the project, "member" is a plain use grant. GROUP

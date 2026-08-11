@@ -6,8 +6,10 @@ import { ServiceError } from "../../services/errors";
 import { parse } from "./parse";
 import { canAccessProjectAsUser } from "../../middleware/auth/resolve";
 import {
+  createProject,
   deleteProject,
   getProject,
+  listProjects,
   renameProject,
   requireManageableProject,
   requireProject,
@@ -17,6 +19,7 @@ import {
   setProjectAccess,
 } from "../../services/project-access-service";
 import {
+  createProjectSchema,
   renameProjectSchema,
   setProjectAccessSchema,
 } from "../../validations/project";
@@ -96,6 +99,49 @@ export const ossProjectRoutes = () => {
     }
     return project;
   };
+
+  // GET /projects — every project the caller may use, for a switcher and for
+  // upstream's Get Started picker. Deliberately matches upstream's client
+  // contract (`Project[]`, optional `X-Organization-Id` override): upstream
+  // serves this route from its closed cloud backend, so the OSS build 404s it
+  // without this handler.
+  //
+  // No authorization here on purpose. Unlike every other route in this file
+  // there is no id to resolve, so there is nothing to 404 and nothing to 403 —
+  // `listProjects` IS the authorization, returning only what the caller may
+  // reach. A member of the org with no bindings correctly gets `[]`, not a 403.
+  app.get("/", async (c) => {
+    const auth = c.get("auth");
+    return c.json(await listProjects(auth.organizationId, auth.userId));
+  });
+
+  // POST /projects — create, with the caller as owner.
+  //
+  // Like GET /, there is no id to resolve, so authorization lives in the
+  // service (`createProject` refuses a caller with no active role). The route
+  // stays thin: validate, call, audit.
+  app.post("/", async (c) => {
+    const auth = c.get("auth");
+    const body = await c.req.json().catch(() => null);
+    const input = parse(createProjectSchema, body);
+
+    const project = await withAudit(
+      () =>
+        createProject(
+          auth.organizationId,
+          auth.userId,
+          auth.userEmail,
+          input.name,
+        ),
+      (created) => ({
+        ...auditBase(c),
+        projectId: created.id,
+        action: AUDIT_ACTIONS.CREATE,
+        metadata: { projectId: created.id, name: created.name },
+      }),
+    );
+    return c.json(project, 201);
+  });
 
   // GET /projects/:projectId — the sharing page's name/slug source. Nothing
   // else in the API exposes a project's name (the session route returns only

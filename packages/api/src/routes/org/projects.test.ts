@@ -2081,6 +2081,16 @@ describe("DELETE /v1/projects/:projectId", () => {
     );
   });
 
+  it("pins the exact stranded-member refusal message", async () => {
+    // proj-1 is MEMBER's only project (created + bound).
+    const res = await remove("proj-1");
+    expect(res.status).toBe(409);
+    const body = (await res.json()) as { error: { message: string } };
+    expect(body.error.message).toBe(
+      "Deleting this project would leave 1 member(s) with no project. Give them access to another project first.",
+    );
+  });
+
   it("200s when the bound users resolve another project through a BINDING", async () => {
     // proj-2's candidates: OWNER (also created proj-4) and MEMBER2 (bound to
     // proj-1 through g-a) — `hasResolvableProjectExcluding`'s binding arm.

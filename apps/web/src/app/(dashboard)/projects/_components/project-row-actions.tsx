@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useQueryClient } from "@tanstack/react-query";
 import { MoreHorizontal, Loader2 } from "lucide-react";
@@ -33,6 +33,7 @@ import {
   AlertDialogTitle,
 } from "@onecli/ui/components/alert-dialog";
 import { ApiError, type Project } from "@/lib/api";
+import { queryKeys } from "@/lib/api/keys";
 import { ProjectAccessDialog } from "@/components/project-access-dialog";
 import {
   useCurrentProjectId,
@@ -89,6 +90,26 @@ export const ProjectRowActions = ({
     sharingEnabled && accessRequested,
   );
 
+  // A failed read must not leave the click armed: a background retry
+  // succeeding minutes later would pop the dialog open unprompted. Keyed on
+  // errorUpdatedAt, not isError, so a re-click (which re-enables the query
+  // while the previous error is still cached) isn't closed by the old error.
+  const {
+    isError: accessIsError,
+    error: accessError,
+    errorUpdatedAt: accessErrorAt,
+  } = access;
+  useEffect(() => {
+    if (!accessIsError || accessErrorAt === 0) return;
+    toast.error(
+      accessError instanceof Error
+        ? accessError.message
+        : "Failed to load project access",
+    );
+    setAccessOpen(false);
+    setAccessRequested(false);
+  }, [accessIsError, accessError, accessErrorAt]);
+
   const trimmed = name.trim();
   // Mirrors `projectNameSchema` (1-100 after trim, deliberately non-unique).
   const nameError =
@@ -139,6 +160,9 @@ export const ProjectRowActions = ({
           // re-resolve a default on the refresh. Stay on /projects.
           clearDefaultProjectCookie();
           queryClient.clear();
+          // Seed the cleared selection synchronously, as useSwitchProject
+          // does — the sidebar label must not hold the deleted id.
+          queryClient.setQueryData(queryKeys.scope.projectCookie(), null);
           router.refresh();
         }
       },
@@ -239,6 +263,29 @@ export const ProjectRowActions = ({
           open={accessOpen}
           onOpenChange={setAccessOpen}
         />
+      )}
+
+      {/* Cold-start shell: the click must not be silent while the bindings
+          load. Swapped for the real dialog the moment they arrive. */}
+      {sharingEnabled && accessOpen && !access.data && (
+        <Dialog
+          open
+          onOpenChange={(open) => {
+            if (!open) {
+              setAccessOpen(false);
+              setAccessRequested(false);
+            }
+          }}
+        >
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>Manage project access</DialogTitle>
+            </DialogHeader>
+            <div className="flex items-center justify-center py-8">
+              <Loader2 className="text-muted-foreground size-4 animate-spin" />
+            </div>
+          </DialogContent>
+        </Dialog>
       )}
 
       {/* AlertDialog, not Dialog: the app's convention for every destructive

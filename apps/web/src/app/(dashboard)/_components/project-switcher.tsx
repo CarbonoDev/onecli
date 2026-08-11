@@ -29,18 +29,16 @@ import { CreateProjectDialog } from "./create-project-dialog";
  */
 export const ProjectSwitcher = () => {
   const { data: projects = [], isLoading } = useProjectsList();
-  const resolvedId = useCurrentProjectId();
-  // `useCurrentProjectId` re-reads the cookie after the switch's cache clear,
-  // but that refetch is asynchronous — without this the trigger flashed the
-  // old project until it settled.
-  const [pendingId, setPendingId] = useState<string | undefined>();
-  const currentId = pendingId ?? resolvedId;
+  // No local pending state: `useSwitchProject` seeds the cookie query
+  // synchronously, so this re-renders with the new id from any switch surface
+  // — a local override here would go stale the moment another surface
+  // switched.
+  const currentId = useCurrentProjectId();
   const [createOpen, setCreateOpen] = useState(false);
   const doSwitch = useSwitchProject();
 
   const switchTo = (projectId: string) => {
     if (projectId === currentId) return;
-    setPendingId(projectId);
     doSwitch(projectId);
   };
 

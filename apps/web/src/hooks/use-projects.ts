@@ -55,7 +55,7 @@ export const useProject = (projectId: string | undefined) =>
  */
 export const useCurrentProjectId = (): string | undefined => {
   const cookie = useQuery({
-    queryKey: ["scope", "project-cookie"],
+    queryKey: queryKeys.scope.projectCookie(),
     // `null`, never `undefined` — react-query rejects undefined query data.
     queryFn: () => readDefaultProjectCookie() ?? null,
     staleTime: Infinity,

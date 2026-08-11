@@ -2,6 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import { useQueryClient } from "@tanstack/react-query";
+import { queryKeys } from "@/lib/api/keys";
 import { writeDefaultProjectCookie } from "@/lib/navigation";
 
 /**
@@ -20,6 +21,10 @@ export const useSwitchProject = () => {
     // project's entries instead of leaving them cached under a key nobody
     // will ask for again.
     queryClient.clear();
+    // Seed the cookie query synchronously so every subscriber (the sidebar
+    // label, the /projects Current badge) reflects the switch immediately
+    // instead of holding stale local state across the async refetch.
+    queryClient.setQueryData(queryKeys.scope.projectCookie(), projectId);
     // The cookie only reaches the server on the next request, and most of this
     // dashboard is server-rendered, so refresh rather than re-render.
     router.refresh();

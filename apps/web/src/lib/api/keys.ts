@@ -16,6 +16,7 @@ export const queryKeys = {
    */
   scope: {
     organizationCookie: () => ["scope", "org-cookie"] as const,
+    projectCookie: () => ["scope", "project-cookie"] as const,
   },
   agents: {
     all: () => ["agents", ...scope()] as const,

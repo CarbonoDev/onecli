@@ -62,7 +62,9 @@ vi.mock("@onecli/db", () => {
     group?: { members: { some: { userId: string } } };
   }
   interface ProjectWhere {
-    id?: { not: string };
+    // Plain id (attachMemberToProject resolving the inviter's choice) as well
+    // as the exclusion form the lockout oracle uses.
+    id?: string | { not: string };
     organizationId?: string;
     createdByUserId?: string;
     organization?: {
@@ -93,7 +95,14 @@ vi.mock("@onecli/db", () => {
     });
 
   const matchesProject = (p: ProjectRow, where: ProjectWhere): boolean => {
-    if (where.id?.not !== undefined && p.id === where.id.not) return false;
+    if (typeof where.id === "string" && p.id !== where.id) return false;
+    if (
+      where.id !== undefined &&
+      typeof where.id !== "string" &&
+      where.id.not !== undefined &&
+      p.id === where.id.not
+    )
+      return false;
     if (
       where.organizationId !== undefined &&
       p.organizationId !== where.organizationId
@@ -209,6 +218,32 @@ vi.mock("@onecli/db", () => {
               ),
           ) ?? null,
       },
+      projectAccess: {
+        // attachMemberToProject binds via createMany + skipDuplicates so two
+        // concurrent accepts cannot collide on @@unique([projectId, userId]).
+        createMany: async ({
+          data,
+          skipDuplicates,
+        }: {
+          data: { projectId: string; userId: string; role: string }[];
+          skipDuplicates?: boolean;
+        }) => {
+          let count = 0;
+          for (const row of data) {
+            const dupe = store.bindings.some(
+              (b) => b.projectId === row.projectId && b.userId === row.userId,
+            );
+            if (dupe && skipDuplicates) continue;
+            store.bindings.push({
+              projectId: row.projectId,
+              userId: row.userId,
+              role: row.role,
+            });
+            count += 1;
+          }
+          return { count };
+        },
+      },
       project: {
         findFirst: async ({
           where,
@@ -284,6 +319,7 @@ vi.mock("../lib/logger", () => ({
 }));
 
 import {
+  attachMemberToProject,
   joinSharedOrganization,
   hasResolvableProjectExcluding,
   findUserDefaultProject,
@@ -706,5 +742,112 @@ describe("findUserDefaultProject strict mode (the org switcher's contract)", () 
     await expect(
       findUserDefaultProject(GUEST, undefined, true),
     ).resolves.toMatchObject({ id: "proj-host" });
+  });
+});
+
+describe("attachMemberToProject", () => {
+  const INVITEE = "user-invitee";
+
+  it("binds the invitee to the org's OLDEST project instead of creating one", async () => {
+    // The behaviour change: an org used to gain a project per invited member.
+    seedOrgWithMember(GUEST);
+    store.members.push({
+      organizationId: ORG,
+      userId: INVITEE,
+      userEmail: "invitee@example.com",
+      role: "member",
+    });
+    seedProjectIn("proj-old", ORG, GUEST);
+    seedProjectIn("proj-new", ORG, GUEST);
+
+    const before = store.projects.length;
+    const result = await attachMemberToProject(
+      ORG,
+      INVITEE,
+      "invitee@example.com",
+    );
+
+    expect(result.id).toBe("proj-old");
+    expect(store.projects).toHaveLength(before);
+    expect(
+      store.bindings.some(
+        (b) => b.projectId === "proj-old" && b.userId === INVITEE,
+      ),
+    ).toBe(true);
+  });
+
+  it("honours the project the inviter chose", async () => {
+    seedOrgWithMember(GUEST);
+    store.members.push({
+      organizationId: ORG,
+      userId: INVITEE,
+      userEmail: "invitee@example.com",
+      role: "member",
+    });
+    seedProjectIn("proj-old", ORG, GUEST);
+    seedProjectIn("proj-chosen", ORG, GUEST);
+
+    const result = await attachMemberToProject(
+      ORG,
+      INVITEE,
+      "invitee@example.com",
+      "proj-chosen",
+    );
+    expect(result.id).toBe("proj-chosen");
+  });
+
+  it("falls back to the oldest when the chosen project is gone or foreign", async () => {
+    // A project deleted between invite and accept must not fail the accept,
+    // and a cross-org id must not reach out of the organization.
+    seedOrgWithMember(GUEST);
+    seedOtherOrgWithMember(GUEST);
+    store.members.push({
+      organizationId: ORG,
+      userId: INVITEE,
+      userEmail: "invitee@example.com",
+      role: "member",
+    });
+    seedProjectIn("proj-old", ORG, GUEST);
+    seedProjectIn("proj-foreign", OTHER_ORG, GUEST);
+
+    await expect(
+      attachMemberToProject(ORG, INVITEE, "i@e.com", "proj-deleted"),
+    ).resolves.toMatchObject({ id: "proj-old" });
+    await expect(
+      attachMemberToProject(ORG, INVITEE, "i@e.com", "proj-foreign"),
+    ).resolves.toMatchObject({ id: "proj-old" });
+  });
+
+  it("is idempotent — a second accept re-uses the reachable project", async () => {
+    seedOrgWithMember(GUEST);
+    store.members.push({
+      organizationId: ORG,
+      userId: INVITEE,
+      userEmail: "invitee@example.com",
+      role: "member",
+    });
+    seedProjectIn("proj-old", ORG, GUEST);
+
+    await attachMemberToProject(ORG, INVITEE, "i@e.com");
+    const bindings = store.bindings.length;
+    const again = await attachMemberToProject(ORG, INVITEE, "i@e.com");
+
+    expect(again.id).toBe("proj-old");
+    expect(store.bindings).toHaveLength(bindings);
+  });
+
+  it("still creates a project when the organization has none at all", async () => {
+    // The bootstrap edge — an org whose every project was deleted.
+    seedOrgWithMember(GUEST);
+    store.members.push({
+      organizationId: ORG,
+      userId: INVITEE,
+      userEmail: "invitee@example.com",
+      role: "member",
+    });
+
+    const result = await attachMemberToProject(ORG, INVITEE, "i@e.com");
+    expect(result.organizationId).toBe(ORG);
+    expect(store.projects).toHaveLength(1);
   });
 });

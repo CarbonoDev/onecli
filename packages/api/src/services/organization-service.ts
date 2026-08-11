@@ -3,8 +3,13 @@ import { generateApiKey, ensureBootstrapOrgApiKey } from "./api-key-service";
 import { generateAccessToken } from "./agent-service";
 import { DEFAULT_AGENT_NAME, DEFAULT_AGENT_IDENTIFIER } from "../lib/constants";
 import { generateProjectId, generateOrganizationId } from "../lib/ids";
-import { getNewOrgPolicySeeder } from "../providers";
+import {
+  getNewOrgPolicySeeder,
+  getRoleResolver,
+  ROLE_HIERARCHY,
+} from "../providers";
 import { logger } from "../lib/logger";
+import { ServiceError } from "./errors";
 
 export const slugify = (raw: string) =>
   raw
@@ -501,7 +506,10 @@ export const attachMemberToProject = async (
 export const validateOrgName = (raw: string): string => {
   const trimmed = raw.trim();
   if (!trimmed || trimmed.length > 255) {
-    throw new Error("Organization name must be 1-255 characters");
+    throw new ServiceError(
+      "UNPROCESSABLE",
+      "Organization name must be 1-255 characters",
+    );
   }
   return trimmed;
 };
@@ -581,4 +589,67 @@ export const listUserOrganizations = async (
     slug: row.organization.slug,
     role: row.role,
   }));
+};
+
+/**
+ * ADMIN authority over the organization itself — the per-resource check the
+ * `/v1/organizations` router needs, because it cannot take a `role: "admin"`
+ * filter globally: `GET /` is deliberately member-visible.
+ *
+ * Same two invariants as `resolveAuthority` in `project-service`:
+ *
+ *  - The role is resolved FIRST and a null role denies (the suspension
+ *    invariant): `ossRoleResolver` reads a suspended membership as no role, so
+ *    a suspended admin cannot rename the org.
+ *  - Deliberately NOT gated on `CAPS.rbac`. A usage check must no-op (allow)
+ *    for editions without roles; a MANAGEMENT check that allowed everyone
+ *    there would let any member rename the organization. With no resolver
+ *    registered the role reads null and we deny — fail closed.
+ */
+export const requireOrgAdmin = async (
+  userId: string,
+  organizationId: string,
+): Promise<void> => {
+  const resolver = getRoleResolver();
+  const role = resolver
+    ? await resolver.getUserRole(userId, organizationId)
+    : null;
+  if (!role || ROLE_HIERARCHY[role] < ROLE_HIERARCHY.admin) {
+    throw new ServiceError(
+      "FORBIDDEN",
+      "You do not have permission to manage this organization.",
+    );
+  }
+};
+
+/**
+ * Rename. `name` ONLY — `slug` is strictly immutable, and more so than a
+ * project's: `Organization.slug` is GLOBALLY `@unique`, and unlike a project's
+ * it IS read — `findOrCreateSharedOrg` looks the onprem bootstrap org up by
+ * `SHARED_ORG_SLUG`. Rewriting it could both collide and strand that lookup.
+ * Names are NOT unique across orgs (see `orgNameSchema`), so a rename-to-self
+ * and a rename onto another org's name are both permitted 200s.
+ */
+export const renameOrganization = async (
+  organizationId: string,
+  name: string,
+): Promise<Omit<OrganizationRow, "role">> => {
+  const trimmed = validateOrgName(name);
+
+  // Conditional write, mirroring `renameProject`: count 0 means the row
+  // vanished between authorization and the write — 404, not a 500.
+  const { count } = await db.organization.updateMany({
+    where: { id: organizationId },
+    data: { name: trimmed },
+  });
+  if (count === 0) {
+    throw new ServiceError("NOT_FOUND", "Organization not found.");
+  }
+
+  const row = await db.organization.findUnique({
+    where: { id: organizationId },
+    select: { id: true, name: true, slug: true },
+  });
+  if (!row) throw new ServiceError("NOT_FOUND", "Organization not found.");
+  return row;
 };

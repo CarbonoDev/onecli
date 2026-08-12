@@ -66,7 +66,11 @@ export const BudgetRowActions = ({ budget }: BudgetRowActionsProps) => {
     <>
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
-          <Button variant="ghost" size="icon" aria-label="Budget actions">
+          <Button
+            variant="ghost"
+            size="icon"
+            aria-label={`Actions for the ${budget.secretName} budget`}
+          >
             <MoreHorizontal className="size-4" />
           </Button>
         </DropdownMenuTrigger>

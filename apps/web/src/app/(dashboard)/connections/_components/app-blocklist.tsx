@@ -62,6 +62,7 @@ const HostRow = ({
           variant="ghost"
           size="icon"
           className="size-7 text-muted-foreground opacity-0 group-hover:opacity-100 hover:text-destructive transition-opacity"
+          aria-label={`Remove ${host.name}`}
           onClick={() => onRemove(host)}
           disabled={disabled}
         >

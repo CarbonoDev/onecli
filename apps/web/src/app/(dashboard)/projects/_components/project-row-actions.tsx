@@ -176,6 +176,9 @@ export const ProjectRowActions = ({
             variant="ghost"
             size="icon"
             className="size-8"
+            aria-label={
+              displayName ? `Actions for ${displayName}` : "Project actions"
+            }
             disabled={rename.isPending || remove.isPending}
           >
             {rename.isPending || remove.isPending ? (

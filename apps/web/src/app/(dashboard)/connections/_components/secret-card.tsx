@@ -105,11 +105,14 @@ export const SecretCard = ({
               </Badge>
               {secret.valueSource === "onepassword" && (
                 <Badge variant="outline" className="gap-1 text-[10px]">
+                  {/* SVG: the Next image optimizer 400s on it, so serve it
+                      straight from `public/` (see AppIcon). */}
                   <Image
                     src="/icons/onepassword.svg"
                     alt=""
                     width={12}
                     height={12}
+                    unoptimized
                   />
                   1Password
                 </Badge>
@@ -197,6 +200,7 @@ export const SecretCard = ({
                 variant="ghost"
                 size="icon"
                 className="size-7"
+                aria-label={`Edit ${secret.name}`}
                 onClick={() => setEditOpen(true)}
               >
                 <Pencil className="size-3.5" />
@@ -204,7 +208,12 @@ export const SecretCard = ({
 
               <AlertDialog>
                 <AlertDialogTrigger asChild>
-                  <Button variant="ghost" size="icon" className="size-7">
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="size-7"
+                    aria-label={`Delete ${secret.name}`}
+                  >
                     <Trash2 className="size-3.5" />
                   </Button>
                 </AlertDialogTrigger>

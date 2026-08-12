@@ -18,7 +18,11 @@ export const SettingsNav = () => {
           <p className="text-muted-foreground px-2 pb-1 text-xs font-medium">
             {section.label}
           </p>
-          <ul className="space-y-0.5">
+          {/* role="list" is NOT redundant here: Tailwind v4 preflight sets
+              `list-style: none` on <ul>, and WebKit drops the implicit list
+              role when it does — so on Safari/VoiceOver this would announce
+              no item count. Do not strip as redundant ARIA. */}
+          <ul role="list" className="space-y-0.5">
             {section.items.map((item) => {
               const isActive = pathname === item.url;
               return (

@@ -52,11 +52,15 @@ export const DashboardSidebar = ({
             priority
             className="hidden dark:group-data-[collapsible=icon]:!hidden dark:block"
           />
+          {/* SVG (unlike the two PNG wordmarks above): the Next image
+              optimizer 400s on SVG, so serve it straight from `public/`
+              (see AppIcon). */}
           <Image
             src="/logo-icon.svg"
             alt="OneCLI"
             width={20}
             height={20}
+            unoptimized
             className="hidden group-data-[collapsible=icon]:block"
           />
         </Link>

@@ -62,8 +62,10 @@ export const SecretsContent = ({
     queryKey: queryKeys.secrets.list(pageScope),
     queryFn: getSecrets ?? (() => apiGet<Secret[]>(secretsPath(pageScope))),
     // The org route is admin-gated; a member's 403 is deterministic, so it is
-    // rendered rather than retried. Project reads keep the library default.
-    retry: pageScope === "organization" ? false : undefined,
+    // rendered rather than retried. Conditional spread rather than a ternary to
+    // `undefined` — see `use-connections.ts`; a present-but-undefined key
+    // overwrites the client's `retry: 1` and lands on the retryer's default 3.
+    ...(pageScope === "organization" ? { retry: false as const } : {}),
   });
   const [createOpen, setCreateOpen] = useState(false);
   const [prefill, setPrefill] = useState<SecretPrefill | undefined>();

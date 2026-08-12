@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { activeTabFor, tabRoutesFor } from "./tab-routes";
+import {
+  CONNECTIONS_TABS,
+  activeTabFor,
+  isConnectionsTab,
+  tabRoutesFor,
+} from "./tab-routes";
 
 describe("tabRoutesFor", () => {
   it("roots the project tabs at /connections", () => {
@@ -78,5 +83,44 @@ describe("activeTabFor", () => {
     expect(activeTabFor("/global-connections")).toBe("apps");
     expect(activeTabFor("/global-connections/custom")).toBe("custom");
     expect(activeTabFor("/global-connections/connected")).toBe("connected");
+  });
+
+  // `basePath` is only the authority for paths actually under it. This is the
+  // case that discriminates: a stale org basePath during a cross-section
+  // navigation. Blind slicing would take 19 chars off a 17-char string, leave
+  // `""`, and report `apps` — the tab bar would jump to Apps while the page
+  // rendered LLMs. Falling back to the pathname reads it correctly.
+  it("falls back to the pathname when it is not under basePath", () => {
+    expect(activeTabFor("/connections/llms", "/global-connections")).toBe(
+      "llms",
+    );
+  });
+
+  // The boundary is a segment boundary, not `startsWith`:
+  // `/global-connections-archive` string-prefixes the basePath but is a
+  // different section, so it is neither sliced nor recognised — and an unknown
+  // section has no tabs, so it resolves to the default rather than inventing
+  // one out of the leftover text.
+  it("does not treat a string-prefix of basePath as being under it", () => {
+    expect(
+      activeTabFor("/global-connections-archive/custom", "/global-connections"),
+    ).toBe("apps");
+  });
+});
+
+describe("isConnectionsTab", () => {
+  // Load-bearing in `handleTabChange`: `AnimatedTabs` hands back a bare string,
+  // and anything this rejects is dropped rather than routed to `undefined`.
+  it("accepts every declared tab", () => {
+    for (const tab of CONNECTIONS_TABS) {
+      expect(isConnectionsTab(tab)).toBe(true);
+    }
+  });
+
+  it("rejects anything else", () => {
+    expect(isConnectionsTab("secrets")).toBe(false);
+    expect(isConnectionsTab("")).toBe(false);
+    expect(isConnectionsTab("Apps")).toBe(false);
+    expect(isConnectionsTab("toString")).toBe(false);
   });
 });

@@ -29,8 +29,12 @@ export type ConnectionsTab = (typeof CONNECTIONS_TABS)[number];
 /** Path segments that name a connections section root. */
 const SECTION_SEGMENTS = new Set(["connections", "global-connections"]);
 
+// A `ReadonlySet<string>` rather than `(CONNECTIONS_TABS as readonly
+// string[]).includes(...)` — same narrowing, no type assertion.
+const TAB_SET: ReadonlySet<string> = new Set(CONNECTIONS_TABS);
+
 export const isConnectionsTab = (value: string): value is ConnectionsTab =>
-  (CONNECTIONS_TABS as readonly string[]).includes(value);
+  TAB_SET.has(value);
 
 /**
  * Split a pathname at its connections section root: everything up to and

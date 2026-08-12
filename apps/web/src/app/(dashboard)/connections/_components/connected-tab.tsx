@@ -95,7 +95,10 @@ export const ConnectedTab = ({
     queryKey: [...queryKeys.secrets.list(pageScope), "connected"],
     queryFn: getSecrets ?? (() => apiGet<SecretItem[]>(secretsPath(pageScope))),
     // Admin-gated at org scope: a member's 403 is deterministic, not retryable.
-    retry: pageScope === "organization" ? false : undefined,
+    // Conditional spread rather than a ternary to `undefined` — see
+    // `use-connections.ts`; a present-but-undefined key overwrites the client's
+    // `retry: 1` and lands on the retryer's default of 3.
+    ...(pageScope === "organization" ? { retry: false as const } : {}),
   });
   const vaultsQuery = useVaultConnections(pageScope === "project");
 

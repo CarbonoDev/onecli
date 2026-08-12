@@ -3,9 +3,11 @@
 import { Card, CardContent } from "@onecli/ui/components/card";
 import { Skeleton } from "@onecli/ui/components/skeleton";
 import { useDomains } from "@/hooks/use-domains";
+import { ApiError } from "@/lib/api";
 import { AddDomainForm } from "./add-domain-form";
 import { AdminOnlyNotice } from "./admin-only-notice";
 import { DomainsList } from "./domains-list";
+import { LoadErrorNotice } from "./load-error-notice";
 import { LocalModeNotice } from "./local-mode-notice";
 
 export interface DomainsContentProps {
@@ -36,7 +38,19 @@ export const DomainsContent = ({ domainsEnabled }: DomainsContentProps) => {
     );
   }
 
-  if (domains.isError) return <AdminOnlyNotice />;
+  // Only a 403 means "you are not an admin". Everything else — a 500, an
+  // expired session, a dead API container — is a load failure, and telling an
+  // admin they lack a permission they hold would hide the real problem.
+  if (domains.isError) {
+    return domains.error instanceof ApiError && domains.error.status === 403 ? (
+      <AdminOnlyNotice />
+    ) : (
+      <LoadErrorNotice
+        message={domains.error.message}
+        onRetry={() => void domains.refetch()}
+      />
+    );
+  }
 
   return (
     <Card>

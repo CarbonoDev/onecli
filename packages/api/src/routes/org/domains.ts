@@ -13,6 +13,7 @@ import {
 import { claimDomainSchema } from "../../validations/org";
 import {
   withAudit,
+  recordAuditEvent,
   AUDIT_ACTIONS,
   AUDIT_SERVICES,
   AUDIT_SOURCE,
@@ -85,27 +86,40 @@ export const ossOrgDomainRoutes = () => {
 
   // POST /org/domains/:domainId/verify — run the DNS check.
   //
-  // A MISS THROWS, so `withAudit` never runs its logger: only a state change
-  // is audited. That is the point — "we looked and the record wasn't there yet"
-  // is not a change to the organization, and auditing every impatient click
-  // would bury the one event that matters.
+  // ONLY A REAL STATE CHANGE IS AUDITED, and this is the one route where that
+  // takes explicit work. Two non-events have to stay out of the log:
+  //
+  //  - A MISS throws, so nothing below it runs. "We looked and the record
+  //    wasn't there yet" is not a change to the organization.
+  //  - A re-check of an ALREADY-VERIFIED row succeeds while changing nothing.
+  //    `withAudit` always logs, so wrapping it would let a double-click or a
+  //    polling client write N events each claiming the domain was verified,
+  //    every one carrying the same original timestamp — leaving an operator
+  //    unable to tell which was the actual proof-of-ownership moment, and
+  //    costing an unbounded number of audit rows for a call that touches no
+  //    DNS. It is a READ, and CLAUDE.md does not audit reads.
+  //
+  // Hence `recordAuditEvent` rather than `withAudit` — the documented seam for
+  // a conditional state change. Nothing in the gateway's principal resolution
+  // reads `OrganizationDomain` (this edition has no SSO), so skipping
+  // `withAudit`'s org cache flush costs nothing.
   app.post("/:domainId/verify", async (c) => {
     const { organizationId } = c.get("auth");
     const domainId = c.req.param("domainId");
 
-    const domain = await withAudit(
-      () => verifyOrgDomain(organizationId, domainId),
-      (verified) => ({
+    const { domain, changed } = await verifyOrgDomain(organizationId, domainId);
+    if (changed) {
+      await recordAuditEvent({
         ...auditBase(c),
         action: AUDIT_ACTIONS.UPDATE,
         metadata: {
-          domainId: verified.id,
-          domain: verified.domain,
+          domainId: domain.id,
+          domain: domain.domain,
           change: "verified",
-          verifiedAt: verified.verifiedAt,
+          verifiedAt: domain.verifiedAt,
         },
-      }),
-    );
+      });
+    }
     return c.json(domain);
   });
 

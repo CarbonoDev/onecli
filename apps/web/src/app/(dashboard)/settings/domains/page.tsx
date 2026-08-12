@@ -19,9 +19,13 @@ export default function DomainsPage() {
 
   return (
     <div className="flex flex-1 flex-col gap-4">
+      {/* The spec's subtitle ended "— the foundation for single sign-on."
+          That clause is dropped: this branch deletes the SSO page, and a
+          subtitle pointing at a surface that doesn't exist is a promise the
+          product can't keep. */}
       <PageHeader
         title="Domains"
-        description="Claim your company's email domains and verify them via DNS — the foundation for single sign-on."
+        description="Claim your company's email domains and verify them via DNS."
       />
       <Suspense>
         <DomainsContent domainsEnabled={domainsEnabled} />

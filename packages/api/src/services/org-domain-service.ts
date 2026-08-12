@@ -54,6 +54,22 @@ export interface OrgDomainDeleteResult {
   verified: boolean;
 }
 
+/**
+ * A verification attempt's outcome.
+ *
+ * `changed` exists so the route can tell a real proof-of-ownership moment from
+ * a re-check of an already-verified row. The second is a READ — it runs no
+ * lookup and writes nothing — and auditing it would put N events in the log all
+ * claiming the domain was verified, every one carrying the SAME original
+ * timestamp, leaving an operator unable to identify the one that was the actual
+ * proof.
+ */
+export interface VerifyOrgDomainResult {
+  domain: OrgDomainRow;
+  /** false = the row was already verified; nothing happened. */
+  changed: boolean;
+}
+
 interface DomainRecord {
   id: string;
   domain: string;
@@ -101,6 +117,25 @@ const DOMAIN_TAKEN =
 /** Same-org collisions leak nothing the caller can't already list. */
 const DOMAIN_ALREADY_YOURS = "You have already claimed this domain.";
 
+/**
+ * Ceiling on how many domains ONE organization may hold.
+ *
+ * An org claims the domains its people receive email at: one for most, a
+ * handful for a company that has rebranded or absorbed others, a couple of
+ * dozen for a conglomerate carrying every acquired brand. 25 is comfortably
+ * above real use and far below the volume that makes this endpoint interesting
+ * to abuse.
+ *
+ * It is a rate-limit floor, not an inventory rule. Without it an admin can
+ * claim thousands of rows for zones they run the nameservers for, then fire a
+ * verify at each: the cooldown keys on domain ID, so distinct rows never gate
+ * each other, and every attempt opens an outbound lookup that `withDnsTimeout`
+ * ABANDONS but cannot abort. That is a reflection pivot through this instance's
+ * resolver at attacker-chosen authoritative servers, and a beacon announcing
+ * the instance's DNS egress address. Capping the row count caps the fan-out.
+ */
+const MAX_ORG_DOMAINS = 25;
+
 export const listOrgDomains = async (
   organizationId: string,
 ): Promise<OrgDomainRow[]> => {
@@ -124,6 +159,14 @@ export const claimOrgDomain = async (
     throw new ServiceError(
       "UNPROCESSABLE",
       "Enter a domain like example.com — not a URL, an email address, or an IP address.",
+    );
+  }
+
+  const held = await db.organizationDomain.count({ where: { organizationId } });
+  if (held >= MAX_ORG_DOMAINS) {
+    throw new ServiceError(
+      "CONFLICT",
+      `An organization can hold at most ${MAX_ORG_DOMAINS} domains. Remove one before adding another.`,
     );
   }
 
@@ -186,15 +229,27 @@ const VERIFY_COOLDOWN_MS = 10_000;
 class DnsTimeoutError extends Error {}
 
 /**
- * In-memory, per-process cooldown clock. Deliberately not a column: this is
- * rate limiting, not state — it must not survive a restart, and persisting it
- * would put a write on the failure path that is supposed to leave the row
- * untouched. Single-instance by construction, which is the deployment shape
- * this edition targets; a second instance simply enforces its own window.
+ * In-memory, per-process cooldown clock, keyed by domain id.
+ *
+ * Deliberately not a column: this is rate limiting, not state — it must not
+ * survive a restart, and persisting it would put a write on the failure path
+ * that is required to leave the row untouched.
+ *
+ * TWO LIMITS, stated plainly rather than hedged. (1) THE COOLDOWN DOES NOT
+ * APPLY ACROSS PROCESSES. The shipped image is a single process, but nothing
+ * enforces that, and behind two replicas a caller gets one window per replica.
+ * (2) It gates one ROW, not the org — `MAX_ORG_DOMAINS` is what bounds the
+ * total outbound fan-out, because distinct rows never gate each other. A
+ * deployment that needs a real limit wants a shared limiter keyed on the org,
+ * not a bigger version of this map.
  */
 const lastVerifyAttempt = new Map<string, number>();
 
-/** Keeps the map bounded: entries older than the window can never gate again. */
+/**
+ * Keeps the map bounded: entries older than the window can never gate again.
+ * O(n) per call, so a flood of n concurrent verifies is O(n²) — tolerable only
+ * because `MAX_ORG_DOMAINS` keeps n at two digits per org.
+ */
 const sweepCooldowns = (now: number) => {
   for (const [id, at] of lastVerifyAttempt) {
     if (now - at >= VERIFY_COOLDOWN_MS) lastVerifyAttempt.delete(id);
@@ -220,15 +275,23 @@ const withDnsTimeout = async <T>(work: Promise<T>): Promise<T> => {
 
 const errorCode = (err: unknown): string | undefined =>
   typeof err === "object" && err !== null && "code" in err
-    ? String((err as { code: unknown }).code)
+    ? String(err.code)
     : undefined;
 
 /**
- * "The name has no such record" — an ordinary, expected outcome while DNS
- * propagates, and indistinguishable from a miss as far as the user is
- * concerned.
+ * Failures that are the CLAIMANT's side of the problem, not the instance's.
+ *
+ * `ENOTFOUND`/`ENODATA` are the ordinary "not published yet" answers while DNS
+ * propagates. `EBADNAME` means c-ares refused to emit the query at all because
+ * the name is malformed — an input problem; `normalizeDomain`'s length cap
+ * makes it unreachable from the claim path, but bucketing it here is what keeps
+ * an input defect from ever being reported as broken egress DNS.
+ *
+ * `NXDOMAIN` is deliberately absent: c-ares surfaces that condition as
+ * `ENOTFOUND` and Node never emits the string, so listing it would be dead code
+ * with a test giving it false coverage.
  */
-const NO_RECORD_CODES = new Set(["ENOTFOUND", "ENODATA", "NXDOMAIN"]);
+const NO_RECORD_CODES = new Set(["ENOTFOUND", "ENODATA", "EBADNAME"]);
 
 const noRecordMessage = (recordName: string) =>
   `No matching TXT record found at ${recordName}. DNS changes can take up to an hour to propagate.`;
@@ -259,14 +322,19 @@ const dnsFailure = (err: unknown, recordName: string): ServiceError => {
  * 255-octet chunks the wire format demands. A record's real value is its chunks
  * CONCATENATED — comparing chunk-by-chunk would miss any token a provider
  * chose to split.
+ *
+ * Lowercased on both sides of the comparison: some DNS panels normalize the
+ * case of a TXT value they store, and the token is hex, so case carries no
+ * entropy to lose. Without this an uppercasing provider produces a permanent
+ * "no matching record" against a record that is demonstrably correct.
  */
 const flattenTxt = (records: string[][]): string[] =>
-  records.map((chunks) => chunks.join("").trim());
+  records.map((chunks) => chunks.join("").trim().toLowerCase());
 
 export const verifyOrgDomain = async (
   organizationId: string,
   domainId: string,
-): Promise<OrgDomainRow> => {
+): Promise<VerifyOrgDomainResult> => {
   const row = await db.organizationDomain.findFirst({
     where: { id: domainId, organizationId },
     select: SELECT,
@@ -274,8 +342,10 @@ export const verifyOrgDomain = async (
   if (!row) throw new ServiceError("NOT_FOUND", "Domain not found.");
 
   // Re-verifying a verified domain is a no-op, not an error: the UI may race a
-  // refetch against a click, and the answer is already known.
-  if (row.verifiedAt) return toRow(row);
+  // refetch against a click, and the answer is already known. Reported as
+  // `changed: false` so the route does not audit a read — see
+  // `VerifyOrgDomainResult`.
+  if (row.verifiedAt) return { domain: toRow(row), changed: false };
 
   const now = Date.now();
   sweepCooldowns(now);
@@ -298,7 +368,7 @@ export const verifyOrgDomain = async (
     throw dnsFailure(err, recordName);
   }
 
-  if (!flattenTxt(records).includes(expected)) {
+  if (!flattenTxt(records).includes(expected.toLowerCase())) {
     // The row is left EXACTLY as it was — no failure marker, no timestamp.
     throw new ServiceError("BAD_REQUEST", noRecordMessage(recordName));
   }
@@ -314,7 +384,7 @@ export const verifyOrgDomain = async (
   if (count === 0) throw new ServiceError("NOT_FOUND", "Domain not found.");
 
   lastVerifyAttempt.delete(domainId);
-  return toRow({ ...row, verifiedAt });
+  return { domain: toRow({ ...row, verifiedAt }), changed: true };
 };
 
 export const deleteOrgDomain = async (

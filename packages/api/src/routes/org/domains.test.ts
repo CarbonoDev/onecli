@@ -235,6 +235,9 @@ vi.mock("@onecli/db", () => {
         count: async () => 0,
       },
       organizationDomain: {
+        // Backs the per-org cap. Org-scoped, unlike `findUnique` below.
+        count: async ({ where }: { where: DomainWhere }) =>
+          filterDomains(where).length,
         // The GLOBAL unique index: keyed by `domain` alone, with NO org filter —
         // which is exactly the cross-tenant collision the claim path handles.
         findUnique: async ({
@@ -437,14 +440,14 @@ beforeEach(() => {
     member(OUTSIDER, "admin", at(3), OTHER_ORG),
   ];
   store.domains = [
-    domain("d-pending", "acme.test", { createdAt: at(10) }),
-    domain("d-verified", "acme-verified.test", {
+    domain("d-pending", "acme.com", { createdAt: at(10) }),
+    domain("d-verified", "acme-verified.com", {
       verifiedAt: at(30),
       createdAt: at(11),
     }),
     // A domain held by ANOTHER organization — the global unique index's whole
     // point, and the row this org must learn nothing about.
-    domain("d-foreign", "rival.test", {
+    domain("d-foreign", "rival.com", {
       organizationId: OTHER_ORG,
       createdAt: at(12),
     }),
@@ -506,9 +509,9 @@ describe("GET /v1/org/domains", () => {
     expect(body.map((row) => row.id)).toEqual(["d-pending", "d-verified"]);
     expect(body[0]).toEqual({
       id: "d-pending",
-      domain: "acme.test",
+      domain: "acme.com",
       verifiedAt: null,
-      recordName: "_onecli-challenge.acme.test",
+      recordName: "_onecli-challenge.acme.com",
       recordValue: `onecli-domain-verification=${TOKEN}`,
       createdAt: at(10).toISOString(),
     });
@@ -517,7 +520,7 @@ describe("GET /v1/org/domains", () => {
 
   it("never leaks domains of another organization", async () => {
     const body = await list();
-    expect(body.some((row) => row.domain === "rival.test")).toBe(false);
+    expect(body.some((row) => row.domain === "rival.com")).toBe(false);
   });
 
   it("403s a project-scoped key even when its user is an org owner", async () => {
@@ -571,10 +574,10 @@ describe("POST /v1/org/domains (claim)", () => {
 
   it("mints a distinct token per claim", async () => {
     const first = (await (
-      await claim({ domain: "a.example" })
+      await claim({ domain: "a-corp.com" })
     ).json()) as DomainBody;
     const second = (await (
-      await claim({ domain: "b.example" })
+      await claim({ domain: "b-corp.com" })
     ).json()) as DomainBody;
     expect(first.recordValue).not.toBe(second.recordValue);
   });
@@ -607,7 +610,6 @@ describe("POST /v1/org/domains (claim)", () => {
       "exa mple.com",
       "-example.com",
       `${"a".repeat(64)}.com`,
-      `${"a".repeat(250)}.com`,
       "",
       "   ",
     ]) {
@@ -615,6 +617,96 @@ describe("POST /v1/org/domains (claim)", () => {
       expect(res.status, `expected 422 for ${JSON.stringify(value)}`).toBe(422);
     }
     expect(store.audits).toHaveLength(0);
+  });
+
+  // Reserved / internal-only names, for the reason `localhost` was always
+  // rejected: a self-hosted instance resolves these through whatever local zone
+  // its operator points it at, so anyone who can write that zone could mint a
+  // "verified" domain they do not own publicly.
+  it("422s reserved and internal-only names", async () => {
+    for (const value of [
+      "printer.local",
+      "svc.internal",
+      "router.home.arpa",
+      "thing.alt",
+      "fileserver.lan",
+      "nope.invalid",
+      "acme.test",
+      "docs.example",
+      "host.corp",
+      "wiki.intranet",
+    ]) {
+      const res = await claim({ domain: value });
+      expect(res.status, `expected 422 for ${value}`).toBe(422);
+    }
+  });
+
+  // Private registry suffixes: nobody could verify the shared root anyway, but
+  // a claim on it is a permanent squat on the GLOBAL unique index, in a
+  // namespace thousands of unrelated parties hold subdomains under.
+  it("422s a shared public-suffix root while still allowing a subdomain of it", async () => {
+    for (const root of [
+      "github.io",
+      "vercel.app",
+      "pages.dev",
+      "herokuapp.com",
+      "blogspot.com",
+    ]) {
+      expect((await claim({ domain: root })).status, root).toBe(422);
+    }
+    const res = await claim({ domain: "acme.github.io" });
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as DomainBody).domain).toBe("acme.github.io");
+  });
+
+  // The cap is on what the CHALLENGE name has to satisfy, not on the domain:
+  // a 247-char domain is legal but yields a 265-char query name, which c-ares
+  // rejects as EBADNAME without emitting a packet — a resolver-shaped failure
+  // for what is really an input-length problem.
+  it("caps the domain so the challenge name stays a legal query name", async () => {
+    // Exactly `total` characters, in labels short enough to stay legal.
+    const nameOfLength = (total: number) => {
+      const parts: string[] = [];
+      for (let left = total; left > 0; ) {
+        const size = Math.min(60, left);
+        parts.push("a".repeat(size));
+        left -= size + 1; // the joining dot
+      }
+      return parts.join(".");
+    };
+
+    const tooLong = nameOfLength(236);
+    expect(tooLong).toHaveLength(236);
+    expect((await claim({ domain: tooLong })).status).toBe(422);
+
+    const atCap = nameOfLength(235);
+    expect(atCap).toHaveLength(235);
+    const res = await claim({ domain: atCap });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as DomainBody;
+    expect(body.recordName.length).toBeLessThanOrEqual(253);
+  });
+
+  // A rate-limit floor, not an inventory rule: the cooldown keys on domain id,
+  // so distinct rows never gate each other and an uncapped org could fan out
+  // thousands of concurrent outbound lookups through this instance's resolver.
+  it("409s past the per-org cap, counting only this org's rows", async () => {
+    store.domains = Array.from({ length: 25 }, (_, i) =>
+      domain(`d-cap-${i}`, `held-${i}.com`),
+    );
+    // Another org's rows must not count against this one.
+    store.domains.push(
+      domain("d-other", "elsewhere.com", { organizationId: OTHER_ORG }),
+    );
+
+    const res = await claim({ domain: "one-too-many.com" });
+    expect(res.status).toBe(409);
+    expect(await messageOf(res)).toContain("at most 25 domains");
+    expect(store.audits).toHaveLength(0);
+
+    // Freeing a slot re-opens the door.
+    store.domains = store.domains.filter((d) => d.id !== "d-cap-0");
+    expect((await claim({ domain: "one-too-many.com" })).status).toBe(200);
   });
 
   it("422s a missing/unparseable body", async () => {
@@ -628,7 +720,7 @@ describe("POST /v1/org/domains (claim)", () => {
   // THE cross-tenant case. `domain` is unique GLOBALLY, not per-org, so this
   // endpoint could otherwise be walked to enumerate another tenant's holdings.
   it("409s a domain another org holds with a NEUTRAL message", async () => {
-    const res = await claim({ domain: "rival.test" });
+    const res = await claim({ domain: "rival.com" });
     expect(res.status).toBe(409);
     const message = await messageOf(res);
     expect(message).toBe(
@@ -639,19 +731,19 @@ describe("POST /v1/org/domains (claim)", () => {
     expect(message).not.toContain(OTHER_ORG);
     expect(message.toLowerCase()).not.toContain("another");
     expect(store.audits).toHaveLength(0);
-    expect(store.domains.filter((d) => d.domain === "rival.test")).toHaveLength(
+    expect(store.domains.filter((d) => d.domain === "rival.com")).toHaveLength(
       1,
     );
   });
 
   it("normalizes BEFORE the uniqueness check, so no spelling slips past", async () => {
-    const res = await claim({ domain: "RIVAL.test." });
+    const res = await claim({ domain: "RIVAL.com." });
     expect(res.status).toBe(409);
     expect(await messageOf(res)).not.toContain(OTHER_ORG);
   });
 
   it("409s the caller's OWN domain with a message that says so", async () => {
-    const res = await claim({ domain: "acme.test" });
+    const res = await claim({ domain: "acme.com" });
     expect(res.status).toBe(409);
     // Same-org: naming it leaks nothing the caller can't already list.
     expect(await messageOf(res)).toBe("You have already claimed this domain.");
@@ -659,14 +751,14 @@ describe("POST /v1/org/domains (claim)", () => {
 
   it("409s a claim-claim race surfaced as P2002, neutrally", async () => {
     store.race = true;
-    const res = await claim({ domain: "rival.test" });
+    const res = await claim({ domain: "rival.com" });
     expect(res.status).toBe(409);
     // The racing claimant is unknown here, so the message must be the neutral
     // one — it may well belong to another organization.
     expect(await messageOf(res)).toContain("already claimed");
-    expect(
-      await messageOf(await claim({ domain: "rival.test" })),
-    ).not.toContain(OTHER_ORG);
+    expect(await messageOf(await claim({ domain: "rival.com" }))).not.toContain(
+      OTHER_ORG,
+    );
     expect(store.audits).toHaveLength(0);
   });
 
@@ -699,7 +791,7 @@ describe("POST /v1/org/domains/:domainId/verify", () => {
     expect(body.verifiedAt).not.toBeNull();
     expect(domainRow("d-pending")?.verifiedAt).toBeInstanceOf(Date);
 
-    expect(dns.resolveTxt).toHaveBeenCalledWith("_onecli-challenge.acme.test");
+    expect(dns.resolveTxt).toHaveBeenCalledWith("_onecli-challenge.acme.com");
     expect(store.audits).toHaveLength(1);
     expect(store.audits[0]).toMatchObject({
       action: "update",
@@ -707,7 +799,7 @@ describe("POST /v1/org/domains/:domainId/verify", () => {
       source: "api",
       metadata: {
         domainId: "d-pending",
-        domain: "acme.test",
+        domain: "acme.com",
         change: "verified",
       },
     });
@@ -724,6 +816,17 @@ describe("POST /v1/org/domains/:domainId/verify", () => {
     expect(domainRow("d-pending")?.verifiedAt).toBeInstanceOf(Date);
   });
 
+  // Some DNS panels normalize the case of a stored TXT value. The token is
+  // hex, so case carries no entropy — without this a correct record would
+  // read as permanently missing.
+  it("matches a record an uppercasing provider stored", async () => {
+    dns.resolveTxt.mockResolvedValue(
+      published(`ONECLI-DOMAIN-VERIFICATION=${TOKEN.toUpperCase()}`),
+    );
+    expect((await verify("d-pending")).status).toBe(200);
+    expect(domainRow("d-pending")?.verifiedAt).toBeInstanceOf(Date);
+  });
+
   it("MISSES on records that don't carry the token, leaving the row untouched", async () => {
     dns.resolveTxt.mockResolvedValue([
       ["v=spf1 -all"],
@@ -733,7 +836,7 @@ describe("POST /v1/org/domains/:domainId/verify", () => {
     const res = await verify("d-pending");
     expect(res.status).toBe(400);
     expect(await messageOf(res)).toBe(
-      "No matching TXT record found at _onecli-challenge.acme.test. DNS changes can take up to an hour to propagate.",
+      "No matching TXT record found at _onecli-challenge.acme.com. DNS changes can take up to an hour to propagate.",
     );
     // No `failed` marker, no timestamp, no audit — a miss is the outcome of a
     // CHECK, not a change to the domain.
@@ -741,8 +844,14 @@ describe("POST /v1/org/domains/:domainId/verify", () => {
     expect(store.audits).toHaveLength(0);
   });
 
-  it("reports ENOTFOUND / ENODATA as a propagation wait, not a server fault", async () => {
-    for (const code of ["ENOTFOUND", "ENODATA", "NXDOMAIN"]) {
+  // `EBADNAME` sits here, not with the resolver failures: c-ares refuses to
+  // emit the query because the NAME is malformed, which is an input problem.
+  // Reporting it as unreachable DNS would send an operator to audit healthy
+  // egress over a client-side defect. (`NXDOMAIN` is deliberately not covered —
+  // c-ares surfaces that condition as `ENOTFOUND` and Node never emits the
+  // string, so a case for it would be testing a constant, not the code.)
+  it("reports ENOTFOUND / ENODATA / EBADNAME as claimant-side, not a server fault", async () => {
+    for (const code of ["ENOTFOUND", "ENODATA", "EBADNAME"]) {
       clock += 60_000;
       dns.resolveTxt.mockRejectedValue(
         Object.assign(new Error(code), { code }),
@@ -795,14 +904,24 @@ describe("POST /v1/org/domains/:domainId/verify", () => {
     expect(dns.resolveTxt).toHaveBeenCalledTimes(2);
   });
 
-  it("is a no-op 200 on an already-verified domain, without touching DNS", async () => {
-    const res = await verify("d-verified");
-    expect(res.status).toBe(200);
-    expect(((await res.json()) as DomainBody).verifiedAt).toBe(
-      at(30).toISOString(),
-    );
+  // A re-check of a verified row is a READ: no lookup, no write, no audit.
+  // Auditing it would let a double-click or a polling client stack N events all
+  // claiming the domain was verified, every one carrying the SAME original
+  // timestamp — an operator could no longer identify the real
+  // proof-of-ownership moment, and the row count would be unbounded for a call
+  // that costs no DNS.
+  it("is a no-op 200 on an already-verified domain — no DNS, NO AUDIT", async () => {
+    for (let i = 0; i < 3; i++) {
+      const res = await verify("d-verified");
+      expect(res.status).toBe(200);
+      expect(((await res.json()) as DomainBody).verifiedAt).toBe(
+        at(30).toISOString(),
+      );
+    }
     expect(dns.resolveTxt).not.toHaveBeenCalled();
-    expect(store.audits).toHaveLength(1);
+    expect(store.audits).toHaveLength(0);
+    // And the original timestamp is still the original.
+    expect(domainRow("d-verified")?.verifiedAt).toEqual(at(30));
   });
 
   it("404s an unknown domain and a domain of another org (cross-org isolation)", async () => {
@@ -831,7 +950,7 @@ describe("DELETE /v1/org/domains/:domainId", () => {
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({
       id: "d-verified",
-      domain: "acme-verified.test",
+      domain: "acme-verified.com",
       verified: true,
     });
     expect(domainRow("d-verified")).toBeUndefined();
@@ -841,7 +960,7 @@ describe("DELETE /v1/org/domains/:domainId", () => {
       service: "domain",
       metadata: {
         domainId: "d-verified",
-        domain: "acme-verified.test",
+        domain: "acme-verified.com",
         verified: true,
       },
     });
@@ -855,7 +974,7 @@ describe("DELETE /v1/org/domains/:domainId", () => {
 
   it("frees the name for a fresh claim, token and all", async () => {
     expect((await remove("d-pending")).status).toBe(200);
-    const res = await claim({ domain: "acme.test" });
+    const res = await claim({ domain: "acme.com" });
     expect(res.status).toBe(200);
     const body = (await res.json()) as DomainBody;
     expect(body.verifiedAt).toBeNull();

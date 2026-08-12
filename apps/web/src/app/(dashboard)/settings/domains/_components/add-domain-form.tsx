@@ -44,7 +44,10 @@ export const AddDomainForm = () => {
           autoComplete="off"
           spellCheck={false}
           className="max-w-xs"
-          disabled={claim.isPending}
+          // `readOnly`, not `disabled`: disabling the focused input mid-submit
+          // drops focus to <body>, so the caller loses their place and a
+          // screen reader loses its anchor.
+          readOnly={claim.isPending}
         />
         <Button type="submit" disabled={!trimmed || claim.isPending}>
           {claim.isPending ? (

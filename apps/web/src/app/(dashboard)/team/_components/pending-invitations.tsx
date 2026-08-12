@@ -25,6 +25,8 @@ import {
   AlertDialogTitle,
 } from "@onecli/ui/components/alert-dialog";
 import { cn } from "@onecli/ui/lib/utils";
+import { EmptyState } from "@/components/empty-state";
+import { TableCard } from "@/components/table-card";
 import { useRevokeInvitation } from "@/hooks/use-invitations";
 import type { InvitationRow } from "@/lib/api";
 import { CopyLinkButton } from "./copy-link-button";
@@ -92,17 +94,14 @@ export const PendingInvitations = ({
           </div>
         </Card>
       ) : invitations.length === 0 ? (
-        <Card className="flex flex-col items-center justify-center py-12 text-center">
-          <div className="bg-muted mb-4 flex size-12 items-center justify-center rounded-full">
-            <Mail className="text-muted-foreground size-6" />
-          </div>
-          <p className="text-sm font-medium">No invitations yet</p>
-          <p className="text-muted-foreground mt-1 max-w-xs text-xs">
-            Invite a teammate to generate a join link you can send them.
-          </p>
-        </Card>
+        <EmptyState
+          variant="dashed"
+          icon={Mail}
+          things="invitations"
+          description="Invite a teammate to generate a join link you can send them."
+        />
       ) : (
-        <Card className="overflow-hidden p-0">
+        <TableCard>
           <Table>
             <TableHeader>
               <TableRow>
@@ -159,7 +158,7 @@ export const PendingInvitations = ({
               })}
             </TableBody>
           </Table>
-        </Card>
+        </TableCard>
       )}
 
       <AlertDialog

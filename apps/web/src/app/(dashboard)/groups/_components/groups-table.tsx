@@ -4,7 +4,6 @@ import { useState } from "react";
 import { Plus, UsersRound } from "lucide-react";
 import { Button } from "@onecli/ui/components/button";
 import { Badge } from "@onecli/ui/components/badge";
-import { Card } from "@onecli/ui/components/card";
 import {
   Table,
   TableBody,
@@ -13,6 +12,8 @@ import {
   TableHeader,
   TableRow,
 } from "@onecli/ui/components/table";
+import { EmptyState } from "@/components/empty-state";
+import { TableCard } from "@/components/table-card";
 import type { GroupRow } from "@/lib/api";
 import { GroupRowActions } from "./group-row-actions";
 import { CreateGroupDialog } from "./create-group-dialog";
@@ -35,17 +36,14 @@ export const GroupsTable = ({ groups }: GroupsTableProps) => {
         </Button>
       </div>
       {groups.length === 0 ? (
-        <Card className="flex flex-col items-center justify-center py-12 text-center">
-          <div className="bg-muted mb-4 flex size-12 items-center justify-center rounded-full">
-            <UsersRound className="text-muted-foreground size-6" />
-          </div>
-          <p className="text-sm font-medium">No groups yet</p>
-          <p className="text-muted-foreground mt-1 max-w-xs text-xs">
-            Create a group to organize members for project access and policy.
-          </p>
-        </Card>
+        <EmptyState
+          variant="dashed"
+          icon={UsersRound}
+          things="groups"
+          description="Create a group to organize members for project access and policy."
+        />
       ) : (
-        <Card className="overflow-hidden p-0">
+        <TableCard>
           <Table>
             <TableHeader>
               <TableRow>
@@ -83,7 +81,7 @@ export const GroupsTable = ({ groups }: GroupsTableProps) => {
               ))}
             </TableBody>
           </Table>
-        </Card>
+        </TableCard>
       )}
       <CreateGroupDialog open={createOpen} onOpenChange={setCreateOpen} />
     </div>

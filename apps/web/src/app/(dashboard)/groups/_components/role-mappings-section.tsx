@@ -14,6 +14,8 @@ import {
   TableHeader,
   TableRow,
 } from "@onecli/ui/components/table";
+import { EmptyState } from "@/components/empty-state";
+import { TableCard } from "@/components/table-card";
 import { useGroups } from "@/hooks/use-groups";
 import {
   useReorderRoleMappings,
@@ -100,27 +102,21 @@ export const RoleMappingsSection = ({
           </div>
         </Card>
       ) : mappings.isError ? (
-        <Card className="flex flex-col items-center justify-center py-12 text-center">
-          <div className="bg-muted mb-4 flex size-12 items-center justify-center rounded-full">
-            <Lock className="text-muted-foreground size-6" />
-          </div>
-          <p className="text-sm font-medium">Admins only</p>
-          <p className="text-muted-foreground mt-1 max-w-xs text-xs">
-            Managing role mappings requires an organization admin.
-          </p>
-        </Card>
+        <EmptyState
+          variant="dashed"
+          icon={Lock}
+          title="Admins only"
+          description="Managing role mappings requires an organization admin."
+        />
       ) : rows.length === 0 ? (
-        <Card className="flex flex-col items-center justify-center py-12 text-center">
-          <div className="bg-muted mb-4 flex size-12 items-center justify-center rounded-full">
-            <Shuffle className="text-muted-foreground size-6" />
-          </div>
-          <p className="text-sm font-medium">No role mappings yet</p>
-          <p className="text-muted-foreground mt-1 max-w-xs text-xs">
-            Map a group to a role so its members are granted it automatically.
-          </p>
-        </Card>
+        <EmptyState
+          variant="dashed"
+          icon={Shuffle}
+          things="role mappings"
+          description="Map a group to a role so its members are granted it automatically."
+        />
       ) : (
-        <Card className="overflow-hidden p-0">
+        <TableCard>
           <Table>
             <TableHeader>
               <TableRow>
@@ -166,7 +162,7 @@ export const RoleMappingsSection = ({
               ))}
             </TableBody>
           </Table>
-        </Card>
+        </TableCard>
       )}
 
       <RoleMappingDialog

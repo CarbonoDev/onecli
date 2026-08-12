@@ -109,7 +109,7 @@ vi.mock("@onecli/db", () => {
   interface GroupByArgs {
     where: {
       projectId: { in: string[] };
-      createdAt: { gte: Date };
+      createdAt: { gte: Date; lt: Date };
       injectionCount?: { gt: number };
     };
   }
@@ -241,6 +241,7 @@ vi.mock("@onecli/db", () => {
         for (const row of store.logs) {
           if (!where.projectId.in.includes(row.projectId)) continue;
           if (row.createdAt.getTime() < where.createdAt.gte.getTime()) continue;
+          if (row.createdAt.getTime() >= where.createdAt.lt.getTime()) continue;
           if (injectedOnly && row.injectionCount === 0) continue;
           counts.set(row.agentId, (counts.get(row.agentId) ?? 0) + 1);
         }

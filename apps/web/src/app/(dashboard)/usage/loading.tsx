@@ -9,7 +9,7 @@ export default function UsageLoading() {
           any drift flashes one title and then swaps to another. */}
       <PageHeader
         title="Usage"
-        description="Request volume and per-agent usage across your organization."
+        description="Request volume and per-agent usage across the projects you can access."
       />
       <div className="space-y-6">
         <div className="grid gap-4 sm:grid-cols-2">

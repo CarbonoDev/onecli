@@ -2,10 +2,10 @@
 
 import { Info } from "lucide-react";
 import {
-  Tooltip,
-  TooltipContent,
-  TooltipTrigger,
-} from "@onecli/ui/components/tooltip";
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@onecli/ui/components/popover";
 
 /**
  * The disclosure that keeps the Requests card honest.
@@ -16,10 +16,15 @@ import {
  * key is never recorded, so the number below the title is a floor, not a total.
  * The card says "recorded gateway requests" and this explains the gap — it is
  * not optional polish, it is what stops the card from overstating what it knows.
+ *
+ * A `Popover`, deliberately NOT a `Tooltip`: Radix tooltips open on hover and
+ * keyboard focus but not on tap, which would leave the caveat unreadable on a
+ * phone. A disclosure this load-bearing has to be reachable on every input —
+ * click/tap and keyboard alike.
  */
 export const RecordedRequestsInfo = () => (
-  <Tooltip>
-    <TooltipTrigger asChild>
+  <Popover>
+    <PopoverTrigger asChild>
       <button
         type="button"
         aria-label="What counts as a recorded request?"
@@ -27,11 +32,11 @@ export const RecordedRequestsInfo = () => (
       >
         <Info className="size-3.5" />
       </button>
-    </TooltipTrigger>
-    <TooltipContent className="max-w-xs">
+    </PopoverTrigger>
+    <PopoverContent align="start" className="w-72 text-xs">
       The gateway records a request when it injects a credential or makes a
       policy decision. Pass-through requests on an agent&apos;s own key are not
       recorded.
-    </TooltipContent>
-  </Tooltip>
+    </PopoverContent>
+  </Popover>
 );

@@ -1,9 +1,10 @@
 "use client";
 
-import { BarChart3, Lock } from "lucide-react";
+import { BarChart3, Lock, TriangleAlert } from "lucide-react";
 import { Card } from "@onecli/ui/components/card";
 import { Skeleton } from "@onecli/ui/components/skeleton";
 import { EmptyState } from "@/components/empty-state";
+import { ApiError } from "@/lib/api";
 import { useUsage } from "@/hooks/use-usage";
 import { formatPeriod } from "./format";
 import { RecordedRequestsInfo } from "./recorded-requests-info";
@@ -34,14 +35,23 @@ export const UsageContent = () => {
   }
 
   if (usage.isError || !usage.data) {
-    // A settled authorization answer, not a transport blip (`retry: false`):
-    // org breadth needs an organization-scoped credential, so a project-scoped
-    // one lands here.
-    return (
+    // `retry: false` means a 500 and a dropped connection land here too, not
+    // just the 403 a project-scoped credential earns. Naming the auth cause
+    // unconditionally would misdiagnose a transport blip as a permissions
+    // problem, so only a real 403 gets the auth wording (and the lock).
+    const forbidden =
+      usage.error instanceof ApiError && usage.error.status === 403;
+    return forbidden ? (
       <EmptyState
         icon={Lock}
         title="Usage is unavailable"
         description="Usage needs an organization-scoped session. Switch organizations or sign in again to view it."
+      />
+    ) : (
+      <EmptyState
+        icon={TriangleAlert}
+        title="Couldn't load usage"
+        description="Something went wrong fetching usage. Reload the page to try again."
       />
     );
   }

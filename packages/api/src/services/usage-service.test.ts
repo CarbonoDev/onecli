@@ -24,7 +24,7 @@ interface AgentRow {
 interface GroupByArgs {
   where: {
     projectId: { in: string[] };
-    createdAt: { gte: Date };
+    createdAt: { gte: Date; lt: Date };
     injectionCount?: { gt: number };
   };
 }
@@ -39,7 +39,11 @@ const store = vi.hoisted(() => ({
   injectedOverride: null as
     | { agentId: string; _count: { _all: number } }[]
     | null,
-  /** How many times the whole pair ran inside a transaction. */
+  /**
+   * How many times the aggregate pair ran. Used ONLY to assert that the
+   * empty-project path issues no queries at all — it says nothing about
+   * isolation, which `$transaction` here (a `Promise.all`) cannot model.
+   */
   transactions: 0,
   agentFindManyCalls: 0,
 }));
@@ -54,6 +58,7 @@ vi.mock("@onecli/db", () => {
       (r) =>
         args.where.projectId.in.includes(r.projectId) &&
         r.createdAt.getTime() >= args.where.createdAt.gte.getTime() &&
+        r.createdAt.getTime() < args.where.createdAt.lt.getTime() &&
         (!injectedOnly || r.injectionCount > 0),
     );
     const counts = new Map<string, number>();
@@ -145,6 +150,9 @@ describe("getOrganizationUsage — period bounds", () => {
     expect(store.groupByWheres).toHaveLength(2);
     for (const where of store.groupByWheres) {
       expect(where.createdAt.gte.getTime()).toBe(NOW - USAGE_WINDOW_MS);
+      // Bounded at both ends, so a future-dated row can't land in a window
+      // the UI labels as ending now.
+      expect(where.createdAt.lt.getTime()).toBe(NOW);
       expect(where.projectId.in).toEqual(["proj-1", "proj-2"]);
     }
     // Exactly one is the injected slice; the other counts everything.
@@ -161,11 +169,22 @@ describe("getOrganizationUsage — period bounds", () => {
     expect(usage.requests).toBe(1);
   });
 
-  it("reads both aggregates in one transaction", async () => {
-    await getOrganizationUsage(ORG, USER, NOW);
+  it("excludes a future-dated row from a window that ends now", async () => {
+    // A gateway with a fast clock. Without the `lt` bound this would count.
+    store.logs = [log("agent-a", 1, 1), log("agent-a", 1, -3)];
 
-    expect(store.transactions).toBe(1);
+    const usage = await getOrganizationUsage(ORG, USER, NOW);
+
+    expect(usage.requests).toBe(1);
   });
+
+  // NOTE: there is deliberately NO test asserting the two aggregates read one
+  // snapshot. They don't: `$transaction([...])` inherits Postgres' READ
+  // COMMITTED default (nothing in the repo sets `isolationLevel`), so each
+  // statement takes its own snapshot. The invariant is held by the `Math.min`
+  // clamp instead, which "never reports more integration calls than requests"
+  // below actually exercises. A `store.transactions === 1` assertion against a
+  // `Promise.all` mock would only have restated the mock.
 });
 
 describe("getOrganizationUsage — totals", () => {

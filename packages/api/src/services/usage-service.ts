@@ -94,17 +94,42 @@ export const getOrganizationUsage = async (
   );
   if (projectIds.length === 0) return zeroSummary(periodStart, periodEnd);
 
+  // Bounded at BOTH ends. `lt: periodEnd` is not redundant with "now": a
+  // gateway with a fast clock writes a `created_at` in the future, which an
+  // open-ended `gte` would count toward a window the UI labels as ending now.
+  // With the upper bound, the label is exactly true.
   const where = {
     projectId: { in: projectIds },
-    createdAt: { gte: periodStart },
+    createdAt: { gte: periodStart, lt: periodEnd },
   };
 
-  // Both aggregates in ONE transaction, so they read the same snapshot. Run
-  // separately, a request landing between them could be counted by the
-  // injected query but not the total one, yielding integrationCalls >
-  // requests — a self-contradicting page. The per-row clamp below is a
-  // defensive second line, not the primary guarantee.
+  // ┌─ THE CLAMP AT `Math.min` BELOW IS THE GUARANTEE. DO NOT REMOVE IT. ─┐
   //
+  // It is tempting to read the `$transaction` as making both aggregates see
+  // one snapshot, which would make the clamp redundant. It does NOT.
+  // `$transaction([...])` runs at the database's default isolation level and
+  // nothing sets one (no `isolationLevel` anywhere in the repo;
+  // `packages/db/src/index.ts` constructs a bare `PrismaClient`). Postgres
+  // defaults to READ COMMITTED, under which every statement takes its own
+  // snapshot — a row committed between the two `groupBy`s is visible to the
+  // second one but not the first.
+  //
+  // So the inversion is genuinely reachable: a request landing mid-pair can be
+  // counted by the injected query and missed by the total one, yielding
+  // `integrationCalls > requests` — the self-contradicting page this design
+  // exists to prevent. `Math.min` is what actually prevents it.
+  //
+  // The transaction is kept for connection hygiene (one connection, one
+  // round-trip pair), not for isolation. Raising the isolation to
+  // `RepeatableRead` would also close the window, but it buys nothing the
+  // clamp doesn't already cover and costs a heavier transaction.
+  //
+  // The two queries are hoisted into consts rather than written inline in the
+  // array: Prisma's `groupBy` return type is inferred from the argument
+  // literal, and inside `$transaction([...])` that inference collapses (it
+  // demands an explicit `orderBy` and widens `_count` to `true | {...}`).
+  // Assigning first keeps the precise per-call type; `$transaction` then just
+  // sequences the already-typed promises.
   // The two queries are hoisted into consts rather than written inline in the
   // array: Prisma's `groupBy` return type is inferred from the argument
   // literal, and inside `$transaction([...])` that inference collapses (it
@@ -148,6 +173,8 @@ export const getOrganizationUsage = async (
         agentId: row.agentId,
         agentName: nameById.get(row.agentId) ?? null,
         requests,
+        // THE invariant `integrationCalls <= requests` rests on — see the
+        // isolation-level note above. Not redundant with the transaction.
         integrationCalls: Math.min(
           injectedByAgent.get(row.agentId) ?? 0,
           requests,

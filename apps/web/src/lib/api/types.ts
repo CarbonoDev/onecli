@@ -74,12 +74,31 @@ export interface Connection {
   connectedAt: string;
 }
 
-// A project row as returned by the project CRUD routes (rename / create).
+// Who a project is attributed to — its creator. Mirrors `ProjectOwner` in
+// packages/api. `owner` is null when the project records no creator at all;
+// within it every field is independently nullable, so the render rule is
+// `name`, else `email`, else no owner line — a deleted user keeps the stored
+// email but loses the name.
+export interface ProjectOwner {
+  id: string | null;
+  name: string | null;
+  email: string | null;
+}
+
+// A project row as returned by the project routes (list / get / create /
+// rename — all four return this same shape).
+//
+// `resourceCount` is this project's OWN secrets + app connections; it
+// deliberately excludes org-scoped resources shared by every project, so the
+// numbers are comparable across cards. Agents are counted separately.
 export interface Project {
   id: string;
   name: string | null;
   slug: string | null;
   createdAt: string;
+  agentCount: number;
+  resourceCount: number;
+  owner: ProjectOwner | null;
 }
 
 // Project access bindings (the human sharing surface for a project). `role` is

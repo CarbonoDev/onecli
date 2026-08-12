@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { db } from "@onecli/db";
 import type { Hono } from "hono";
 import type { ApiEnv } from "../../types";
 import { MAX_PROJECTS_PER_ORG } from "../../validations/project";
@@ -52,6 +53,8 @@ interface ProjectRow {
   name: string | null;
   slug: string | null;
   createdByUserId: string | null;
+  /** Denormalized creator email — outlives the `users` row it came from. */
+  createdByUserEmail: string | null;
   createdAt: Date;
 }
 
@@ -77,10 +80,15 @@ interface AccessRow {
   createdAt: Date;
 }
 
-/** Every project-child table this suite exercises shares this shape. */
+/**
+ * Every project-child table this suite exercises shares this shape.
+ * `projectId` is nullable because it genuinely is: an ORGANIZATION-scoped
+ * secret or app connection carries none, and those rows must never be counted
+ * against a project.
+ */
 interface ChildRow {
   id: string;
-  projectId: string;
+  projectId: string | null;
 }
 
 interface KeyRow extends ChildRow {
@@ -330,6 +338,65 @@ vi.mock("@onecli/db", () => {
     return picked;
   };
 
+  /** The two project projections: `projectSelect` and `projectRowSelect`. */
+  interface ProjectSelect {
+    id?: boolean;
+    // Not part of any client row — the auth/session resolvers read it.
+    organizationId?: boolean;
+    name?: boolean;
+    slug?: boolean;
+    createdAt?: boolean;
+    createdByUserId?: boolean;
+    createdByUserEmail?: boolean;
+    createdByUser?: { select: { name?: boolean; email?: boolean } };
+    _count?: {
+      select: { agents?: boolean; secrets?: boolean; appConnections?: boolean };
+    };
+  }
+
+  /**
+   * Project a project row. Two behaviours are load-bearing:
+   *
+   *  · `createdByUser` is an OPTIONAL relation — a dangling `createdByUserId`
+   *    (deleted user) reads as null, it does not throw. That is the case the
+   *    owner fallback exists for.
+   *  · `_count` counts only rows carrying THIS project's id, which is what
+   *    makes the card numbers comparable across projects — org-scoped rows
+   *    (projectId null) are never folded in.
+   */
+  const pickProject = (row: ProjectRow, select?: ProjectSelect) => {
+    if (!select) return { ...row };
+    const picked: Record<string, unknown> = {};
+    for (const key of [
+      "id",
+      "organizationId",
+      "name",
+      "slug",
+      "createdAt",
+      "createdByUserId",
+      "createdByUserEmail",
+    ] as const) {
+      if (select[key]) picked[key] = row[key];
+    }
+    if (select.createdByUser) {
+      const user = store.users.find((u) => u.id === row.createdByUserId);
+      picked.createdByUser = user
+        ? { name: user.name, email: user.email }
+        : null;
+    }
+    if (select._count) {
+      const owned = (rows: ChildRow[]) =>
+        rows.filter((r) => r.projectId === row.id).length;
+      const counts: Record<string, number> = {};
+      if (select._count.select.agents) counts.agents = owned(store.agents);
+      if (select._count.select.secrets) counts.secrets = owned(store.secrets);
+      if (select._count.select.appConnections)
+        counts.appConnections = owned(store.appConnections);
+      picked._count = counts;
+    }
+    return picked;
+  };
+
   /** Every `projects`-child table shares count/deleteMany, keyed by projectId. */
   const childDelegate = <T extends ChildRow>(
     read: () => T[],
@@ -435,7 +502,7 @@ vi.mock("@onecli/db", () => {
         select,
       }: {
         where: ProjectWhere;
-        select?: Record<string, boolean>;
+        select?: ProjectSelect;
       }) => {
         const row = store.projects
           .slice()
@@ -445,36 +512,24 @@ vi.mock("@onecli/db", () => {
               a.id.localeCompare(b.id),
           )
           .find((p) => matchesProject(p, where));
-        if (!row) return null;
-        if (!select) return { ...row };
-        const picked: Record<string, unknown> = {};
-        for (const key of Object.keys(select)) {
-          if (select[key]) picked[key] = row[key as keyof ProjectRow];
-        }
-        return picked;
+        return row ? pickProject(row, select) : null;
       },
       findUnique: async ({
         where,
         select,
       }: {
         where: { id: string };
-        select?: Record<string, boolean>;
+        select?: ProjectSelect;
       }) => {
         const row = store.projects.find((p) => p.id === where.id);
-        if (!row) return null;
-        if (!select) return { ...row };
-        const picked: Record<string, unknown> = {};
-        for (const key of Object.keys(select)) {
-          if (select[key]) picked[key] = row[key as keyof ProjectRow];
-        }
-        return picked;
+        return row ? pickProject(row, select) : null;
       },
       findMany: async ({
         where,
         select,
       }: {
         where: ProjectWhere;
-        select?: Record<string, boolean>;
+        select?: ProjectSelect;
         orderBy?: unknown;
       }) => {
         // Always `createdAt asc, id asc` — the only ordering `listProjects`
@@ -487,14 +542,7 @@ vi.mock("@onecli/db", () => {
               a.id.localeCompare(b.id),
           )
           .filter((p) => matchesProject(p, where));
-        if (!select) return rows.map((r) => ({ ...r }));
-        return rows.map((row) => {
-          const picked: Record<string, unknown> = {};
-          for (const key of Object.keys(select)) {
-            if (select[key]) picked[key] = row[key as keyof ProjectRow];
-          }
-          return picked;
-        });
+        return rows.map((row) => pickProject(row, select));
       },
       // Mirrors the nested create `createProject` issues: the project row plus
       // its owner binding, api key and default agent land together, which is
@@ -504,7 +552,7 @@ vi.mock("@onecli/db", () => {
         select,
       }: {
         data: ProjectCreateData;
-        select?: Record<string, boolean>;
+        select?: ProjectSelect;
       }) => {
         if (
           store.projects.some(
@@ -523,6 +571,7 @@ vi.mock("@onecli/db", () => {
           name: data.name ?? null,
           slug: data.slug ?? null,
           createdByUserId: data.createdByUserId ?? null,
+          createdByUserEmail: data.createdByUserEmail ?? null,
           createdAt: new Date(),
         };
         store.projects.push(row);
@@ -548,12 +597,9 @@ vi.mock("@onecli/db", () => {
         if (data.agents?.create) {
           store.agents.push({ id: `ag-new-${row.id}`, projectId: row.id });
         }
-        if (!select) return { ...row };
-        const picked: Record<string, unknown> = {};
-        for (const key of Object.keys(select)) {
-          if (select[key]) picked[key] = row[key as keyof ProjectRow];
-        }
-        return picked;
+        // Projected AFTER the nested children land, so `_count` sees the
+        // seeded agent — the same statement, the same snapshot, as Prisma.
+        return pickProject(row, select);
       },
       count: async ({ where }: { where: ProjectWhere }) =>
         store.projects.filter((p) => matchesProject(p, where)).length,
@@ -572,7 +618,9 @@ vi.mock("@onecli/db", () => {
       },
       deleteMany: async ({ where }: { where: ProjectWhere }) => {
         const rows = store.projects.filter((p) => matchesProject(p, where));
-        const ids = new Set(rows.map((r) => r.id));
+        // Widened so an ORG-scoped child (projectId null) can be tested
+        // against it — it is never a member, so such rows always survive.
+        const ids = new Set<string | null>(rows.map((r) => r.id));
         store.projects = store.projects.filter((p) => !ids.has(p.id));
         // The DB CASCADEs that ride the project row: project_access and
         // policy_rules_v2.
@@ -904,6 +952,7 @@ beforeEach(() => {
       name: "Alpha",
       slug: "alpha",
       createdByUserId: MEMBER,
+      createdByUserEmail: "member@example.com",
       createdAt: at(0),
     },
     {
@@ -912,6 +961,7 @@ beforeEach(() => {
       name: "Beta",
       slug: "beta",
       createdByUserId: OWNER,
+      createdByUserEmail: "owner@example.com",
       createdAt: at(1),
     },
     {
@@ -920,6 +970,7 @@ beforeEach(() => {
       name: "Gamma",
       slug: "gamma",
       createdByUserId: ADMIN,
+      createdByUserEmail: "admin@example.com",
       createdAt: at(2),
     },
     // No bindings at all — the legacy zero-binding shape (L5).
@@ -929,6 +980,7 @@ beforeEach(() => {
       name: "Delta",
       slug: "delta",
       createdByUserId: OWNER,
+      createdByUserEmail: "owner@example.com",
       createdAt: at(3),
     },
     {
@@ -937,6 +989,7 @@ beforeEach(() => {
       name: "Foreign",
       slug: "foreign",
       createdByUserId: OUTSIDER,
+      createdByUserEmail: "outsider@other.test",
       createdAt: at(4),
     },
   ];
@@ -1007,6 +1060,13 @@ interface ProjectBody {
   name: string | null;
   slug: string | null;
   createdAt: string;
+  agentCount: number;
+  resourceCount: number;
+  owner: {
+    id: string | null;
+    name: string | null;
+    email: string | null;
+  } | null;
 }
 
 interface AccessBody {
@@ -1148,11 +1208,103 @@ describe("GET /projects (list)", () => {
       name: "Alpha",
       slug: "alpha",
       createdAt: expect.any(String),
+      // 2 agents; 1 secret + 1 app connection = 2 resources.
+      agentCount: 2,
+      resourceCount: 2,
+      owner: { id: MEMBER, name: null, email: "member@example.com" },
     });
-    // `projectSelect` also reads createdByUserId (resolveAuthority needs it);
-    // `toProjectRow` must not pass it through, nor the org id.
-    expect(Object.keys(first ?? {})).not.toContain("createdByUserId");
-    expect(Object.keys(first ?? {})).not.toContain("organizationId");
+    // `projectRowSelect` also reads the raw creator columns; `toProjectRow`
+    // must fold them into `owner` rather than pass them through, and the org
+    // id and the `_count` envelope must not leak either.
+    for (const leaked of [
+      "createdByUserId",
+      "createdByUserEmail",
+      "createdByUser",
+      "organizationId",
+      "_count",
+    ]) {
+      expect(Object.keys(first ?? {})).not.toContain(leaked);
+    }
+  });
+
+  it("counts only a project's OWN resources, never the org-scoped ones", async () => {
+    // The whole reason this does not reuse `getResourceCounts`: an
+    // organization-scoped secret/connection (projectId null) is visible from
+    // every project, so folding it in would bump every card by the same
+    // amount and make the grid useless for comparison.
+    store.secrets.push({ id: "s-org", projectId: null });
+    store.appConnections.push({ id: "ac-org", projectId: null });
+    const rows = (await (await list()).json()) as ProjectBody[];
+    expect(rows.map((p) => [p.id, p.agentCount, p.resourceCount])).toEqual([
+      ["proj-1", 2, 2],
+      ["proj-2", 1, 1],
+      // Zero-count projects report 0, not null and not a missing key.
+      ["proj-3", 0, 0],
+      ["proj-4", 0, 0],
+    ]);
+  });
+
+  it("falls back to the STORED email when the creator's user row is gone", async () => {
+    // `createdByUser` is an optional relation: a deleted user leaves the id
+    // and the denormalized email behind. The card must still say who, so
+    // `owner` stays non-null with a null name.
+    const row = projectRow("proj-2");
+    if (row) row.createdByUserId = "user-deleted";
+    const [, beta] = (await (await list()).json()) as ProjectBody[];
+    expect(beta?.owner).toEqual({
+      id: "user-deleted",
+      name: null,
+      email: "owner@example.com",
+    });
+  });
+
+  it("reports a null owner for a project that records no creator at all", async () => {
+    // The seeded-default shape (bootstrapOrganization predates a human
+    // actor): both columns null, so there is nothing to attribute the card to.
+    const row = projectRow("proj-4");
+    if (row) {
+      row.createdByUserId = null;
+      row.createdByUserEmail = null;
+    }
+    const rows = (await (await list()).json()) as ProjectBody[];
+    expect(rows.find((p) => p.id === "proj-4")?.owner).toBeNull();
+  });
+
+  it("prefers the live name and email over the stored copy", async () => {
+    // The stored email is a snapshot; the joined user row is the truth when
+    // it still exists.
+    const user = store.users.find((u) => u.id === MEMBER);
+    if (user) {
+      user.name = "Renamed Member";
+      user.email = "renamed@example.com";
+    }
+    const [first] = (await (await list()).json()) as ProjectBody[];
+    expect(first?.owner).toEqual({
+      id: MEMBER,
+      name: "Renamed Member",
+      email: "renamed@example.com",
+    });
+  });
+
+  it("stays ONE query for the whole list — no per-project count round trip", async () => {
+    // The N+1 guard, and the reason `_count` is in the select rather than a
+    // loop: with four projects on the wire, the counts must cost zero extra
+    // reads, not eight.
+    const findMany = vi.spyOn(db.project, "findMany");
+    const counts = [
+      vi.spyOn(db.agent, "count"),
+      vi.spyOn(db.secret, "count"),
+      vi.spyOn(db.appConnection, "count"),
+    ];
+
+    const rows = (await (await list()).json()) as ProjectBody[];
+
+    expect(rows).toHaveLength(4);
+    expect(findMany).toHaveBeenCalledTimes(1);
+    for (const spy of counts) expect(spy).not.toHaveBeenCalled();
+
+    findMany.mockRestore();
+    for (const spy of counts) spy.mockRestore();
   });
 
   it("agrees with GET /:projectId — everything listed is readable, and vice versa", async () => {
@@ -1199,6 +1351,23 @@ describe("POST /projects (create)", () => {
     expect(row?.organizationId).toBe(ORG);
     expect(row?.createdByUserId).toBe(MEMBER);
     expect(userBinding(body.id, MEMBER)?.role).toBe("owner");
+  });
+
+  it("returns the same shape the list does — counts and owner, on the create", async () => {
+    // All four project endpoints share one `ProjectRow`, so the web's single
+    // `Project` type does not have to hedge. A fresh project has its seeded
+    // default agent and nothing else, and its creator is the caller.
+    store.sessionUserId = MEMBER;
+    const body = (await (
+      await create({ name: "Shaped" }, {})
+    ).json()) as ProjectBody;
+    expect(body.agentCount).toBe(1); // the default agent, seeded in the same write
+    expect(body.resourceCount).toBe(0);
+    expect(body.owner).toEqual({
+      id: MEMBER,
+      name: null,
+      email: "member@example.com",
+    });
   });
 
   it("makes the new project immediately manageable by its creator", async () => {
@@ -1279,6 +1448,7 @@ describe("POST /projects (create)", () => {
         name: `Bulk ${n}`,
         slug: `bulk-${n}`,
         createdByUserId: ADMIN,
+        createdByUserEmail: "admin@example.com",
         createdAt: at(100 + n),
       });
     }
@@ -1388,6 +1558,9 @@ describe("GET /v1/projects/:projectId", () => {
       name: "Alpha",
       slug: "alpha",
       createdAt: at(0).toISOString(),
+      agentCount: 2,
+      resourceCount: 2,
+      owner: { id: MEMBER, name: null, email: "member@example.com" },
     });
   });
 
@@ -2107,6 +2280,7 @@ describe("DELETE /v1/projects/:projectId", () => {
       name: "Epsilon",
       slug: "epsilon",
       createdByUserId: MEMBER,
+      createdByUserEmail: "member@example.com",
       createdAt: at(30),
     });
     const res = await remove("proj-1");

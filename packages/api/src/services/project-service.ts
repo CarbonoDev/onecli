@@ -27,12 +27,53 @@ import { CAPS } from "../lib/env";
 //   3. writes are conditional `updateMany`/`deleteMany` so a lost race is a
 //      404, not the P2025 500 a bare `update()`/`delete()` would surface.
 
+/**
+ * Whoever a project is attributed to — its creator, so the projects grid can
+ * render `Owned by <name>`.
+ *
+ * Every field is nullable and that is not defensiveness. `createdByUserId` and
+ * `createdByUserEmail` are both OPTIONAL columns — every creation path sets
+ * them today, but rows predating the columns need not — and `createdByUser` is
+ * an optional relation, so a deleted user leaves the id and the DENORMALIZED
+ * email behind with no row to join. That email is exactly why the column
+ * exists: it is what the client renders once the name is gone.
+ *
+ * `owner` itself is null only when the project records no creator AT ALL. The
+ * client rule is therefore: render `name`, else `email`, else no owner line.
+ */
+export interface ProjectOwner {
+  id: string | null;
+  name: string | null;
+  email: string | null;
+}
+
 /** A project row in the client's `Project` shape (`createdAt` as ISO string). */
 export interface ProjectRow {
   id: string;
   name: string | null;
   slug: string | null;
   createdAt: string;
+  /** Agents living in THIS project. */
+  agentCount: number;
+  /**
+   * This project's own resource inventory: its secrets PLUS its app
+   * connections, as one number ("14 resources" on the card).
+   *
+   * Deliberately NOT `getResourceCounts` (counts-service.ts). That one serves
+   * a single project's dashboard tiles and folds in the ORG-scoped secrets and
+   * connections every project shares. On a comparison grid that would add the
+   * same constant to every card, so an empty project and a stocked one would
+   * read alike. A card counts only rows that carry its own `projectId`.
+   *
+   * No status or type filter, deliberately: a project-scoped `listSecrets` /
+   * `listConnections` filters on `projectId` alone (see `scopeWhere`), so this
+   * is exactly the number of rows the user finds after clicking through. A
+   * card that says 14 over a page that lists 12 is worse than no number.
+   *
+   * Agents are NOT included — the grid renders them as their own noun.
+   */
+  resourceCount: number;
+  owner: ProjectOwner | null;
 }
 
 /** What a delete actually removed. */
@@ -54,6 +95,11 @@ export interface ProjectDeleteResult {
   };
 }
 
+/**
+ * The lean select every RESOLVE uses (`requireProject`). Kept lean on purpose:
+ * it runs on the authorization path of every `/v1/projects/:id/*` request,
+ * which needs an id and a name, never an owner join or a count subquery.
+ */
 const projectSelect = {
   id: true,
   name: true,
@@ -62,16 +108,63 @@ const projectSelect = {
   createdByUserId: true,
 } as const;
 
+/**
+ * The select behind every CLIENT-FACING project row (list, get, create,
+ * rename), so all four endpoints return the one `ProjectRow` shape and the web
+ * client's single `Project` type stays honest about every one of them.
+ *
+ * Cost is CONSTANT in the number of projects — verified against Postgres, not
+ * assumed. The list costs exactly two statements however many cards it feeds:
+ *
+ *  1. the rows, with all three `_count`s as GROUPED `LEFT JOIN`s in the same
+ *     SELECT (`GROUP BY project_id` per child table, joined on `projects.id`);
+ *  2. one batched `users WHERE id IN (…)` for the owner names.
+ *
+ * The second statement is the price of a NAME: `createdByUserEmail` alone
+ * needs no join, but the card reads `Owned by <name>`. It is one query, not
+ * one per project — dropping the relation to save it would cost the name.
+ */
+const projectRowSelect = {
+  ...projectSelect,
+  createdByUserEmail: true,
+  createdByUser: { select: { name: true, email: true } },
+  _count: { select: { agents: true, secrets: true, appConnections: true } },
+} as const;
+
+const toOwner = (row: {
+  createdByUserId: string | null;
+  createdByUserEmail: string | null;
+  createdByUser: { name: string | null; email: string } | null;
+}): ProjectOwner | null => {
+  // Nothing recorded — an unattributed project (a seeded default), not a
+  // deleted user. The client shows no owner line rather than "Owned by null".
+  if (!row.createdByUserId && !row.createdByUserEmail) return null;
+  return {
+    id: row.createdByUserId,
+    name: row.createdByUser?.name ?? null,
+    // Live email first (a user may have changed it since); the stored one is
+    // the survivor when the relation is gone.
+    email: row.createdByUser?.email ?? row.createdByUserEmail,
+  };
+};
+
 const toProjectRow = (row: {
   id: string;
   name: string | null;
   slug: string | null;
   createdAt: Date;
+  createdByUserId: string | null;
+  createdByUserEmail: string | null;
+  createdByUser: { name: string | null; email: string } | null;
+  _count: { agents: number; secrets: number; appConnections: number };
 }): ProjectRow => ({
   id: row.id,
   name: row.name,
   slug: row.slug,
   createdAt: row.createdAt.toISOString(),
+  agentCount: row._count.agents,
+  resourceCount: row._count.secrets + row._count.appConnections,
+  owner: toOwner(row),
 });
 
 /**
@@ -166,14 +259,23 @@ export const requireManageableProject = async (
 export const getProject = async (
   organizationId: string,
   projectId: string,
-): Promise<ProjectRow> =>
-  toProjectRow(await requireProject(organizationId, projectId));
+): Promise<ProjectRow> => {
+  // Rule 1's org-scoped `findFirst`, same as `requireProject` — repeated
+  // rather than delegated so the wider client-facing select stays OFF
+  // `requireProject`, which every write route calls to authorize.
+  const row = await db.project.findFirst({
+    where: { id: projectId, organizationId },
+    select: projectRowSelect,
+  });
+  if (!row) throw new ServiceError("NOT_FOUND", "Project not found.");
+  return toProjectRow(row);
+};
 
 const listAllProjects = async (organizationId: string): Promise<ProjectRow[]> =>
   (
     await db.project.findMany({
       where: { organizationId },
-      select: projectSelect,
+      select: projectRowSelect,
       orderBy: [{ createdAt: "asc" }, { id: "asc" }],
     })
   ).map(toProjectRow);
@@ -226,7 +328,7 @@ export const listProjects = async (
           },
         },
       },
-      select: projectSelect,
+      select: projectRowSelect,
       orderBy: [{ createdAt: "asc" }, { id: "asc" }],
     })
   ).map(toProjectRow);
@@ -325,7 +427,7 @@ export const createProject = async (
         ...defaultProjectSeed(userId, userEmail),
         accessBindings: { create: { userId, role: "owner" } },
       },
-      select: projectSelect,
+      select: projectRowSelect,
     });
 
   let row;
@@ -376,7 +478,7 @@ export const renameProject = async (
 
   const row = await db.project.findFirst({
     where: { id: projectId, organizationId },
-    select: projectSelect,
+    select: projectRowSelect,
   });
   if (!row) throw new ServiceError("NOT_FOUND", "Project not found.");
   return toProjectRow(row);

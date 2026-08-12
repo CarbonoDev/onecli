@@ -4,7 +4,6 @@ import { useState } from "react";
 import { UserPlus } from "lucide-react";
 import { Button } from "@onecli/ui/components/button";
 import { Badge } from "@onecli/ui/components/badge";
-import { Card } from "@onecli/ui/components/card";
 import {
   Table,
   TableBody,
@@ -13,6 +12,7 @@ import {
   TableHeader,
   TableRow,
 } from "@onecli/ui/components/table";
+import { TableCard } from "@/components/table-card";
 import { useAuth } from "@/providers/auth-provider";
 import type { OrgMemberListRow } from "@/lib/api";
 import { MemberRowActions } from "./member-row-actions";
@@ -45,7 +45,7 @@ export const MembersTable = ({ members }: MembersTableProps) => {
           Invite member
         </Button>
       </div>
-      <Card className="overflow-hidden p-0">
+      <TableCard>
         <Table>
           <TableHeader>
             <TableRow>
@@ -102,7 +102,7 @@ export const MembersTable = ({ members }: MembersTableProps) => {
             ))}
           </TableBody>
         </Table>
-      </Card>
+      </TableCard>
       <InviteDialog open={inviteOpen} onOpenChange={setInviteOpen} />
     </div>
   );

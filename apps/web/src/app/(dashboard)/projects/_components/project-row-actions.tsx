@@ -18,6 +18,7 @@ import {
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle,
@@ -176,6 +177,9 @@ export const ProjectRowActions = ({
             variant="ghost"
             size="icon"
             className="size-8"
+            aria-label={
+              displayName ? `Actions for ${displayName}` : "Project actions"
+            }
             disabled={rename.isPending || remove.isPending}
           >
             {rename.isPending || remove.isPending ? (
@@ -221,6 +225,13 @@ export const ProjectRowActions = ({
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Rename {displayName || "this project"}</DialogTitle>
+            {/* Says what a rename does NOT touch, which is the question
+                someone hesitating over this dialog actually has. Names are
+                deliberately non-unique and carry no identity. */}
+            <DialogDescription>
+              Only the display name changes. The project&apos;s ID, agents,
+              keys, connections and who can access it all stay as they are.
+            </DialogDescription>
           </DialogHeader>
           <div className="space-y-2 py-2">
             <Label htmlFor={`rename-project-${project.id}`}>Name</Label>
@@ -276,6 +287,13 @@ export const ProjectRowActions = ({
           <DialogContent>
             <DialogHeader>
               <DialogTitle>Manage project access</DialogTitle>
+              {/* The shell's description IS its state: the spinner below is
+                  the only thing on screen, and this is what it is waiting
+                  for. Replaced by the real dialog's description the moment
+                  the bindings land. */}
+              <DialogDescription>
+                Loading the people and groups this project is shared with.
+              </DialogDescription>
             </DialogHeader>
             <div className="flex items-center justify-center py-8">
               <Loader2 className="text-muted-foreground size-4 animate-spin" />

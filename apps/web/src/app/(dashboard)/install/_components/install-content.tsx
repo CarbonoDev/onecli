@@ -107,7 +107,12 @@ export const InstallContent = () => {
       </div>
 
       <div className="flex max-w-2xl flex-col gap-2">
-        <ol className="list-none">
+        {/* role="list" is NOT redundant here: this <ol> is explicitly
+            `list-none` (the steps render their own numbers), and WebKit drops
+            the implicit list role when list-style is none — so on
+            Safari/VoiceOver this would announce no item count. Do not strip as
+            redundant ARIA. */}
+        <ol role="list" className="list-none">
           <InstallStep
             number={1}
             title="Choose your tool"

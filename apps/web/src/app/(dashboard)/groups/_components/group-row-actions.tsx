@@ -83,6 +83,7 @@ export const GroupRowActions = ({ group }: GroupRowActionsProps) => {
             variant="ghost"
             size="icon"
             className="size-8"
+            aria-label={`Actions for ${group.name}`}
             disabled={rename.isPending || remove.isPending}
           >
             {rename.isPending || remove.isPending ? (

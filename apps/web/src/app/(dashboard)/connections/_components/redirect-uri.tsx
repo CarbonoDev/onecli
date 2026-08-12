@@ -50,6 +50,7 @@ export const RedirectUri = ({ provider }: { provider: string }) => {
         </code>
         <button
           type="button"
+          aria-label="Copy redirect URI"
           onClick={() => copy(redirectUri)}
           className="shrink-0 text-muted-foreground transition-colors hover:text-foreground"
         >

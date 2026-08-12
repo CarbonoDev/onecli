@@ -270,16 +270,22 @@ model User {
 }
 
 model ApiKey {
-  id             String   @id @default(uuid())
-  scope          String   @default("project") // "project" | "organization"
-  projectId      String?  @map("project_id")
-  organizationId String?  @map("organization_id")
-  userId         String   @map("user_id")
-  userEmail      String   @map("user_email")
-  key            String   @unique // "oc_..." or "oc_org_..." prefix
+  id             String    @id @default(uuid())
+  scope          String    @default("project") // "project" | "organization"
+  projectId      String?   @map("project_id")
+  organizationId String?   @map("organization_id")
+  userId         String    @map("user_id")
+  userEmail      String    @map("user_email")
+  key            String    @unique // "oc_..." or "oc_org_..." prefix
   name           String?
-  createdAt      DateTime @default(now()) @map("created_at")
-  updatedAt      DateTime @updatedAt @map("updated_at")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+  // Newest observed *successful* authentication with this key, written back
+  // throttled (see API_KEY_LAST_USED_THROTTLE_MS) rather than per request —
+  // so it lags reality by at most the throttle window and never puts a write
+  // on the auth hot path. Null = never used since the column landed (or since
+  // the key was last regenerated, which mints a fresh secret in place).
+  lastUsedAt     DateTime? @map("last_used_at")
 
   user         User          @relation(fields: [userId], references: [id])
   project      Project?      @relation(fields: [projectId], references: [id])

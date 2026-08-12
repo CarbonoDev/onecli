@@ -47,7 +47,10 @@ export const userRoutes = () => {
   app.get("/api-key", async (c) => {
     const auth = c.get("auth");
     const projectId = requireProjectId(auth);
-    const { apiKey, created } = await ensureApiKey(auth.userId, { projectId });
+    const { apiKey, created, lastUsedAt, createdAt } = await ensureApiKey(
+      auth.userId,
+      { projectId },
+    );
     if (created) {
       await recordAuditEvent({
         projectId,
@@ -59,7 +62,10 @@ export const userRoutes = () => {
         metadata: { scope: "project", autoProvisioned: true },
       });
     }
-    return c.json({ apiKey });
+    // `lastUsedAt` is additive — existing clients (the CLI reads `apiKey`)
+    // are untouched, and it is what tells an operator whether a key that
+    // leaked is still being presented.
+    return c.json({ apiKey, lastUsedAt, createdAt });
   });
 
   // POST /user/api-key/regenerate

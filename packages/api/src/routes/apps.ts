@@ -1,6 +1,5 @@
 import { Hono } from "hono";
 import { setCookie, getCookie, deleteCookie } from "hono/cookie";
-import { z } from "zod";
 import { db } from "@onecli/db";
 import type { ApiEnv } from "../types";
 import { authMiddleware, requireProjectId, auth } from "../middleware/auth";
@@ -44,31 +43,13 @@ import {
 import { getConnectionHooks } from "../providers";
 import {
   getAppConfig,
-  upsertAppConfig,
-  deleteAppConfig,
   saveAppConfigWithoutDisconnect,
-  toggleAppConfigEnabled,
-  listConfiguredProviders,
 } from "../services/app-config-service";
-import { parseConfigBody } from "../validations/app-config";
-import {
-  withAudit,
-  AUDIT_ACTIONS,
-  AUDIT_SERVICES,
-  AUDIT_SOURCE,
-} from "../services/audit-service";
-import {
-  initBlocklistDefaults,
-  getBlocklistState,
-  toggleBlocklistRule,
-  activateBlocklistHost,
-  removeBlocklistRule,
-} from "../services/app-blocklist-service";
+import { initBlocklistDefaults } from "../services/app-blocklist-service";
+import { registerAppConfigRoutes } from "./app-config";
 import { logger } from "../lib/logger";
 
 const docsBaseURL = "https://onecli.sh/docs/guides/credential-stubs";
-
-const toggleSchema = z.object({ enabled: z.boolean() });
 
 export const appRoutes = () => {
   const app = new Hono<ApiEnv>();
@@ -211,19 +192,21 @@ export const appRoutes = () => {
     return c.json(updated);
   });
 
-  // ── GET /apps/configured ── providers with an enabled app config ───────
-  // Registered before GET /:provider so the static path isn't swallowed by
-  // the param route.
-  app.get("/configured", authMiddleware, async (c) => {
-    const auth = c.get("auth");
-    // EE (orgAppConfig seam): org-level configs count as configured for every
-    // project in the org. OSS: no seam — project rows only, as before.
-    const [providers, orgConfigs] = await Promise.all([
-      listConfiguredProviders({ projectId: requireProjectId(auth) }),
-      getOrgAppConfig()?.listEnabledConfigs(auth.organizationId),
-    ]);
-    if (!orgConfigs) return c.json(providers);
-    return c.json([...new Set([...providers, ...Object.keys(orgConfigs)])]);
+  // ── /apps/configured, /apps/:provider/config*, /apps/:provider/blocklist* ──
+  // Shared with `/v1/org/apps/*` (routes/org/apps.ts) — same handlers, injected
+  // scope. Registered HERE so the static `/configured` still wins over the
+  // `/:provider` param route below.
+  registerAppConfigRoutes(app, {
+    guard: authMiddleware,
+    // Configs and blocklist writes belong to the PROJECT alone.
+    resolveScope: (auth) => ({ projectId: requireProjectId(auth) }),
+    // Both keys: the blocklist panel also shows the org's blocks (locked), and
+    // `scopeWhere`/`getBlocklistState` derive that inheritance from the pair.
+    readScope: (auth) => ({
+      projectId: requireProjectId(auth),
+      organizationId: auth.organizationId,
+    }),
+    auditScope: (auth) => ({ projectId: requireProjectId(auth) }),
   });
 
   // ── GET /apps/available ── app-availability allowlist for this project ──
@@ -841,195 +824,6 @@ export const appRoutes = () => {
       return c.json(toAppPermissionDefinitionSummary(def));
     },
   );
-
-  // ── GET /apps/:provider/config ── get app config ───────────────────────
-  app.get("/:provider/config", authMiddleware, async (c) => {
-    const auth = c.get("auth");
-    const provider = c.req.param("provider")!;
-    const config = await getAppConfig(
-      { projectId: requireProjectId(auth) },
-      provider,
-    );
-    if (config?.enabled) return c.json(config);
-
-    // EE (orgAppConfig seam): no enabled project row — report the org-level
-    // config as configured, marked `source: "organization"` so the project
-    // config form knows there is no project row to edit. Org settings are
-    // deliberately not exposed on the project surface.
-    const orgConfig = await getOrgAppConfig()?.getEnabledConfig(
-      auth.organizationId,
-      provider,
-    );
-    if (orgConfig) {
-      return c.json({
-        hasCredentials: orgConfig.hasCredentials,
-        enabled: true,
-        source: "organization",
-      });
-    }
-
-    return c.json(config ?? { hasCredentials: false, enabled: false });
-  });
-
-  // ── POST /apps/:provider/config ── upsert app config ──────────────────
-  app.post("/:provider/config", authMiddleware, async (c) => {
-    const auth = c.get("auth");
-    const provider = c.req.param("provider")!;
-
-    const appDef = getApp(provider);
-    if (!appDef?.configurable) {
-      return c.json(
-        { error: `Provider "${provider}" does not support app configuration` },
-        400,
-      );
-    }
-
-    const body = await c.req.json().catch(() => null);
-    const values = parseConfigBody(body, appDef.configurable.fields);
-    if (!values) {
-      return c.json({ error: "Invalid request body" }, 400);
-    }
-
-    const projectId = requireProjectId(auth);
-    await withAudit(
-      () =>
-        upsertAppConfig(
-          { projectId },
-          provider,
-          values,
-          appDef.configurable!.fields,
-        ),
-      () => ({
-        projectId,
-        userId: auth.userId,
-        userEmail: auth.userEmail,
-        action: AUDIT_ACTIONS.UPDATE,
-        service: AUDIT_SERVICES.APP_CONFIG,
-        source: AUDIT_SOURCE.API,
-        metadata: { provider },
-      }),
-    );
-
-    return c.json({ success: true }, 201);
-  });
-
-  // ── DELETE /apps/:provider/config ── delete app config ─────────────────
-  app.delete("/:provider/config", authMiddleware, async (c) => {
-    const auth = c.get("auth");
-    const provider = c.req.param("provider")!;
-    const projectId = requireProjectId(auth);
-    await withAudit(
-      () => deleteAppConfig({ projectId }, provider),
-      () => ({
-        projectId,
-        userId: auth.userId,
-        userEmail: auth.userEmail,
-        action: AUDIT_ACTIONS.DELETE,
-        service: AUDIT_SERVICES.APP_CONFIG,
-        source: AUDIT_SOURCE.API,
-        metadata: { provider },
-      }),
-    );
-    return c.body(null, 204);
-  });
-
-  // ── PATCH /apps/:provider/config/toggle ── enable/disable app config ───
-  app.patch("/:provider/config/toggle", authMiddleware, async (c) => {
-    const auth = c.get("auth");
-    const provider = c.req.param("provider")!;
-    const body = await c.req.json().catch(() => null);
-    const parsed = toggleSchema.safeParse(body);
-    if (!parsed.success) {
-      return c.json(
-        { error: parsed.error.issues[0]?.message ?? "Invalid request body" },
-        400,
-      );
-    }
-    const projectId = requireProjectId(auth);
-    await withAudit(
-      () =>
-        toggleAppConfigEnabled({ projectId }, provider, parsed.data.enabled),
-      () => ({
-        projectId,
-        userId: auth.userId,
-        userEmail: auth.userEmail,
-        action: AUDIT_ACTIONS.UPDATE,
-        service: AUDIT_SERVICES.APP_CONFIG,
-        source: AUDIT_SOURCE.API,
-        metadata: { provider, enabled: parsed.data.enabled },
-      }),
-    );
-    return c.json({ success: true });
-  });
-
-  // ── GET /apps/:provider/blocklist ── list blocklist state ─────────────
-  app.get("/:provider/blocklist", authMiddleware, async (c) => {
-    const auth = c.get("auth");
-    const projectId = requireProjectId(auth);
-    const provider = c.req.param("provider")!;
-    const appDef = getApp(provider);
-    if (!appDef) return c.json({ error: "Unknown provider" }, 404);
-
-    const states = await getBlocklistState(
-      { projectId, organizationId: auth.organizationId },
-      provider,
-      appDef.blocklist ?? [],
-    );
-    return c.json(states);
-  });
-
-  // ── POST /apps/:provider/blocklist ── activate one of the app's hosts ──
-  app.post("/:provider/blocklist", authMiddleware, async (c) => {
-    const auth = c.get("auth");
-    const projectId = requireProjectId(auth);
-    const provider = c.req.param("provider")!;
-    const appDef = getApp(provider);
-    if (!appDef) return c.json({ error: "Unknown provider" }, 404);
-
-    const body = await c.req.json().catch(() => null);
-    if (!body) return c.json({ error: "Invalid request body" }, 400);
-
-    // Blocking an arbitrary host is a policy rule (POST /v1/policy/rules) now;
-    // this surface only toggles the hosts the app itself declares.
-    if (!body.hostId) {
-      return c.json({ error: "Provide { hostId }" }, 400);
-    }
-    const result = await activateBlocklistHost(
-      { projectId },
-      provider,
-      body.hostId,
-      appDef.blocklist ?? [],
-    );
-
-    invalidateGatewayCache(c.req.raw);
-    return c.json(result, 201);
-  });
-
-  // ── PATCH /apps/:provider/blocklist/:ruleId ── toggle enabled ─────────
-  app.patch("/:provider/blocklist/:ruleId", authMiddleware, async (c) => {
-    const auth = c.get("auth");
-    const projectId = requireProjectId(auth);
-    const ruleId = c.req.param("ruleId")!;
-
-    const body = await c.req.json().catch(() => null);
-    if (body?.enabled === undefined)
-      return c.json({ error: "enabled is required" }, 400);
-
-    await toggleBlocklistRule({ projectId }, ruleId, body.enabled);
-    invalidateGatewayCache(c.req.raw);
-    return c.json({ success: true });
-  });
-
-  // ── DELETE /apps/:provider/blocklist/:ruleId ── remove blocklist rule ──
-  app.delete("/:provider/blocklist/:ruleId", authMiddleware, async (c) => {
-    const auth = c.get("auth");
-    const projectId = requireProjectId(auth);
-    const ruleId = c.req.param("ruleId")!;
-
-    await removeBlocklistRule({ projectId }, ruleId);
-    invalidateGatewayCache(c.req.raw);
-    return c.body(null, 204);
-  });
 
   return app;
 };

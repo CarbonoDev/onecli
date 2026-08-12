@@ -23,6 +23,7 @@ import {
   AlertDialogTrigger,
 } from "@onecli/ui/components/alert-dialog";
 import { deleteSecret as defaultDeleteSecret } from "@/lib/actions/secrets";
+import type { PageScope } from "@/lib/api";
 import type { SecretActions } from "./types";
 import {
   type InjectionConfig,
@@ -51,6 +52,8 @@ interface SecretCardProps {
   secretActions?: SecretActions;
   readOnly?: boolean;
   badge?: string;
+  /** Forwarded to the edit dialog — see `SecretDialog`'s `pageScope`. */
+  pageScope?: PageScope;
 }
 
 export const SecretCard = ({
@@ -59,6 +62,7 @@ export const SecretCard = ({
   secretActions,
   readOnly,
   badge,
+  pageScope = "project",
 }: SecretCardProps) => {
   const invalidateCache = useInvalidateGatewayCache();
   const queryClient = useQueryClient();
@@ -101,11 +105,14 @@ export const SecretCard = ({
               </Badge>
               {secret.valueSource === "onepassword" && (
                 <Badge variant="outline" className="gap-1 text-[10px]">
+                  {/* SVG: the Next image optimizer 400s on it, so serve it
+                      straight from `public/` (see AppIcon). */}
                   <Image
                     src="/icons/onepassword.svg"
                     alt=""
                     width={12}
                     height={12}
+                    unoptimized
                   />
                   1Password
                 </Badge>
@@ -193,6 +200,7 @@ export const SecretCard = ({
                 variant="ghost"
                 size="icon"
                 className="size-7"
+                aria-label={`Edit ${secret.name}`}
                 onClick={() => setEditOpen(true)}
               >
                 <Pencil className="size-3.5" />
@@ -200,7 +208,12 @@ export const SecretCard = ({
 
               <AlertDialog>
                 <AlertDialogTrigger asChild>
-                  <Button variant="ghost" size="icon" className="size-7">
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="size-7"
+                    aria-label={`Delete ${secret.name}`}
+                  >
                     <Trash2 className="size-3.5" />
                   </Button>
                 </AlertDialogTrigger>
@@ -237,6 +250,7 @@ export const SecretCard = ({
           secret={secret}
           onSaved={onUpdate}
           secretActions={secretActions}
+          pageScope={pageScope}
         />
       )}
     </>

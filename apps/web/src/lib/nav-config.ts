@@ -7,7 +7,6 @@ import {
   ChartNoAxesColumn,
   ChevronLeft,
   Download,
-  Fingerprint,
   FolderKanban,
   Globe,
   KeyRound,
@@ -193,11 +192,19 @@ export const getSettingsSections = (
   {
     label: "Security",
     items: [
-      // Domains before single sign-on: verifying a domain is the prerequisite
-      // for it. `AtSign` rather than the globe these are usually drawn with,
-      // because `Globe` already means Instance one section up.
+      // `AtSign` rather than the globe domains are usually drawn with, because
+      // `Globe` already means Instance one section up.
+      //
+      // There is deliberately NO "Single sign-on" entry. Real federation means
+      // per-org NextAuth providers resolved at sign-in by home-realm discovery
+      // — auth infrastructure, not a settings page — and a settings page
+      // without it would be worse than nothing: a "Require SSO" toggle with no
+      // `SessionEnforcer` behind it is a FALSE SECURITY ASSURANCE. An admin
+      // flips it, sees it stay on, and believes their org is SSO-mandatory
+      // while every Google login keeps working. The codebase already reflects
+      // this retreat (see `UpdateOrgMemberInput` — the `ssoExempt` arm is
+      // gone); do not re-add a shell here ahead of the enforcement.
       { title: "Domains", url: "/settings/domains", icon: AtSign },
-      { title: "Single sign-on", url: "/settings/sso", icon: Fingerprint },
       { title: "Encryption", url: "/settings/encryption", icon: ShieldCheck },
     ],
   },

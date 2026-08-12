@@ -74,12 +74,24 @@ export interface Connection {
   connectedAt: string;
 }
 
-// A project row as returned by the project CRUD routes (rename / create).
+// A project row as returned by the project routes (list / get / create /
+// rename — all four return this same shape).
+//
+// `resourceCount` is this project's OWN secrets + app connections; it
+// deliberately excludes org-scoped resources shared by every project, so the
+// numbers are comparable across cards. Agents are counted separately.
+//
+// `ownerEmail` is the creator's email as STORED on the project — provenance,
+// not live identity, so it outlives a deleted account and does not follow an
+// email change. Render `Owned by <ownerEmail>`; omit the line when null.
 export interface Project {
   id: string;
   name: string | null;
   slug: string | null;
   createdAt: string;
+  agentCount: number;
+  resourceCount: number;
+  ownerEmail: string | null;
 }
 
 // Project access bindings (the human sharing surface for a project). `role` is
@@ -193,6 +205,27 @@ export interface GroupMemberRow {
   email: string;
   name: string | null;
   addedAt: string;
+}
+
+/**
+ * An organization's claimed email domain.
+ *
+ * `verifiedAt` is the WHOLE state machine — null is claimed-but-pending,
+ * non-null is verified — and every trust decision reads it rather than the
+ * row's mere existence. There is deliberately no `failed` state: a failed
+ * CHECK is not a property of the domain (DNS may propagate a minute later), so
+ * a failed verification leaves the row untouched and the outcome lives in
+ * component state until the next check.
+ */
+export interface OrgDomainRow {
+  id: string;
+  domain: string;
+  verifiedAt: string | null;
+  /** The TXT record's owner name — `_onecli-challenge.<domain>`. */
+  recordName: string;
+  /** The TXT record's value, published verbatim. */
+  recordValue: string;
+  createdAt: string;
 }
 
 // Group→role mappings (step 15): map an IdP group to an org role, priority-ordered.

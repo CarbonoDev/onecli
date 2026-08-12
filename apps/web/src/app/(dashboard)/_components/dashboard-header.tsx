@@ -183,7 +183,12 @@ export const DashboardHeader = () => {
       <SidebarTrigger className="-ml-1" />
       <Separator orientation="vertical" className="mr-2 h-4!" />
       <Breadcrumb className="min-w-0 flex-1 overflow-hidden">
-        <BreadcrumbList className="flex-nowrap overflow-hidden">
+        {/* role="list" is NOT redundant: BreadcrumbList renders an <ol>,
+            Tailwind v4 preflight sets `list-style: none` on it, and WebKit
+            drops the implicit list role when it does — so on Safari/VoiceOver
+            the breadcrumb announces no item count. Passed as a prop, so the
+            shadcn component is untouched. Do not strip as redundant ARIA. */}
+        <BreadcrumbList role="list" className="flex-nowrap overflow-hidden">
           {renderedCrumbs.map((crumb, i) => {
             const isLast = i === renderedCrumbs.length - 1;
             return (

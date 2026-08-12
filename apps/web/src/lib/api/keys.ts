@@ -38,7 +38,18 @@ export const queryKeys = {
   },
   secrets: {
     all: () => ["secrets", ...scope()] as const,
-    list: () => [...queryKeys.secrets.all(), "list"] as const,
+    /**
+     * Scope-parameterized like `connections.list`, and for the same reason: the
+     * org page reads `/v1/org/secrets` and the project page `/v1/secrets`, two
+     * different row sets that must never share a cache entry. Callers needing a
+     * further split append a trailing segment (`"connected"`,
+     * `"policy-target"`) — still under `all()`, so ONE invalidation at
+     * `secrets.all()` breadth covers every variant. Keep it that broad: an org
+     * secret created here becomes an INHERITED row on every project's
+     * Connections page, and narrowing to the org key would leave those stale.
+     */
+    list: (pageScope: PageScope = "project") =>
+      [...queryKeys.secrets.all(), "list", pageScope] as const,
   },
   policy: {
     all: () => ["policy", ...scope()] as const,
@@ -54,6 +65,15 @@ export const queryKeys = {
     list: () => [...queryKeys.groups.all(), "list"] as const,
     members: (groupId: string) =>
       [...queryKeys.groups.all(), groupId, "members"] as const,
+  },
+  domains: {
+    /**
+     * `scope()`-prefixed: a domain claim belongs to ONE organization, so an org
+     * switch must refetch rather than show the previous org's claims under the
+     * new org's name.
+     */
+    all: () => ["domains", ...scope()] as const,
+    list: () => [...queryKeys.domains.all(), "list"] as const,
   },
   roleMappings: {
     all: () => ["role-mappings", ...scope()] as const,
@@ -152,6 +172,16 @@ export const queryKeys = {
   budgets: {
     all: () => ["budgets", ...scope()] as const,
     list: () => [...queryKeys.budgets.all(), "list"] as const,
+  },
+  usage: {
+    /**
+     * `scope()`-prefixed even though `/v1/org/usage` takes no project: the
+     * response IS org-specific (it aggregates the projects the caller may reach
+     * in the SELECTED org), so an org switch must refetch rather than show the
+     * previous org's numbers under the new org's name.
+     */
+    all: () => ["usage", ...scope()] as const,
+    summary: () => [...queryKeys.usage.all(), "summary"] as const,
   },
   billing: {
     all: () => ["billing", ...scope()] as const,

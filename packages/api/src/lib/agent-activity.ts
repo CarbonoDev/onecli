@@ -1,4 +1,4 @@
-import { formatRelative } from "./format";
+import { lastActivity, type LastActivity } from "./last-activity";
 
 /**
  * Lookback for an agent's `lastSeenAt` on the agents list: the newest
@@ -10,15 +10,7 @@ import { formatRelative } from "./format";
  */
 export const LAST_SEEN_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 
-const FRESH_WINDOW_MS = 60 * 60 * 1000;
-
-export interface AgentLastSeen {
-  label: string;
-  /** Exact timestamp for a hover title; null when there is nothing to show. */
-  exactAt: Date | null;
-  /** Seen within the last hour — the card renders its activity dot. */
-  fresh: boolean;
-}
+export type AgentLastSeen = LastActivity;
 
 /**
  * The card-facing reading of `lastSeenAt`. Agents have no presence — no
@@ -32,22 +24,13 @@ export const agentLastSeen = (
   lastSeenAt: Date | string | null,
   createdAt: Date | string,
   now = Date.now(),
-): AgentLastSeen => {
-  if (lastSeenAt !== null) {
-    const seen = new Date(lastSeenAt);
-    const relative = formatRelative(seen.toISOString(), now);
-    return {
-      // formatRelative capitalizes its "Just now" arm for standalone use;
-      // mid-sentence it reads broken.
-      label: `Last seen ${relative === "Just now" ? "just now" : relative}`,
-      exactAt: seen,
-      fresh: now - seen.getTime() < FRESH_WINDOW_MS,
-    };
-  }
-  const neverUsed = now - new Date(createdAt).getTime() < LAST_SEEN_WINDOW_MS;
-  return {
-    label: neverUsed ? "Never used" : "No recent activity",
-    exactAt: null,
-    fresh: false,
-  };
-};
+): AgentLastSeen =>
+  lastActivity({
+    at: lastSeenAt,
+    createdAt,
+    verb: "Last seen",
+    // Rolling: the group-by only looked back this far, so that is exactly how
+    // far "no row" is evidence of anything.
+    observedSince: now - LAST_SEEN_WINDOW_MS,
+    now,
+  });

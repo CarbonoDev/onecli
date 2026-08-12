@@ -10,6 +10,7 @@ import * as projectAccess from "./project-access";
 import * as orgMembers from "./org-members";
 import * as invitations from "./invitations";
 import * as groups from "./groups";
+import * as domains from "./domains";
 import * as roleMappings from "./role-mappings";
 import * as counts from "./counts";
 import * as appBlocklist from "./app-blocklist";
@@ -19,6 +20,7 @@ import * as appPermissions from "./app-permissions";
 import * as vaults from "./vaults";
 import * as dropbox from "./dropbox";
 import * as budgets from "./budgets";
+import * as usage from "./usage";
 
 export {
   agents,
@@ -33,6 +35,7 @@ export {
   orgMembers,
   invitations,
   groups,
+  domains,
   roleMappings,
   counts,
   appBlocklist,
@@ -42,6 +45,7 @@ export {
   vaults,
   dropbox,
   budgets,
+  usage,
 };
 export type {
   Agent,
@@ -66,6 +70,7 @@ export type {
   DirectoryListParams,
   GroupRow,
   GroupMemberRow,
+  OrgDomainRow,
   RoleMappingRow,
   CreateRoleMappingInput,
   UpdateRoleMappingInput,
@@ -97,7 +102,8 @@ export type {
   CreateBudgetInput,
   UpdateBudgetInput,
 } from "./budgets";
-export { appsPath } from "./scope";
+export type { UsageSummary, UsageAgentRow } from "./usage";
+export { appsPath, secretsPath } from "./scope";
 export type { PageScope } from "./scope";
 export type { AppConfigStatus } from "./app-config";
 export type { AvailableApps } from "./app-availability";

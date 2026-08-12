@@ -1,4 +1,5 @@
 import { db } from "@onecli/db";
+import type { Prisma } from "@onecli/db";
 import { ServiceError } from "./errors";
 import {
   getRoleResolver,
@@ -33,6 +34,51 @@ export interface ProjectRow {
   name: string | null;
   slug: string | null;
   createdAt: string;
+  /** Agents living in THIS project. */
+  agentCount: number;
+  /**
+   * This project's own resource inventory: its secrets PLUS its app
+   * connections, as one number ("14 resources" on the card).
+   *
+   * OWN means rows carrying this project's `projectId` and nothing else. It
+   * excludes the ORG-scoped secrets and connections every project inherits,
+   * because on a comparison grid those add the SAME constant to every card —
+   * an empty project and a stocked one would read alike.
+   *
+   * Three numbers in this product legitimately differ, and a reader debugging
+   * "the card says 14 but I count 17" needs all three:
+   *
+   *  · HERE (the card) — own rows only, no status or type filter.
+   *  · The Secrets / Connections PAGES — the routes pass both ids, so
+   *    `scopeWhere` takes its `OR` branch and lists own PLUS inherited
+   *    org-scoped rows. The pages already separate the two into own and
+   *    inherited sections, which is the vocabulary this count borrows.
+   *  · The overview TILES (`getResourceCounts`) — inherited rows folded in
+   *    AND connections filtered to `status: "connected"`, split by kind.
+   *
+   * Agents are NOT included — the grid renders them as their own noun.
+   */
+  resourceCount: number;
+  /**
+   * Who the grid attributes the card to — `Owned by <email>`, omitted when
+   * null.
+   *
+   * The DENORMALIZED `createdByUserEmail` column verbatim, deliberately not a
+   * join to the live user. Three things follow, all of them simplifications:
+   *
+   *  · it survives a deleted account. `created_by_user_id` is
+   *    `ON DELETE SET NULL`, so the id goes and this column stays — the owner
+   *    line needs no special case for a departed creator;
+   *  · it opens no disclosure surface. Reading a column already on the project
+   *    row is not the same as joining `users` unfenced, which is a thing
+   *    `listProjectAccess` takes care to scope;
+   *  · it costs no statement. The join would be a second query for every list.
+   *
+   * The trade is that a user who changes their email keeps the old one on the
+   * card until the project is re-created. Accepted: this is provenance, not
+   * live identity.
+   */
+  ownerEmail: string | null;
 }
 
 /** What a delete actually removed. */
@@ -54,6 +100,11 @@ export interface ProjectDeleteResult {
   };
 }
 
+/**
+ * The lean select every RESOLVE uses (`requireProject`). Kept lean on purpose:
+ * it runs on the authorization path of every `/v1/projects/:id/*` request,
+ * which needs an id and a name, never an owner join or a count subquery.
+ */
 const projectSelect = {
   id: true,
   name: true,
@@ -62,17 +113,137 @@ const projectSelect = {
   createdByUserId: true,
 } as const;
 
-const toProjectRow = (row: {
+/**
+ * The select behind every CLIENT-FACING project row (list, get, create,
+ * rename), so all four endpoints return the one `ProjectRow` shape and the web
+ * client's single `Project` type stays honest about every one of them.
+ *
+ * Four statements serve a list of any size: this one, plus the three grouped
+ * counts below.
+ *
+ * The counts are NOT here. Prisma's `_count` would fold them into this same
+ * statement, which reads like the cheap option and is not: it compiles to
+ * `LEFT JOIN (SELECT project_id, COUNT(*) … GROUP BY project_id)` with no
+ * predicate, so Postgres seq-scans and hash-aggregates the WHOLE of `agents`,
+ * `secrets` and `app_connections` — every organization's rows — before joining
+ * away all but the caller's. The org filter cannot be pushed through a grouped
+ * subquery. `countsByProject` below pays three extra round trips to get an
+ * index scan instead.
+ */
+const projectRowSelect = {
+  ...projectSelect,
+  // This column IS the owner — there is deliberately no `createdByUser` join.
+  // The card renders the stored email, so the live user row buys nothing and
+  // would cost a statement: Prisma loads a relation as its own batched
+  // `users WHERE id IN (…)` read, on every list.
+  createdByUserEmail: true,
+} as const;
+
+/** A project's own inventory, as the card splits it. */
+interface ProjectCounts {
+  agents: number;
+  resources: number;
+}
+
+/** The shape `projectRowSelect` yields — the counts arrive separately. */
+interface ProjectRowSource {
   id: string;
   name: string | null;
   slug: string | null;
   createdAt: Date;
-}): ProjectRow => ({
+  createdByUserEmail: string | null;
+}
+
+/**
+ * Inventory for exactly `projectIds`, as THREE grouped counts.
+ *
+ * Three statements, not one per project — the count is grouped, so it stays
+ * constant in the number of cards.
+ *
+ * The point of doing it here rather than as a `_count` on the select is the
+ * PREDICATE. Each statement carries `project_id IN (…)`, so the planner can
+ * reach it through the `project_id` index on every one of the three tables
+ * (verified with EXPLAIN: `Bitmap Index Scan` on `agents_project_id_*`,
+ * `secrets_project_id_idx`, `app_connections_project_id_provider_idx`). On a
+ * small table it will still choose a seq scan, and that is fine — the
+ * difference is that an index is a CANDIDATE at all. The `_count` form emits
+ * `WHERE 1=1` inside a grouped subquery, which no index can serve at any size.
+ *
+ * A project absent from a result simply owns none of that kind; the caller
+ * reads a missing entry as zero. Org-scoped rows carry a NULL `project_id` and
+ * can never match the `IN`, which is what keeps inherited resources out of the
+ * card by construction rather than by filtering afterwards.
+ */
+const countsByProject = async (
+  projectIds: string[],
+): Promise<Map<string, ProjectCounts>> => {
+  const counts = new Map<string, ProjectCounts>();
+  // No projects, no statements: an empty `IN ()` is three pointless round
+  // trips on the common "member with no bindings" path.
+  if (projectIds.length === 0) return counts;
+
+  const where = { projectId: { in: projectIds } };
+  const [agents, secrets, connections] = await Promise.all([
+    db.agent.groupBy({ by: ["projectId"], where, _count: { _all: true } }),
+    db.secret.groupBy({ by: ["projectId"], where, _count: { _all: true } }),
+    db.appConnection.groupBy({
+      by: ["projectId"],
+      where,
+      _count: { _all: true },
+    }),
+  ]);
+
+  const tally = (
+    rows: { projectId: string | null; _count: { _all: number } }[],
+    key: keyof ProjectCounts,
+  ) => {
+    for (const row of rows) {
+      if (!row.projectId) continue;
+      const entry = counts.get(row.projectId) ?? { agents: 0, resources: 0 };
+      entry[key] += row._count._all;
+      counts.set(row.projectId, entry);
+    }
+  };
+
+  tally(agents, "agents");
+  // Both child kinds land on the SAME number — "resources" is their sum.
+  tally(secrets, "resources");
+  tally(connections, "resources");
+  return counts;
+};
+
+const toProjectRow = (
+  row: ProjectRowSource,
+  counts: ProjectCounts,
+): ProjectRow => ({
   id: row.id,
   name: row.name,
   slug: row.slug,
   createdAt: row.createdAt.toISOString(),
+  agentCount: counts.agents,
+  resourceCount: counts.resources,
+  ownerEmail: row.createdByUserEmail,
 });
+
+/** N rows plus their inventory, in three grouped counts however large N is. */
+const toProjectRows = async (
+  rows: ProjectRowSource[],
+): Promise<ProjectRow[]> => {
+  const counts = await countsByProject(rows.map((row) => row.id));
+  return rows.map((row) =>
+    toProjectRow(row, counts.get(row.id) ?? { agents: 0, resources: 0 }),
+  );
+};
+
+/** The single-row twin (get / create / rename), same shape, same counts. */
+const toSingleProjectRow = async (row: ProjectRowSource): Promise<ProjectRow> =>
+  toProjectRow(
+    row,
+    (await countsByProject([row.id])).get(row.id) ?? {
+      agents: 0,
+      resources: 0,
+    },
+  );
 
 /**
  * Resolve a project WITHIN the caller's org. A cross-org (or unknown) id reads
@@ -166,20 +337,43 @@ export const requireManageableProject = async (
 export const getProject = async (
   organizationId: string,
   projectId: string,
-): Promise<ProjectRow> =>
-  toProjectRow(await requireProject(organizationId, projectId));
-
-const listAllProjects = async (organizationId: string): Promise<ProjectRow[]> =>
-  (
-    await db.project.findMany({
-      where: { organizationId },
-      select: projectSelect,
-      orderBy: [{ createdAt: "asc" }, { id: "asc" }],
-    })
-  ).map(toProjectRow);
+): Promise<ProjectRow> => {
+  // Rule 1's org-scoped `findFirst`, same as `requireProject` — repeated
+  // rather than delegated so the wider client-facing select stays OFF
+  // `requireProject`, which every write route calls to authorize.
+  const row = await db.project.findFirst({
+    where: { id: projectId, organizationId },
+    select: projectRowSelect,
+  });
+  if (!row) throw new ServiceError("NOT_FOUND", "Project not found.");
+  return toSingleProjectRow(row);
+};
 
 /**
- * Every project in `organizationId` the caller may USE, oldest first.
+ * Ordering for every listing entry point. Matches `findUserDefaultProject`
+ * (`createdAt asc, id asc`) so the project a caller lands on by default is the
+ * first one a switcher shows.
+ */
+const projectOrder = [
+  { createdAt: "asc" },
+  { id: "asc" },
+] satisfies Prisma.ProjectOrderByWithRelationInput[];
+
+/**
+ * THE authorization boundary for listing projects, as a `where` — the SINGLE
+ * construction behind `listProjects` and `listProjectIds` alike.
+ *
+ * It is a `where` builder rather than a query precisely so a second entry point
+ * can exist without a second copy of the predicate. Two copies would be two
+ * things to keep in step, and the failure mode of drift is silent: a listing
+ * that is one arm wider than the gate leaks project names past their
+ * ProjectAccess bindings. There is one arm-for-arm definition, here, and every
+ * caller runs THIS object verbatim — differing only in `select`.
+ *
+ * `null` is DENY, and is deliberately not `{ id: { in: [] } }` or similar: the
+ * caller must return its empty result without querying at all, which is both
+ * the honest encoding of "no role, nothing to see" and one round trip saved on
+ * the common non-member path.
  *
  * THIS MUST MIRROR `canAccessProjectAsUser` — it is that per-row predicate
  * expressed as a query, arm for arm, and the two are required to agree. Drift
@@ -190,46 +384,93 @@ const listAllProjects = async (organizationId: string): Promise<ProjectRow[]> =>
  * The arms, in the same order and for the same reasons as the gate:
  *
  *  1. No RBAC — the gate no-ops (allows), so the list is the whole org.
- *  2. No role — suspended or not a member. Empty, and the binding arm is
+ *  2. No role — suspended or not a member. Deny, and the binding arm is
  *     INSIDE this gate, so a suspended user's stale binding is never consulted
  *     (the suspension invariant).
  *  3. Admin/owner — the whole org.
  *  4. Otherwise — projects carrying a binding for this user, direct or through
  *     a group. `role` is deliberately not filtered: usage is role-blind, and a
  *     plain `member` binding is a full use grant.
- *
- * Ordering matches `findUserDefaultProject` (`createdAt asc, id asc`) so the
- * project a caller lands on by default is the first one a switcher shows.
  */
-export const listProjects = async (
+const visibleProjectsWhere = async (
   organizationId: string,
   userId: string,
-): Promise<ProjectRow[]> => {
-  if (!CAPS.rbac) return listAllProjects(organizationId);
+): Promise<Prisma.ProjectWhereInput | null> => {
+  if (!CAPS.rbac) return { organizationId };
 
   const resolver = getRoleResolver();
   const role = resolver
     ? await resolver.getUserRole(userId, organizationId)
     : null;
-  if (!role) return [];
-  if (ROLE_HIERARCHY[role] >= ROLE_HIERARCHY.admin) {
-    return listAllProjects(organizationId);
-  }
+  if (!role) return null;
+  if (ROLE_HIERARCHY[role] >= ROLE_HIERARCHY.admin) return { organizationId };
 
-  return (
-    await db.project.findMany({
-      where: {
-        organizationId,
-        accessBindings: {
-          some: {
-            OR: [{ userId }, { group: { members: { some: { userId } } } }],
-          },
-        },
+  return {
+    organizationId,
+    accessBindings: {
+      some: {
+        OR: [{ userId }, { group: { members: { some: { userId } } } }],
       },
-      select: projectSelect,
-      orderBy: [{ createdAt: "asc" }, { id: "asc" }],
-    })
-  ).map(toProjectRow);
+    },
+  };
+};
+
+/**
+ * Every project in `organizationId` the caller may USE, oldest first, each with
+ * the inventory the card grid renders.
+ *
+ * Authorization is entirely `visibleProjectsWhere` — see there for the arms.
+ * What this adds is COST: the row select carries the owner column, and
+ * `toProjectRows` spends three more grouped statements on the counts. A caller
+ * that only needs to know WHICH projects wants `listProjectIds`, which shares
+ * this exact fence and pays for none of that.
+ */
+export const listProjects = async (
+  organizationId: string,
+  userId: string,
+): Promise<ProjectRow[]> => {
+  const where = await visibleProjectsWhere(organizationId, userId);
+  if (!where) return [];
+
+  return toProjectRows(
+    await db.project.findMany({
+      where,
+      select: projectRowSelect,
+      orderBy: projectOrder,
+    }),
+  );
+};
+
+/**
+ * The ids of every project the caller may USE — `listProjects` with the fence
+ * and none of the payload.
+ *
+ * This exists for the callers that use the project list purely as a SCOPE, of
+ * which `getOrganizationUsage` is the archetype: `request_logs` has no
+ * `organization_id`, so the ids the caller may see are the only way to fence an
+ * aggregate to an org, and the usage page has no use whatever for a project's
+ * name, owner or resource inventory. Reaching for `listProjects` there charged
+ * every Usage load three grouped counts over `agents`, `secrets` and
+ * `app_connections` whose results were dropped on the next line.
+ *
+ * The saving is the counts and the owner column, NOT the fence: this is the
+ * same authorization boundary as `listProjects`, because it is the same
+ * `visibleProjectsWhere` object handed to the same query. An id a caller gets
+ * here is an id they would have got there, and never one more.
+ */
+export const listProjectIds = async (
+  organizationId: string,
+  userId: string,
+): Promise<string[]> => {
+  const where = await visibleProjectsWhere(organizationId, userId);
+  if (!where) return [];
+
+  const rows = await db.project.findMany({
+    where,
+    select: { id: true },
+    orderBy: projectOrder,
+  });
+  return rows.map((row) => row.id);
 };
 
 /** Prisma's unique-constraint code, same test as `org-group-service.ts`. */
@@ -325,7 +566,7 @@ export const createProject = async (
         ...defaultProjectSeed(userId, userEmail),
         accessBindings: { create: { userId, role: "owner" } },
       },
-      select: projectSelect,
+      select: projectRowSelect,
     });
 
   let row;
@@ -349,7 +590,7 @@ export const createProject = async (
     );
   }
 
-  return toProjectRow(row);
+  return toSingleProjectRow(row);
 };
 
 /**
@@ -376,10 +617,10 @@ export const renameProject = async (
 
   const row = await db.project.findFirst({
     where: { id: projectId, organizationId },
-    select: projectSelect,
+    select: projectRowSelect,
   });
   if (!row) throw new ServiceError("NOT_FOUND", "Project not found.");
-  return toProjectRow(row);
+  return toSingleProjectRow(row);
 };
 
 /**

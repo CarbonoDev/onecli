@@ -3,6 +3,7 @@
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
   DialogHeader,
   DialogTitle,
 } from "@onecli/ui/components/dialog";
@@ -66,6 +67,15 @@ export const ActivityDetailDialog = ({
       <DialogContent>
         <DialogHeader>
           <DialogTitle>Request Details</DialogTitle>
+          {/* Names the CONTENTS rather than repeating the title: the rows
+              below are one gateway request's route, the agent behind it, and
+              the rule that decided it. Lives in the header, which renders
+              even before `log` is non-null, so the description is never
+              missing while the dialog is open. */}
+          <DialogDescription>
+            One request the gateway handled — where it went, which agent made
+            it, and how policy decided it.
+          </DialogDescription>
         </DialogHeader>
         {log && (
           <div>

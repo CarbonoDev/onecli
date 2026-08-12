@@ -158,6 +158,7 @@ export const ConnectionAccountCard = ({
                 variant="ghost"
                 size="icon"
                 className="size-8 shrink-0 text-muted-foreground"
+                aria-label={`Actions for ${displayName}`}
               >
                 <MoreVertical className="size-4" />
               </Button>

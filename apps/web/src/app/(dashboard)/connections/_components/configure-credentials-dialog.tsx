@@ -5,6 +5,7 @@ import { toast } from "sonner";
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
   DialogHeader,
   DialogTitle,
 } from "@onecli/ui/components/dialog";
@@ -71,9 +72,12 @@ export const ConfigureCredentialsDialog = ({
             </div>
             <div>
               <DialogTitle className="text-base">{appName}</DialogTitle>
-              <p className="text-muted-foreground text-xs">
+              {/* The title is just the app's name, so this line is the only
+                  thing that says what the dialog is for — which is precisely
+                  what `aria-describedby` should point at. */}
+              <DialogDescription className="text-xs">
                 This connection requires setup
-              </p>
+              </DialogDescription>
             </div>
           </div>
         </DialogHeader>

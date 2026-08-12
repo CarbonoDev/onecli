@@ -33,7 +33,7 @@ import {
 import { Badge } from "@onecli/ui/components/badge";
 import { updateSecret as defaultUpdateSecret } from "@/lib/actions/secrets";
 import { useQueryClient } from "@tanstack/react-query";
-import { secrets } from "@/lib/api";
+import { secrets, type PageScope } from "@/lib/api";
 import { queryKeys } from "@/lib/api/keys";
 import type { CreateSecretInput } from "@onecli/api/validations/secret";
 import type { SecretActions } from "./types";
@@ -202,6 +202,13 @@ interface SecretDialogProps {
   /** Filter which types appear in TypeStep. */
   allowedTypes?: SecretType[];
   secretActions?: SecretActions;
+  /**
+   * Which scope this secret belongs to. Only `organization` changes anything:
+   * a 1Password reference resolves through a PROJECT's 1Password connection,
+   * so `secret-service.ts` rejects `valueSource: "onepassword"` outside project
+   * scope — offering the picker there is offering a guaranteed 400.
+   */
+  pageScope?: PageScope;
 }
 
 export const SecretDialog = ({
@@ -213,6 +220,7 @@ export const SecretDialog = ({
   defaultType,
   allowedTypes,
   secretActions,
+  pageScope = "project",
 }: SecretDialogProps) => {
   const isEdit = !!secret;
   const invalidateCache = useInvalidateGatewayCache();
@@ -245,13 +253,24 @@ export const SecretDialog = ({
   const [pickerOpen, setPickerOpen] = useState(false);
 
   // Only poll 1Password connectivity while the dialog is open; deduped across
-  // every mounted SecretDialog via the shared query key.
-  const { isReady: opConnected } = useOnePasswordReady(open);
+  // every mounted SecretDialog via the shared query key. Never at org scope —
+  // the API rejects an org-scoped 1Password value outright.
+  const onePasswordAllowed = pageScope === "project";
+  const { isReady: opReady } = useOnePasswordReady(open && onePasswordAllowed);
+  const opConnected = opReady && onePasswordAllowed;
 
   // The value source is implied by whether a 1Password field is chosen — no
   // separate mode toggle. OAuth file upload only applies to a typed OpenAI
   // secret; a 1Password value is always a raw API key.
-  const fromOnePassword = !!opSelection;
+  //
+  // Gated on scope, not just the picker button. Hiding the trigger stops a
+  // 1Password value being CHOSEN at org scope, but an edit hydrates
+  // `opSelection` straight off the row, and the submit path keys off it — so a
+  // row carrying an `op://` ref would be resent and 400. Everything downstream
+  // reads this, so there is one place where "is this secret 1Password-backed"
+  // is decided.
+  const effectiveOpSelection = onePasswordAllowed ? opSelection : null;
+  const fromOnePassword = !!effectiveOpSelection;
   const isOAuthMode =
     type === "openai" && openaiMode === "codex" && !fromOnePassword;
 
@@ -291,7 +310,13 @@ export const SecretDialog = ({
         setType(secret.type as SecretType);
         if (secret.type === "openai" && secret.metadata?.authMode === "oauth")
           setOpenaiMode("codex");
-        if (secret.valueSource === "onepassword" && secret.opRef) {
+        // Not hydrated outside project scope: the picker is unreachable there,
+        // so a populated selection could only ever be resent into a 400.
+        if (
+          onePasswordAllowed &&
+          secret.valueSource === "onepassword" &&
+          secret.opRef
+        ) {
           setOpSelection({
             opRef: secret.opRef,
             opDisplay: readOpDisplay(secret.metadata, secret.opRef),
@@ -379,7 +404,7 @@ export const SecretDialog = ({
         setParamFormat("");
       }
     }
-  }, [open, secret, prefill, defaultType]);
+  }, [open, secret, prefill, defaultType, onePasswordAllowed]);
 
   const handleSelectType = (selected: SecretType) => {
     setType(selected);
@@ -444,11 +469,11 @@ export const SecretDialog = ({
       if (isEdit) {
         await updateSecret(secret.id, {
           name: name !== secret.name ? name : undefined,
-          ...(opSelection
+          ...(effectiveOpSelection
             ? {
                 valueSource: "onepassword" as const,
-                opRef: opSelection.opRef,
-                opDisplay: opSelection.opDisplay,
+                opRef: effectiveOpSelection.opRef,
+                opDisplay: effectiveOpSelection.opDisplay,
               }
             : value.trim()
               ? { valueSource: "inline" as const, value: value.trim() }
@@ -460,13 +485,13 @@ export const SecretDialog = ({
         toast.success("Secret updated");
       } else {
         await createSecret(
-          opSelection
+          effectiveOpSelection
             ? {
                 name,
                 type,
                 valueSource: "onepassword",
-                opRef: opSelection.opRef,
-                opDisplay: opSelection.opDisplay,
+                opRef: effectiveOpSelection.opRef,
+                opDisplay: effectiveOpSelection.opDisplay,
                 hostPattern,
                 pathPattern: pathPattern || undefined,
                 injectionConfig: buildInjectionConfig() ?? null,
@@ -776,9 +801,9 @@ export const SecretDialog = ({
                   onChange={handleFileUpload}
                 />
 
-                {opSelection ? (
+                {effectiveOpSelection ? (
                   <OnePasswordSelectedField
-                    display={opSelection.opDisplay}
+                    display={effectiveOpSelection.opDisplay}
                     onChange={() => setPickerOpen(true)}
                     onClear={() => setOpSelection(null)}
                   />
@@ -913,7 +938,9 @@ export const SecretDialog = ({
               </div>
 
               <OnePasswordPickerDialog
-                open={pickerOpen}
+                // The last door: every trigger is already unreachable outside
+                // project scope, so this only keeps it that way.
+                open={pickerOpen && onePasswordAllowed}
                 onOpenChange={setPickerOpen}
                 onSelect={(selection) => {
                   setOpSelection(selection);

@@ -97,7 +97,7 @@ export type {
   CreateBudgetInput,
   UpdateBudgetInput,
 } from "./budgets";
-export { appsPath } from "./scope";
+export { appsPath, secretsPath } from "./scope";
 export type { PageScope } from "./scope";
 export type { AppConfigStatus } from "./app-config";
 export type { AvailableApps } from "./app-availability";

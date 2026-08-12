@@ -38,7 +38,18 @@ export const queryKeys = {
   },
   secrets: {
     all: () => ["secrets", ...scope()] as const,
-    list: () => [...queryKeys.secrets.all(), "list"] as const,
+    /**
+     * Scope-parameterized like `connections.list`, and for the same reason: the
+     * org page reads `/v1/org/secrets` and the project page `/v1/secrets`, two
+     * different row sets that must never share a cache entry. Callers needing a
+     * further split append a trailing segment (`"connected"`,
+     * `"policy-target"`) — still under `all()`, so ONE invalidation at
+     * `secrets.all()` breadth covers every variant. Keep it that broad: an org
+     * secret created here becomes an INHERITED row on every project's
+     * Connections page, and narrowing to the org key would leave those stale.
+     */
+    list: (pageScope: PageScope = "project") =>
+      [...queryKeys.secrets.all(), "list", pageScope] as const,
   },
   policy: {
     all: () => ["policy", ...scope()] as const,

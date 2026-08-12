@@ -23,6 +23,7 @@ import {
   AlertDialogTrigger,
 } from "@onecli/ui/components/alert-dialog";
 import { deleteSecret as defaultDeleteSecret } from "@/lib/actions/secrets";
+import type { PageScope } from "@/lib/api";
 import type { SecretActions } from "./types";
 import {
   type InjectionConfig,
@@ -51,6 +52,8 @@ interface SecretCardProps {
   secretActions?: SecretActions;
   readOnly?: boolean;
   badge?: string;
+  /** Forwarded to the edit dialog — see `SecretDialog`'s `pageScope`. */
+  pageScope?: PageScope;
 }
 
 export const SecretCard = ({
@@ -59,6 +62,7 @@ export const SecretCard = ({
   secretActions,
   readOnly,
   badge,
+  pageScope = "project",
 }: SecretCardProps) => {
   const invalidateCache = useInvalidateGatewayCache();
   const queryClient = useQueryClient();
@@ -237,6 +241,7 @@ export const SecretCard = ({
           secret={secret}
           onSaved={onUpdate}
           secretActions={secretActions}
+          pageScope={pageScope}
         />
       )}
     </>

@@ -1,10 +1,10 @@
 "use client";
 
 import { Card } from "@onecli/ui/components/card";
-import { Skeleton } from "@onecli/ui/components/skeleton";
 import { useProjectsList } from "@/hooks/use-projects";
 import { ProjectsEmptyState } from "./projects-empty-state";
-import { ProjectsTable } from "./projects-table";
+import { ProjectsGrid } from "./projects-grid";
+import { ProjectsSkeleton } from "./projects-skeleton";
 
 export interface ProjectsContentProps {
   /** Threaded from the RSC page (server-only auth mode); false = local mode. */
@@ -17,23 +17,7 @@ export interface ProjectsContentProps {
 export const ProjectsContent = ({ sharingEnabled }: ProjectsContentProps) => {
   const { data: projects, isPending, isError } = useProjectsList();
 
-  if (isPending) {
-    return (
-      <div className="space-y-4">
-        {[1, 2].map((i) => (
-          <Card key={i} className="p-6">
-            <div className="flex items-center justify-between">
-              <div className="space-y-2">
-                <Skeleton className="h-5 w-32" />
-                <Skeleton className="h-4 w-48" />
-              </div>
-              <Skeleton className="size-8 rounded-md" />
-            </div>
-          </Card>
-        ))}
-      </div>
-    );
-  }
+  if (isPending) return <ProjectsSkeleton />;
 
   if (isError || !projects) {
     // A plain card: no retry, no toast — the failure is deterministic.
@@ -50,5 +34,5 @@ export const ProjectsContent = ({ sharingEnabled }: ProjectsContentProps) => {
 
   if (projects.length === 0) return <ProjectsEmptyState />;
 
-  return <ProjectsTable projects={projects} sharingEnabled={sharingEnabled} />;
+  return <ProjectsGrid projects={projects} sharingEnabled={sharingEnabled} />;
 };

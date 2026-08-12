@@ -66,6 +66,15 @@ export const queryKeys = {
     members: (groupId: string) =>
       [...queryKeys.groups.all(), groupId, "members"] as const,
   },
+  domains: {
+    /**
+     * `scope()`-prefixed: a domain claim belongs to ONE organization, so an org
+     * switch must refetch rather than show the previous org's claims under the
+     * new org's name.
+     */
+    all: () => ["domains", ...scope()] as const,
+    list: () => [...queryKeys.domains.all(), "list"] as const,
+  },
   roleMappings: {
     all: () => ["role-mappings", ...scope()] as const,
     list: () => [...queryKeys.roleMappings.all(), "list"] as const,

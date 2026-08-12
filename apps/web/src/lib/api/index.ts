@@ -10,6 +10,7 @@ import * as projectAccess from "./project-access";
 import * as orgMembers from "./org-members";
 import * as invitations from "./invitations";
 import * as groups from "./groups";
+import * as domains from "./domains";
 import * as roleMappings from "./role-mappings";
 import * as counts from "./counts";
 import * as appBlocklist from "./app-blocklist";
@@ -34,6 +35,7 @@ export {
   orgMembers,
   invitations,
   groups,
+  domains,
   roleMappings,
   counts,
   appBlocklist,
@@ -68,6 +70,7 @@ export type {
   DirectoryListParams,
   GroupRow,
   GroupMemberRow,
+  OrgDomainRow,
   RoleMappingRow,
   CreateRoleMappingInput,
   UpdateRoleMappingInput,

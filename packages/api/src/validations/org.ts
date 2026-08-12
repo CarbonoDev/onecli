@@ -230,3 +230,21 @@ export const updateOrgMemberSchema = z
     });
     return z.NEVER;
   });
+
+// ── Domains ───────────────────────────────────────────────────────────────
+
+/**
+ * `POST /v1/org/domains` body.
+ *
+ * Deliberately shallow: this only bounds the input so an oversized body can't
+ * reach the service. The REAL contract — lowercase, trailing dot stripped,
+ * punycoded, no IP literals, no `localhost`, no bare public suffix — lives in
+ * `normalizeDomain`, because the value that has to satisfy it is the one the
+ * GLOBAL unique index sees. Splitting the rules between a schema and the write
+ * path is how two spellings of one name end up as two rows.
+ */
+export const claimDomainSchema = z.object({
+  domain: z.string().trim().min(1).max(255),
+});
+
+export type ClaimDomainInput = z.infer<typeof claimDomainSchema>;

@@ -62,7 +62,6 @@ describe("resolveNavShell", () => {
     expect(resolveNavShell("/settings/instance")).toBe("org");
     expect(resolveNavShell("/settings/encryption")).toBe("org");
     expect(resolveNavShell("/settings/domains")).toBe("org");
-    expect(resolveNavShell("/settings/sso")).toBe("org");
   });
 
   it("defaults unknown paths to org", () => {
@@ -93,7 +92,6 @@ describe("navBreadcrumbLabel", () => {
     // The defect this exists for: the breadcrumb read "Api keys" while the
     // page heading read "API Keys".
     expect(navBreadcrumbLabel("/settings/api-keys")).toBe("API Keys");
-    expect(navBreadcrumbLabel("/settings/sso")).toBe("Single sign-on");
   });
 
   it("overrides the Projects nav label with the crumb label", () => {
@@ -146,18 +144,26 @@ describe("settingsSections", () => {
       "/settings/profile",
       "/settings/api-keys",
       "/settings/domains",
-      "/settings/sso",
       "/settings/encryption",
     ]);
   });
 
-  it("appends Domains and Single sign-on to Security", () => {
+  it("puts Domains in Security", () => {
     const security = settingsSections.find((s) => s.label === "Security");
     expect(security?.items.map((i) => i.title)).toEqual([
       "Domains",
-      "Single sign-on",
       "Encryption",
     ]);
+  });
+
+  // Dropped, not deferred. A "Require SSO" toggle with no `SessionEnforcer`
+  // behind it is a false security assurance: an admin flips it, sees it stay
+  // on, and believes their org is SSO-mandatory while every Google login keeps
+  // working. Nothing may name this route until the enforcement exists.
+  it("carries no single sign-on entry", () => {
+    const urls = settingsSections.flatMap((s) => s.items.map((i) => i.url));
+    expect(urls).not.toContain("/settings/sso");
+    expect(navBreadcrumbLabel("/settings/sso")).toBeUndefined();
   });
 });
 

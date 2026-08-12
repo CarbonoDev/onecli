@@ -7,7 +7,11 @@ import { useInvitations } from "@/hooks/use-invitations";
 import { LocalModeNotice } from "./local-mode-notice";
 import { AdminOnlyNotice } from "./admin-only-notice";
 import { MembersTable } from "./members-table";
-import { PendingInvitations } from "./pending-invitations";
+import {
+  InactiveInvitations,
+  isInactiveInvitation,
+} from "./inactive-invitations";
+import { InvitationsErrorNotice } from "./invitations-error-notice";
 
 export interface TeamContentProps {
   /** Threaded from the RSC page (server-only auth mode); false = local mode. */
@@ -43,17 +47,22 @@ export const TeamContent = ({ teamEnabled }: TeamContentProps) => {
 
   if (members.isError) return <AdminOnlyNotice />;
 
+  // A failed invitations fetch must render as an error next to a working
+  // members table, never as "no invitations" — with retry:false an isError
+  // query has data undefined, which would otherwise read as an empty list.
+  const allInvitations = invitations.data ?? [];
+  // Pending people join the members table; expired/revoked get their own table
+  // below. `accepted` is rendered nowhere on purpose: that person already has a
+  // member row, and repeating them as an invitation would double-count a
+  // teammate on the page every time someone joins by link.
+  const pending = allInvitations.filter((row) => row.status === "pending");
+  const inactive = allInvitations.filter(isInactiveInvitation);
+
   return (
     <div className="space-y-6">
-      <MembersTable members={members.data ?? []} />
-      {/* A failed fetch must render as an error, never as "No invitations
-          yet" — with retry:false an isError query has data undefined, which
-          would otherwise fall into the empty state. */}
-      <PendingInvitations
-        invitations={invitations.data ?? []}
-        loading={invitations.isPending}
-        error={invitations.isError}
-      />
+      <MembersTable members={members.data ?? []} invitations={pending} />
+      {invitations.isError && <InvitationsErrorNotice />}
+      {inactive.length > 0 && <InactiveInvitations invitations={inactive} />}
     </div>
   );
 };

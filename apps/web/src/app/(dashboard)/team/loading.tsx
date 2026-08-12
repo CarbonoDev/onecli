@@ -9,7 +9,7 @@ export default function TeamLoading() {
           any drift flashes one title and then swaps to another. */}
       <PageHeader
         title="Members"
-        description="Manage your organization's members and invite teammates."
+        description="Manage members and roles for your organization."
       />
       <div className="space-y-4">
         {[1, 2].map((i) => (

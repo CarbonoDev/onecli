@@ -150,6 +150,18 @@ export const resolveNavShell = (pathname: string): NavShell => {
 export const navItemsForShell = (shell: NavShell): NavItem[] =>
   shell === "project" ? projectNavItems : flatOrgNavItems;
 
+/**
+ * The settings RAIL — organization and account scope only.
+ *
+ * Project settings deliberately does not appear. It is a standalone page in
+ * the project shell, reached from that shell's "Project Settings" nav item:
+ * one project's name, access and deletion have nothing to do with the org's
+ * domains or the caller's own profile, and listing it here put a project-scope
+ * entry in the middle of the organization's settings.
+ *
+ * Every path this returns is org-scope, which is what lets `isSettingsRailPath`
+ * be a simple prefix test and what makes the whole rail one shell.
+ */
 export const getSettingsSections = (
   // The EE org-UI override uses orgId to prefix URLs with /org/<id>
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
@@ -158,11 +170,9 @@ export const getSettingsSections = (
   {
     label: "General",
     items: [
-      // Project first: it is the thing users manage; the instance is operator
-      // config. `settings/page.tsx` redirects `/settings` to this first entry,
-      // so the order is load-bearing. Bare paths, no /org/<id> prefix —
-      // orgScopedUI stays false.
-      { title: "Project", url: "/settings/project", icon: FolderKanban },
+      // Organization first: `settings/page.tsx` redirects `/settings` to this
+      // first entry, so the order is load-bearing. Bare paths, no /org/<id>
+      // prefix — orgScopedUI stays false.
       // Always visible: the page degrades for non-admins (the API's 403 is the
       // authority), so hiding it would require a session role field.
       {
@@ -194,6 +204,18 @@ export const getSettingsSections = (
 ];
 
 export const settingsSections = getSettingsSections();
+
+/**
+ * Does this path render the settings rail?
+ *
+ * Every `/settings/*` page except `/settings/project`, which is a standalone
+ * project-scope page. One definition because two surfaces have to agree: the
+ * dashboard layout, which mounts the rail aside, and the header, which crumbs
+ * rail pages as `Settings › <leaf>` and standalone pages by their nav item.
+ */
+export const isSettingsRailPath = (pathname: string): boolean =>
+  isPathUnderNavItem(pathname, "/settings") &&
+  !isPathUnderNavItem(pathname, "/settings/project");
 
 /**
  * Breadcrumb labels that differ from the nav label for the same URL. The

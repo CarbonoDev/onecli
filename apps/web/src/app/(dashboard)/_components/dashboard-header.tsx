@@ -22,6 +22,7 @@ import {
 } from "@onecli/ui/components/breadcrumb";
 import {
   isPathUnderNavItem,
+  isSettingsRailPath,
   navBreadcrumbLabel,
   navItemsForShell,
 } from "@/lib/nav-config";
@@ -44,15 +45,18 @@ interface Crumb {
 }
 
 /**
- * Every `/settings/*` page crumbs as `Settings › <rail title>`, whichever nav
- * list also claims it. Eight sibling pages render the same settings rail; the
- * sidebar's "Organization Settings" / "Project Settings" labels would give
- * three different crumb shapes for one screen.
+ * Every settings RAIL page crumbs as `Settings › <rail title>`, whichever nav
+ * list also claims it. Seven siblings render one rail; the sidebar's
+ * "Organization Settings" label would otherwise give a different crumb shape
+ * for one of them than for the other six.
  *
- * `url` is for path math only — the crumb is NOT linked. `/settings` is a
- * redirect to the first rail entry, so following it from `/settings/profile`
- * would land on `/settings/project` and flip the whole sidebar into project
- * scope.
+ * `/settings/project` is excluded — it left the rail, so it crumbs by its own
+ * nav item (`… › <Project> › Project Settings`) with no Settings ancestor to
+ * belong to.
+ *
+ * `url` is for path math only — the crumb is NOT linked. `/settings` is a bare
+ * redirect to the first rail entry, so following it would silently relocate
+ * the user rather than take them anywhere they asked for.
  */
 const SETTINGS_FALLBACK: Pick<NavItem, "title" | "url"> = {
   title: "Settings",
@@ -103,10 +107,11 @@ export const DashboardHeader = () => {
   const project = projects?.find((p) => p.id === projectId);
   const projectName = project?.name ?? project?.slug;
 
-  // Settings is checked FIRST so all eight rail pages crumb identically, even
-  // the two a nav list also names. Everywhere else the longest nav match wins.
-  const isSettings = isPathUnderNavItem(pathname, SETTINGS_FALLBACK.url);
-  const navItem = isSettings
+  // The rail is checked FIRST so all seven of its pages crumb identically,
+  // including the one a nav list also names. Everywhere else — `/settings/
+  // project` included, now that it is standalone — the longest nav match wins.
+  const isRail = isSettingsRailPath(pathname);
+  const navItem = isRail
     ? SETTINGS_FALLBACK
     : navItemsForShell(shell)
         .filter((item) => isPathUnderNavItem(pathname, item.url))
@@ -146,7 +151,7 @@ export const DashboardHeader = () => {
       label: navBreadcrumbLabel(navItem.url) ?? navItem.title,
       // `Settings` is a section header, not a destination — see
       // `SETTINGS_FALLBACK`.
-      href: isSettings ? undefined : navItem.url,
+      href: isRail ? undefined : navItem.url,
     });
     subSegments.forEach((segment, i) => {
       const href = `${navItem.url}/${subSegments.slice(0, i + 1).join("/")}`;

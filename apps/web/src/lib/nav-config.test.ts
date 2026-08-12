@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  isSettingsRailPath,
   navBreadcrumbLabel,
   navItemsForShell,
   orgNavItems,
@@ -107,12 +108,17 @@ describe("navBreadcrumbLabel", () => {
     expect(navBreadcrumbLabel("/settings/encryption")).toBe("Encryption");
   });
 
-  it("prefers the settings sub-nav title where both name the same url", () => {
-    // The sidebar calls these "Project Settings" / "Organization Settings"
-    // because it has no other context; as the leaf of `Settings › …` the
-    // settings sub-nav's shorter titles are the ones that read correctly.
-    expect(navBreadcrumbLabel("/settings/project")).toBe("Project");
+  it("prefers the settings rail title where both name the same url", () => {
+    // The sidebar says "Organization Settings" because it has no other
+    // context; as the leaf of `Settings › …` the rail's shorter title reads
+    // correctly.
     expect(navBreadcrumbLabel("/settings/organization")).toBe("Organization");
+  });
+
+  it("labels project settings from the project nav, not the rail", () => {
+    // It left the rail, so nothing else claims this url and the crumb is the
+    // leaf of `… › <Project> › Project Settings`.
+    expect(navBreadcrumbLabel("/settings/project")).toBe("Project Settings");
   });
 
   it("is undefined for paths nothing owns", () => {
@@ -123,9 +129,26 @@ describe("navBreadcrumbLabel", () => {
 
 describe("settingsSections", () => {
   // `settings/page.tsx` redirects `/settings` to the first item of the first
-  // section; keeping Project there keeps that redirect working with no edit.
-  it("keeps Project as the first entry", () => {
-    expect(settingsSections[0]?.items[0]?.url).toBe("/settings/project");
+  // section, so this ordering is what makes that redirect land on the org
+  // settings page with no edit to the page itself.
+  it("starts with Organization", () => {
+    expect(settingsSections[0]?.items[0]?.url).toBe("/settings/organization");
+  });
+
+  it("carries no project-scope entry", () => {
+    // Project settings is a standalone page in the project shell — the org's
+    // rail has no business listing one project's name and deletion.
+    const urls = settingsSections.flatMap((s) => s.items.map((i) => i.url));
+    expect(urls).not.toContain("/settings/project");
+    expect(urls).toEqual([
+      "/settings/organization",
+      "/settings/instance",
+      "/settings/profile",
+      "/settings/api-keys",
+      "/settings/domains",
+      "/settings/sso",
+      "/settings/encryption",
+    ]);
   });
 
   it("appends Domains and Single sign-on to Security", () => {
@@ -135,5 +158,45 @@ describe("settingsSections", () => {
       "Single sign-on",
       "Encryption",
     ]);
+  });
+});
+
+describe("isSettingsRailPath", () => {
+  it("is true for every rail page", () => {
+    for (const section of settingsSections) {
+      for (const item of section.items) {
+        expect(isSettingsRailPath(item.url)).toBe(true);
+      }
+    }
+    expect(isSettingsRailPath("/settings")).toBe(true);
+  });
+
+  it("is false for the standalone project settings page", () => {
+    // The whole point: no rail, and no `Settings ›` crumb ancestor.
+    expect(isSettingsRailPath("/settings/project")).toBe(false);
+    expect(isSettingsRailPath("/settings/project/access")).toBe(false);
+  });
+
+  it("is false outside settings", () => {
+    expect(isSettingsRailPath("/overview")).toBe(false);
+    expect(isSettingsRailPath("/settings-legacy")).toBe(false);
+  });
+});
+
+describe("the settings shell flip is gone", () => {
+  // Previously `/settings/project` sat in the same rail as seven org-scope
+  // pages, so clicking between rail entries swapped the whole sidebar. It is
+  // no longer a rail sibling, so every page that renders the rail is in one
+  // shell and there is nothing to click between.
+  it("puts every rail page in the org shell", () => {
+    for (const section of settingsSections) {
+      for (const item of section.items) {
+        expect(resolveNavShell(item.url)).toBe("org");
+      }
+    }
+  });
+
+  it("keeps project settings in the project shell", () => {
+    expect(resolveNavShell("/settings/project")).toBe("project");
   });
 });

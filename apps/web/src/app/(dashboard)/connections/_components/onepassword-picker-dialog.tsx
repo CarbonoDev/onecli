@@ -213,11 +213,14 @@ export const OnePasswordPickerDialog = ({
       <DialogContent className="gap-0 overflow-hidden p-0 sm:max-w-md">
         <DialogHeader className="space-y-3 border-b px-4 py-3.5 text-left">
           <div className="flex items-center gap-2.5">
+            {/* SVG: the Next image optimizer 400s on it, so serve it straight
+                from `public/` (see AppIcon). */}
             <Image
               src="/icons/onepassword.svg"
               alt=""
               width={22}
               height={22}
+              unoptimized
               className="shrink-0"
             />
             <DialogTitle className="text-sm font-semibold">

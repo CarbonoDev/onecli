@@ -85,7 +85,7 @@ export const RoleMappingRowActions = ({
             variant="ghost"
             size="icon"
             className="size-8"
-            aria-label="More actions"
+            aria-label={`Actions for the ${mapping.groupName} mapping`}
             disabled={remove.isPending}
           >
             {remove.isPending ? (

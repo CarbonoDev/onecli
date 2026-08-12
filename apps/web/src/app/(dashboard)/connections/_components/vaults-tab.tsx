@@ -115,11 +115,14 @@ const VaultProviderCard = ({
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3">
             <div className="flex size-10 items-center justify-center rounded-lg">
+              {/* iconSrc is always an SVG in `public/icons/`, which the Next
+                  image optimizer 400s on — serve it directly (see AppIcon). */}
               <Image
                 src={iconSrc}
                 alt={title}
                 width={iconSize}
                 height={iconSize}
+                unoptimized
               />
             </div>
             <div className="flex items-center gap-2">

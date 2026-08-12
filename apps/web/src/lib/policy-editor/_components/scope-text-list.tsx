@@ -62,7 +62,11 @@ export const ScopeTextList = ({
   return (
     <div className="space-y-2">
       {values.length > 0 ? (
-        <ul className="space-y-1">
+        /* role="list" is NOT redundant here: Tailwind v4 preflight sets
+           `list-style: none` on <ul>, and WebKit drops the implicit list role
+           when it does — so on Safari/VoiceOver this would announce no item
+           count. Do not strip as redundant ARIA. */
+        <ul role="list" className="space-y-1">
           {values.map((value) => (
             <li
               key={value}

@@ -28,8 +28,19 @@ export const ConnectLayout = ({
       <div className="relative flex flex-col items-center gap-6 bg-gradient-to-b from-muted/60 to-card px-8 pt-12 pb-8">
         {/* Two logos with animated connector */}
         <div className="flex items-center gap-5">
+          {/* Every logo/app icon on this screen is an SVG, and the Next image
+              optimizer 400s on SVG unless `images.dangerouslyAllowSVG` is set.
+              SVG gains nothing from the optimizer, so `unoptimized` serves the
+              file straight from `public/` (see AppIcon). Keep it on every
+              <Image> in this file. */}
           <div className="flex size-14 items-center justify-center rounded-2xl border bg-card shadow-sm">
-            <Image src="/logo-icon.svg" alt="OneCLI" width={26} height={26} />
+            <Image
+              src="/logo-icon.svg"
+              alt="OneCLI"
+              width={26}
+              height={26}
+              unoptimized
+            />
           </div>
           <LogoConnector variant={variant} />
           <div className="flex size-14 items-center justify-center rounded-2xl border bg-card shadow-sm">
@@ -40,6 +51,7 @@ export const ConnectLayout = ({
                   alt={appName}
                   width={26}
                   height={26}
+                  unoptimized
                   className="block dark:hidden"
                 />
                 <Image
@@ -47,11 +59,18 @@ export const ConnectLayout = ({
                   alt={appName}
                   width={26}
                   height={26}
+                  unoptimized
                   className="hidden dark:block"
                 />
               </>
             ) : (
-              <Image src={appIcon} alt={appName} width={26} height={26} />
+              <Image
+                src={appIcon}
+                alt={appName}
+                width={26}
+                height={26}
+                unoptimized
+              />
             )}
           </div>
         </div>
@@ -82,6 +101,7 @@ export const ConnectLayout = ({
           alt="OneCLI"
           width={12}
           height={12}
+          unoptimized
           className="opacity-30"
         />
         <span className="text-[11px] text-muted-foreground/70">

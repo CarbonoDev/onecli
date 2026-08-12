@@ -11,6 +11,7 @@ import { useAuth } from "@/providers/auth-provider";
 import { checkDashboardRedirect } from "@/lib/user-plan";
 import { getDashboardRedirect } from "@/lib/dashboard/session-redirect";
 import { apiFetch } from "@/lib/api-fetch";
+import { isSettingsRailPath } from "@/lib/nav-config";
 import { PlanGateProvider } from "@/lib/plan-gate";
 
 export default function DashboardLayout({
@@ -27,9 +28,12 @@ export default function DashboardLayout({
     signOutRef.current = signOut;
   }, [signOut]);
 
-  const isSettings =
-    pathname.startsWith("/settings") ||
-    /^\/org\/[^/]+\/settings(\/|$)/.test(pathname);
+  // `/settings/project` is deliberately excluded: it is a standalone
+  // project-scope page reached from the project shell's nav, not a sibling of
+  // the org settings rail. `isSettingsRailPath` is the one definition of that
+  // split — the header reads it too, to decide whether a page crumbs under
+  // `Settings ›`.
+  const isSettings = isSettingsRailPath(pathname);
 
   useEffect(() => {
     if (!isLoading && !isAuthenticated) {

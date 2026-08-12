@@ -35,11 +35,7 @@ import {
 import { ApiError, type Project } from "@/lib/api";
 import { queryKeys } from "@/lib/api/keys";
 import { ProjectAccessDialog } from "@/components/project-access-dialog";
-import {
-  useCurrentProjectId,
-  useDeleteProject,
-  useRenameProject,
-} from "@/hooks/use-projects";
+import { useDeleteProject, useRenameProject } from "@/hooks/use-projects";
 import { useProjectAccess } from "@/hooks/use-project-access";
 import { useSwitchProject } from "@/hooks/use-switch-project";
 import {
@@ -67,8 +63,6 @@ export const ProjectRowActions = ({
   const router = useRouter();
   const queryClient = useQueryClient();
   const switchTo = useSwitchProject();
-  const currentId = useCurrentProjectId();
-  const isCurrent = project.id === currentId;
 
   const [renameOpen, setRenameOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
@@ -192,11 +186,13 @@ export const ProjectRowActions = ({
           </Button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end">
-          <DropdownMenuItem
-            disabled={isCurrent}
-            onClick={() => switchTo(project.id)}
-          >
-            Switch to this project
+          {/* "Open", not "Switch to": this menu only ever renders on
+              `/projects`, which is the org shell, so the action always ENTERS
+              the project rather than swapping one project page for another.
+              Enabled for the current project too — being selected is not the
+              same as being open, and this is the way in. */}
+          <DropdownMenuItem onClick={() => switchTo(project.id)}>
+            Open project
           </DropdownMenuItem>
           <DropdownMenuItem onClick={() => handleRenameOpen(true)}>
             Rename

@@ -5,8 +5,10 @@ import { PageHeader } from "@dashboard/page-header";
 export default function ProjectSettingsLoading() {
   return (
     <div className="flex flex-1 flex-col gap-4">
+      {/* Verbatim from `page.tsx` — this fallback renders the real heading, so
+          any drift flashes one title and then swaps to another. */}
       <PageHeader
-        title="Project"
+        title="Project Settings"
         description="Rename this project, choose who can use it, or delete it."
       />
       {[1, 2, 3].map((i) => (

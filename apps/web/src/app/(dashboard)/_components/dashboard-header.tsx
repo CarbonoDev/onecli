@@ -20,9 +20,48 @@ import {
   BreadcrumbPage,
   BreadcrumbSeparator,
 } from "@onecli/ui/components/breadcrumb";
-import { navItems } from "@/lib/nav-config";
+import {
+  isPathUnderNavItem,
+  isSettingsRailPath,
+  navBreadcrumbLabel,
+  navItemsForShell,
+} from "@/lib/nav-config";
+import type { NavItem } from "./nav-main";
+import {
+  useCurrentOrganizationId,
+  useOrganizationsList,
+} from "@/hooks/use-organizations";
+import { useNavShell } from "@/hooks/use-nav-shell";
+import { useCurrentProjectId, useProjectsList } from "@/hooks/use-projects";
 import { GetStartedButton } from "./get-started-button";
 import { ApprovalsBell } from "@/lib/components/approvals";
+
+/** A rendered breadcrumb entry. The last one is the current page; earlier ones
+ * link, except where `href` is dropped because the destination would be a
+ * no-op (see `crumbs` below). */
+interface Crumb {
+  label: string;
+  href?: string;
+}
+
+/**
+ * Every settings RAIL page crumbs as `Settings › <rail title>`, whichever nav
+ * list also claims it. Seven siblings render one rail; the sidebar's
+ * "Organization Settings" label would otherwise give a different crumb shape
+ * for one of them than for the other six.
+ *
+ * `/settings/project` is excluded — it left the rail, so it crumbs by its own
+ * nav item (`… › <Project> › Project Settings`) with no Settings ancestor to
+ * belong to.
+ *
+ * `url` is for path math only — the crumb is NOT linked. `/settings` is a bare
+ * redirect to the first rail entry, so following it would silently relocate
+ * the user rather than take them anywhere they asked for.
+ */
+const SETTINGS_FALLBACK: Pick<NavItem, "title" | "url"> = {
+  title: "Settings",
+  url: "/settings",
+};
 
 const GitHubIcon = ({ className }: { className?: string }) => (
   <svg
@@ -50,8 +89,33 @@ export const DashboardHeader = () => {
   const pathname = usePathname();
   const { resolvedTheme, setTheme } = useTheme();
 
-  const navItem = navItems.find((item) => pathname.startsWith(item.url));
-  const title = navItem?.title ?? "Dashboard";
+  // The same hook the sidebar uses, so nav and breadcrumb agree on the shell.
+  const shell = useNavShell();
+
+  // Same react-query keys the sidebar switchers already subscribe to, so the
+  // org and project crumbs cost no extra request. Both resolve after
+  // hydration; each crumb renders only once its name is known rather than
+  // flashing a placeholder.
+  const organizationId = useCurrentOrganizationId();
+  const { data: organizations } = useOrganizationsList();
+  const organizationName = organizations?.find(
+    (org) => org.id === organizationId,
+  )?.name;
+
+  const projectId = useCurrentProjectId();
+  const { data: projects } = useProjectsList();
+  const project = projects?.find((p) => p.id === projectId);
+  const projectName = project?.name ?? project?.slug;
+
+  // The rail is checked FIRST so all seven of its pages crumb identically,
+  // including the one a nav list also names. Everywhere else — `/settings/
+  // project` included, now that it is standalone — the longest nav match wins.
+  const isRail = isSettingsRailPath(pathname);
+  const navItem = isRail
+    ? SETTINGS_FALLBACK
+    : navItemsForShell(shell)
+        .filter((item) => isPathUnderNavItem(pathname, item.url))
+        .sort((a, b) => b.url.length - a.url.length)[0];
 
   const subPath = navItem
     ? pathname.slice(navItem.url.length).replace(/^\//, "")
@@ -67,46 +131,86 @@ export const DashboardHeader = () => {
   const formatSegment = (s: string) =>
     s.charAt(0).toUpperCase() + s.slice(1).replace(/-/g, " ");
 
+  // Org › [All projects › Project ›] Page › Sub-page. Every crumb whose text
+  // comes from the network is omitted until it has one — never stubbed, and
+  // never half-shown: the project group appears atomically, so the first paint
+  // of `/overview` doesn't read "All projects › Overview" (which describes a
+  // different page) before the names land.
+  const crumbs: Crumb[] = [];
+  if (organizationName) {
+    crumbs.push({ label: organizationName, href: "/projects" });
+  }
+  if (shell === "project" && projectName) {
+    crumbs.push({ label: "All projects", href: "/projects" });
+    crumbs.push({ label: projectName, href: "/overview" });
+  }
+  if (navItem) {
+    crumbs.push({
+      // The crumb label, not the sidebar label: the nav item reads "Projects"
+      // (a section), the crumb reads "All projects" (the place you go back to).
+      label: navBreadcrumbLabel(navItem.url) ?? navItem.title,
+      // `Settings` is a section header, not a destination — see
+      // `SETTINGS_FALLBACK`.
+      href: isRail ? undefined : navItem.url,
+    });
+    subSegments.forEach((segment, i) => {
+      const href = `${navItem.url}/${subSegments.slice(0, i + 1).join("/")}`;
+      // Prefer the label the nav already declares for this exact path — that
+      // is what turns `/settings/api-keys` into "API Keys" instead of the
+      // title-cased slug "Api keys".
+      crumbs.push({
+        label: navBreadcrumbLabel(href) ?? formatSegment(segment),
+        href,
+      });
+    });
+  } else {
+    crumbs.push({ label: "Dashboard" });
+  }
+
+  // Don't offer a link that goes nowhere: to the page you are already on, or
+  // to wherever the very next crumb goes anyway (the org crumb and
+  // "All projects" both point at `/projects`). Those crumbs stay as text.
+  const renderedCrumbs = crumbs.map((crumb, i) => ({
+    ...crumb,
+    href:
+      crumb.href === pathname || crumb.href === crumbs[i + 1]?.href
+        ? undefined
+        : crumb.href,
+  }));
+
   return (
     <div className="flex w-full items-center gap-2 px-4">
       <SidebarTrigger className="-ml-1" />
       <Separator orientation="vertical" className="mr-2 h-4!" />
       <Breadcrumb className="min-w-0 flex-1 overflow-hidden">
         <BreadcrumbList className="flex-nowrap overflow-hidden">
-          {subSegments.length > 0 ? (
-            <>
-              <BreadcrumbItem>
-                <BreadcrumbLink asChild>
-                  <Link href={navItem!.url}>{title}</Link>
-                </BreadcrumbLink>
-              </BreadcrumbItem>
-              {subSegments.map((segment, i) => {
-                const isLast = i === subSegments.length - 1;
-                const href =
-                  navItem!.url + "/" + subSegments.slice(0, i + 1).join("/");
-                return (
-                  <span key={segment} className="contents">
-                    <BreadcrumbSeparator />
-                    <BreadcrumbItem>
-                      {isLast ? (
-                        <BreadcrumbPage>
-                          {formatSegment(segment)}
-                        </BreadcrumbPage>
-                      ) : (
-                        <BreadcrumbLink asChild>
-                          <Link href={href}>{formatSegment(segment)}</Link>
-                        </BreadcrumbLink>
-                      )}
-                    </BreadcrumbItem>
-                  </span>
-                );
-              })}
-            </>
-          ) : (
-            <BreadcrumbItem>
-              <BreadcrumbPage>{title}</BreadcrumbPage>
-            </BreadcrumbItem>
-          )}
+          {renderedCrumbs.map((crumb, i) => {
+            const isLast = i === renderedCrumbs.length - 1;
+            return (
+              <span key={`${i}:${crumb.label}`} className="contents">
+                {i > 0 && <BreadcrumbSeparator />}
+                <BreadcrumbItem>
+                  {isLast ? (
+                    // `aria-current="page"` — only ever the leaf.
+                    <BreadcrumbPage>{crumb.label}</BreadcrumbPage>
+                  ) : crumb.href ? (
+                    <BreadcrumbLink asChild>
+                      <Link href={crumb.href}>{crumb.label}</Link>
+                    </BreadcrumbLink>
+                  ) : (
+                    // A crumb with nowhere to go (`Settings`, or an ancestor
+                    // whose destination the next crumb repeats). Wrapped so it
+                    // is not an anchor and keeps the default cursor — the
+                    // affordance links get from `<a href>`. Deliberately NOT
+                    // dimmed: `--muted-foreground` is already at the AA
+                    // contrast floor, so fading it would trade one honesty
+                    // problem for a legibility one.
+                    <span className="cursor-default">{crumb.label}</span>
+                  )}
+                </BreadcrumbItem>
+              </span>
+            );
+          })}
         </BreadcrumbList>
       </Breadcrumb>
       <div className="ml-auto flex items-center gap-1">

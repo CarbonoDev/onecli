@@ -4,8 +4,11 @@ import { PageHeader } from "@dashboard/page-header";
 import { getAuthMode } from "@/lib/auth/auth-mode";
 import { TeamContent } from "./_components/team-content";
 
+// "Members", matching the org shell's nav item and the breadcrumb. The route
+// stays `/team` so existing links and bookmarks keep working — only the name
+// the user reads changed.
 export const metadata: Metadata = {
-  title: "Team",
+  title: "Members",
 };
 
 export default function TeamPage() {
@@ -17,8 +20,10 @@ export default function TeamPage() {
 
   return (
     <div className="flex flex-1 flex-col gap-6">
+      {/* Keep in sync with `loading.tsx`, which renders this same header so
+          the heading doesn't change while the list resolves. */}
       <PageHeader
-        title="Team"
+        title="Members"
         description="Manage your organization's members and invite teammates."
       />
       <Suspense>

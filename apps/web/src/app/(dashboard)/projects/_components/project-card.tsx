@@ -15,8 +15,10 @@ export interface ProjectCardProps {
 }
 
 /**
- * One meta segment, or `null` when the count didn't arrive — the segment drops
- * out of the join rather than rendering `undefined agents` beside a bare `·`.
+ * One meta segment. Both counts are non-nullable in the API contract, so the
+ * `null` branch is unreachable by type — it is belt-and-braces against a stale
+ * server that predates the field, and it keeps the separator honest: a dropped
+ * segment takes its `·` with it instead of leaving a bare one behind.
  */
 const countLabel = (value: number, singular: string) =>
   Number.isFinite(value)
@@ -43,9 +45,16 @@ export const ProjectCard = ({
   return (
     // The whole card enters the project through the STRETCHED name button —
     // one real, focusable, announced control widened to the card's bounds,
-    // never an onClick on the Card itself. `focus-within` puts the ring on the
-    // card rather than around the name text alone.
-    <Card className="hover:border-muted-foreground/30 focus-within:ring-ring/50 relative gap-0 p-5 transition-colors focus-within:ring-[3px]">
+    // never an onClick on the Card itself.
+    //
+    // `isolate` makes the Card a stacking context, so the kebab's `z-10` below
+    // is scoped to this card instead of competing in the root context (where it
+    // would tie with the fixed sidebar's `z-10` and win on tree order).
+    //
+    // The ring is gated on `:focus-visible`, not `:focus-within`: the latter
+    // also matches a MOUSE click on the kebab, which would leave a 3px ring
+    // around the whole card after the menu closed.
+    <Card className="hover:border-muted-foreground/30 has-[:focus-visible]:ring-ring/50 relative isolate h-full gap-0 p-5 transition-colors has-[:focus-visible]:ring-[3px]">
       <div className="flex items-start justify-between gap-2">
         <div className="bg-muted flex size-10 shrink-0 items-center justify-center rounded-lg">
           <Folder className="text-muted-foreground size-5" />
@@ -72,8 +81,9 @@ export const ProjectCard = ({
           <button
             type="button"
             onClick={() => switchTo(project.id)}
-            // Truncation without recovery: the card is a third of the row, so
-            // a long name needs somewhere to be read in full. The accessible
+            // The recovery for a truncated name. It reads card-wide, since the
+            // stretched overlay belongs to this button — which is exactly why
+            // the owner line below can't have one of its own. The accessible
             // name still comes from the content, not this.
             title={label}
             // Explicit `cursor-pointer`: Tailwind's preflight gives buttons
@@ -97,12 +107,15 @@ export const ProjectCard = ({
       {meta && <p className="text-muted-foreground mt-1 text-xs">{meta}</p>}
 
       {/* Provenance, not live identity: the address that created the project.
-          Nullable on legacy rows, and then the line is simply absent. */}
+          Nullable on legacy rows, and then the line is simply absent.
+
+          Wraps rather than truncates. A `title` here would be dead weight — the
+          stretched overlay is positioned, so it wins hit-testing over this
+          non-positioned text and the name button's tooltip is what a hover
+          actually resolves to. Wrapping is a recovery the overlay can't cover.
+          `h-full` on the Card keeps a wrapped card level with its row. */}
       {project.ownerEmail && (
-        <p
-          className="text-muted-foreground mt-3 truncate text-xs"
-          title={project.ownerEmail}
-        >
+        <p className="text-muted-foreground mt-3 text-xs break-words">
           Owned by {project.ownerEmail}
         </p>
       )}

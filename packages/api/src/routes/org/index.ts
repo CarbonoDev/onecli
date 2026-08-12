@@ -6,6 +6,9 @@ import { orgGroupRoutes } from "./groups";
 import { orgRoleMappingRoutes } from "./role-mappings";
 import { ossOrgPolicyRoutes } from "./policy";
 import { ossOrgBudgetRoutes } from "./budgets";
+import { ossOrgSecretRoutes } from "./secrets";
+import { ossOrgConnectionRoutes } from "./connections";
+import { ossOrgAppRoutes } from "./apps";
 import { ossProjectRoutes } from "./projects";
 import { ossOrganizationRoutes } from "./organizations";
 
@@ -38,6 +41,9 @@ export const registerOssOrgRoutes = (app: Hono<ApiEnv>) => {
   app.route("/org/role-mappings", orgRoleMappingRoutes());
   app.route("/org/policy", ossOrgPolicyRoutes());
   app.route("/org/budgets", ossOrgBudgetRoutes());
+  app.route("/org/secrets", ossOrgSecretRoutes());
+  app.route("/org/connections", ossOrgConnectionRoutes());
+  app.route("/org/apps", ossOrgAppRoutes());
   app.route("/projects", ossProjectRoutes());
   app.route("/organizations", ossOrganizationRoutes());
 };

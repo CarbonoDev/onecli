@@ -20,9 +20,31 @@ import {
   BreadcrumbPage,
   BreadcrumbSeparator,
 } from "@onecli/ui/components/breadcrumb";
-import { navItems } from "@/lib/nav-config";
+import {
+  isPathUnderNavItem,
+  navBreadcrumbLabel,
+  navItemsForShell,
+  resolveNavShell,
+} from "@/lib/nav-config";
+import {
+  useCurrentOrganizationId,
+  useOrganizationsList,
+} from "@/hooks/use-organizations";
+import { useCurrentProjectId, useProjectsList } from "@/hooks/use-projects";
 import { GetStartedButton } from "./get-started-button";
 import { ApprovalsBell } from "@/lib/components/approvals";
+
+/** A rendered breadcrumb entry. The last one is the current page and never
+ * links; every earlier one does. */
+interface Crumb {
+  label: string;
+  href?: string;
+}
+
+/** Owns `/settings/*` pages that belong to neither nav list (Profile, API
+ * Keys, Instance, Encryption, Domains, SSO) so they keep rendering
+ * `Settings › <Page>` instead of collapsing to `Dashboard`. */
+const SETTINGS_FALLBACK = { title: "Settings", url: "/settings" };
 
 const GitHubIcon = ({ className }: { className?: string }) => (
   <svg
@@ -50,8 +72,32 @@ export const DashboardHeader = () => {
   const pathname = usePathname();
   const { resolvedTheme, setTheme } = useTheme();
 
-  const navItem = navItems.find((item) => pathname.startsWith(item.url));
-  const title = navItem?.title ?? "Dashboard";
+  const shell = resolveNavShell(pathname);
+
+  // Same react-query keys the sidebar switchers already subscribe to, so the
+  // org and project crumbs cost no extra request. Both resolve after
+  // hydration; each crumb renders only once its name is known rather than
+  // flashing a placeholder.
+  const organizationId = useCurrentOrganizationId();
+  const { data: organizations } = useOrganizationsList();
+  const organizationName = organizations?.find(
+    (org) => org.id === organizationId,
+  )?.name;
+
+  const projectId = useCurrentProjectId();
+  const { data: projects } = useProjectsList();
+  const project = projects?.find((p) => p.id === projectId);
+  const projectName = project?.name ?? project?.slug;
+
+  // Longest match wins, so `/settings/project` resolves to "Project Settings"
+  // rather than to whichever entry happened to be listed first.
+  const navItem =
+    navItemsForShell(shell)
+      .filter((item) => isPathUnderNavItem(pathname, item.url))
+      .sort((a, b) => b.url.length - a.url.length)[0] ??
+    (isPathUnderNavItem(pathname, SETTINGS_FALLBACK.url)
+      ? SETTINGS_FALLBACK
+      : undefined);
 
   const subPath = navItem
     ? pathname.slice(navItem.url.length).replace(/^\//, "")
@@ -67,46 +113,58 @@ export const DashboardHeader = () => {
   const formatSegment = (s: string) =>
     s.charAt(0).toUpperCase() + s.slice(1).replace(/-/g, " ");
 
+  // Org › [All projects › Project ›] Page › Sub-page. The scope crumbs are
+  // dropped rather than stubbed while their names load.
+  const crumbs: Crumb[] = [];
+  if (organizationName) {
+    crumbs.push({ label: organizationName, href: "/projects" });
+  }
+  if (shell === "project") {
+    crumbs.push({ label: "All projects", href: "/projects" });
+    if (projectName) crumbs.push({ label: projectName, href: "/overview" });
+  }
+  if (navItem) {
+    crumbs.push({ label: navItem.title, href: navItem.url });
+    subSegments.forEach((segment, i) => {
+      const href = `${navItem.url}/${subSegments.slice(0, i + 1).join("/")}`;
+      // Prefer the label the nav already declares for this exact path — that
+      // is what turns `/settings/api-keys` into "API Keys" instead of the
+      // title-cased slug "Api keys".
+      crumbs.push({
+        label: navBreadcrumbLabel(href) ?? formatSegment(segment),
+        href,
+      });
+    });
+  } else {
+    crumbs.push({ label: "Dashboard" });
+  }
+
   return (
     <div className="flex w-full items-center gap-2 px-4">
       <SidebarTrigger className="-ml-1" />
       <Separator orientation="vertical" className="mr-2 h-4!" />
       <Breadcrumb className="min-w-0 flex-1 overflow-hidden">
         <BreadcrumbList className="flex-nowrap overflow-hidden">
-          {subSegments.length > 0 ? (
-            <>
-              <BreadcrumbItem>
-                <BreadcrumbLink asChild>
-                  <Link href={navItem!.url}>{title}</Link>
-                </BreadcrumbLink>
-              </BreadcrumbItem>
-              {subSegments.map((segment, i) => {
-                const isLast = i === subSegments.length - 1;
-                const href =
-                  navItem!.url + "/" + subSegments.slice(0, i + 1).join("/");
-                return (
-                  <span key={segment} className="contents">
-                    <BreadcrumbSeparator />
-                    <BreadcrumbItem>
-                      {isLast ? (
-                        <BreadcrumbPage>
-                          {formatSegment(segment)}
-                        </BreadcrumbPage>
-                      ) : (
-                        <BreadcrumbLink asChild>
-                          <Link href={href}>{formatSegment(segment)}</Link>
-                        </BreadcrumbLink>
-                      )}
-                    </BreadcrumbItem>
-                  </span>
-                );
-              })}
-            </>
-          ) : (
-            <BreadcrumbItem>
-              <BreadcrumbPage>{title}</BreadcrumbPage>
-            </BreadcrumbItem>
-          )}
+          {crumbs.map((crumb, i) => {
+            const isLast = i === crumbs.length - 1;
+            return (
+              <span
+                key={`${crumb.href ?? ""}:${crumb.label}`}
+                className="contents"
+              >
+                {i > 0 && <BreadcrumbSeparator />}
+                <BreadcrumbItem>
+                  {isLast || !crumb.href ? (
+                    <BreadcrumbPage>{crumb.label}</BreadcrumbPage>
+                  ) : (
+                    <BreadcrumbLink asChild>
+                      <Link href={crumb.href}>{crumb.label}</Link>
+                    </BreadcrumbLink>
+                  )}
+                </BreadcrumbItem>
+              </span>
+            );
+          })}
         </BreadcrumbList>
       </Breadcrumb>
       <div className="ml-auto flex items-center gap-1">

@@ -87,6 +87,7 @@ export const ApiKeyCard = () => {
           <Button
             variant="ghost"
             size="icon"
+            aria-label={revealed ? "Hide API key" : "Reveal API key"}
             onClick={() => setRevealed(!revealed)}
             disabled={loading || !apiKey}
           >
@@ -99,6 +100,7 @@ export const ApiKeyCard = () => {
           <Button
             variant="ghost"
             size="icon"
+            aria-label="Copy API key"
             onClick={() => copy(apiKey)}
             disabled={loading || !apiKey}
           >
@@ -113,6 +115,7 @@ export const ApiKeyCard = () => {
               <Button
                 variant="ghost"
                 size="icon"
+                aria-label="Regenerate API key"
                 disabled={loading || regenerating || !apiKey}
               >
                 <RefreshCw

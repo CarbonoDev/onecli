@@ -113,6 +113,7 @@ export const CreateAgentDialog = ({
                   variant="ghost"
                   size="icon"
                   className="size-7 shrink-0"
+                  aria-label="Copy agent identifier"
                   onClick={() => copy(createdIdentifier)}
                 >
                   {copied ? (

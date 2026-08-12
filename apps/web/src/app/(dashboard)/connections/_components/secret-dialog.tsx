@@ -568,6 +568,7 @@ export const SecretDialog = ({
               <div className="flex items-center gap-2">
                 {!isEdit && !defaultType && (
                   <button
+                    aria-label="Back to secret type"
                     onClick={() => setStep("type")}
                     className="text-muted-foreground hover:text-foreground -ml-1 rounded-md p-1 transition-colors"
                   >
@@ -1457,7 +1458,15 @@ const OnePasswordPickerButton = ({ onClick }: { onClick: () => void }) => (
           aria-label="Use a 1Password field"
           className="size-9 shrink-0 transition-colors hover:border-[#1A8CFF]/40 hover:bg-[#1A8CFF]/5"
         >
-          <Image src="/icons/onepassword.svg" alt="" width={20} height={20} />
+          {/* SVG: the Next image optimizer 400s on it, so serve it straight
+              from `public/` (see AppIcon). */}
+          <Image
+            src="/icons/onepassword.svg"
+            alt=""
+            width={20}
+            height={20}
+            unoptimized
+          />
         </Button>
       </TooltipTrigger>
       <TooltipContent>Use a 1Password field</TooltipContent>
@@ -1482,6 +1491,7 @@ const OnePasswordSelectedField = ({
         alt="1Password"
         width={30}
         height={30}
+        unoptimized
         className="shrink-0"
       />
       <div className="min-w-0 leading-tight">

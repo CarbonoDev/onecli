@@ -61,7 +61,13 @@ export const MemberRowActions = ({ member, isYou }: MemberRowActionsProps) => {
           {/* span wrapper: disabled buttons swallow the hover events the
               tooltip needs */}
           <span className="inline-flex">
-            <Button variant="ghost" size="icon" className="size-8" disabled>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="size-8"
+              aria-label={`Actions for ${member.email}`}
+              disabled
+            >
               <MoreHorizontal className="size-4" />
             </Button>
           </span>
@@ -83,6 +89,7 @@ export const MemberRowActions = ({ member, isYou }: MemberRowActionsProps) => {
             variant="ghost"
             size="icon"
             className="size-8"
+            aria-label={`Actions for ${member.email}`}
             disabled={update.isPending}
           >
             {update.isPending ? (

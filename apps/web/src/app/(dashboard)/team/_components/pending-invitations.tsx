@@ -139,12 +139,16 @@ export const PendingInvitations = ({
                         {/* The link is only actionable while pending. */}
                         {row.status === "pending" && (
                           <>
-                            <CopyLinkButton token={row.token} />
+                            <CopyLinkButton
+                              token={row.token}
+                              email={row.email}
+                            />
                             <Button
                               variant="ghost"
                               size="icon"
                               className="size-8"
                               title="Revoke invitation"
+                              aria-label={`Revoke invitation for ${row.email}`}
                               onClick={() => setRevokeTarget(row)}
                             >
                               <Trash2 className="size-4" />

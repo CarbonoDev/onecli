@@ -143,10 +143,50 @@ pub(crate) async fn find_default_project_id_by_user(
     Ok(row.map(|(id,)| id))
 }
 
-/// Look up an API key (`oc_...`) and return its user_id and project_id.
+/// Look up an API key (`oc_...`) and return its user_id and project_id,
+/// stamping `last_used_at` in the same statement.
+///
+/// The gateway is the second place a project key authenticates (the Hono API
+/// is the other), so it has to record use too — a key that leaked and is only
+/// ever pointed at the gateway would otherwise look untouched.
+///
+/// The write is a data-modifying CTE rather than a follow-up query on purpose:
+/// Postgres runs it exactly once regardless of whether the primary query reads
+/// it, so recording usage costs the same ONE round trip the lookup already
+/// cost — no second statement, no write on the response path. Its `WHERE`
+/// carries the same throttle as the TypeScript path
+/// (`API_KEY_LAST_USED_THROTTLE_MS`), so a hot key writes at most one row per
+/// 15 minutes and concurrent requests across replicas collapse into no-ops.
+///
+/// `project_id IS NOT NULL` fences out org keys (`oc_org_*`), which reach here
+/// too because the caller only checks the `oc_` prefix. They never
+/// authenticated on this path — the row failed to decode into `ApiKeyRow` and
+/// fell through to session auth — so they must not be recorded as if they had.
+/// Filtering them in SQL keeps that outcome identical and drops a spurious
+/// decode warning.
+///
+/// `NOW() AT TIME ZONE 'UTC'` rather than the bare `NOW()` its neighbours use:
+/// `last_used_at` is a `timestamp WITHOUT time zone` that Prisma fills with UTC
+/// values, and a bare `NOW()` would be cast using the session's TimeZone — so
+/// a non-UTC session would write a value that the TypeScript path, and the
+/// throttle comparison right below, both read as skewed.
 pub(crate) async fn find_api_key(pool: &PgPool, key: &str) -> Result<Option<ApiKeyRow>> {
     sqlx::query_as::<_, ApiKeyRow>(
-        r#"SELECT user_id, project_id FROM api_keys WHERE key = $1 LIMIT 1"#,
+        r#"WITH matched AS (
+               SELECT id, user_id, project_id
+                 FROM api_keys
+                WHERE key = $1 AND project_id IS NOT NULL
+                LIMIT 1
+           ), touched AS (
+               UPDATE api_keys k
+                  SET last_used_at = NOW() AT TIME ZONE 'UTC'
+                 FROM matched m
+                WHERE k.id = m.id
+                  AND (k.last_used_at IS NULL
+                       OR k.last_used_at
+                          < (NOW() AT TIME ZONE 'UTC') - interval '15 minutes')
+           )
+           SELECT user_id, project_id FROM matched"#,
     )
     .bind(key)
     .fetch_optional(pool)

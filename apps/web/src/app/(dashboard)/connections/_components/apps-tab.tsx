@@ -47,6 +47,17 @@ import { ConnectAppDialog } from "./connect-app-dialog";
 import { ConfigureCredentialsDialog } from "./configure-credentials-dialog";
 import { useConnectParam } from "./use-connect-param";
 
+/**
+ * Whether choosing this app's connect action depends on the configured/env-default
+ * credential sets. Only an unconnected app that carries its own credential fields
+ * can be routed to `ConfigureCredentialsDialog`; everything else goes straight to
+ * the OAuth popup regardless of what those two queries return. Single source of
+ * truth for both `handleConnect`'s branch and the disabled gate on its controls —
+ * if they drifted, a control could stay enabled while its outcome was still unknown.
+ */
+const needsCredentialData = (app: AppDefinition, connectionCount: number) =>
+  Boolean(app.configurable?.fields) && connectionCount === 0;
+
 interface AppsTabProps {
   pageScope?: PageScope;
   basePath?: string;
@@ -139,10 +150,16 @@ export const AppsTab = ({
     () => new Set(envDefaultsQuery.data ?? []),
     [envDefaultsQuery.data],
   );
-  const loading =
-    connectionsQuery.isPending ||
-    configuredQuery.isPending ||
-    envDefaultsQuery.isPending;
+  // The grid only needs connections: an app's name, icon and connected/count
+  // state all come from `connectionsQuery`. Gating it on the credential queries
+  // too made every card sit behind a skeleton for the slowest of the three.
+  const gridLoading = connectionsQuery.isPending;
+  // ...but the *connect action* still needs both credential sets to pick between
+  // the credentials dialog and the OAuth popup. Until these settle both sets are
+  // empty, which would send an already-configured app to the wrong dialog, so
+  // every control whose outcome depends on them stays disabled.
+  const credentialsPending =
+    configuredQuery.isPending || envDefaultsQuery.isPending;
 
   const handleConnected = useCallback(
     ({ provider, connectionId }: AppConnectedEvent) => {
@@ -217,9 +234,11 @@ export const AppsTab = ({
     [connectionCounts],
   );
 
-  // Handle ?connect=<provider> and ?request=<hostname> URL params
+  // Handle ?connect=<provider> and ?request=<hostname> URL params. This branches
+  // on the credential sets exactly like `handleConnect`, so it must keep waiting
+  // on all three queries — only the grid render was unblocked.
   useConnectParam({
-    loading,
+    loading: gridLoading || credentialsPending,
     connectedProviders,
     configuredProviders,
     envDefaultProviders,
@@ -273,9 +292,8 @@ export const AppsTab = ({
     const hasCredentials =
       envDefaultProviders.has(app.id) || configuredProviders.has(app.id);
     if (
-      app.configurable?.fields &&
-      !hasCredentials &&
-      (connectionCounts.get(app.id) ?? 0) === 0
+      needsCredentialData(app, connectionCounts.get(app.id) ?? 0) &&
+      !hasCredentials
     ) {
       setConfigApp(app);
       return;
@@ -341,7 +359,7 @@ export const AppsTab = ({
             initialUrl={requestHostname}
           />
         )}
-        {loading ? (
+        {gridLoading ? (
           Array.from({ length: 12 }, (_, i) => (
             <div
               key={i}
@@ -382,6 +400,24 @@ export const AppsTab = ({
           filteredApps.map((app) => {
             const count = connectionCounts.get(app.id) ?? 0;
             const isLocked = !app.available;
+            // Connecting this app can't be decided yet — hold its controls.
+            const connectPending =
+              credentialsPending && needsCredentialData(app, count);
+            // In connect-only mode the whole row is a connect control, so it is
+            // held too; elsewhere the row just navigates and stays clickable.
+            const handleRowClick = isLocked
+              ? () => setProApp(app)
+              : connectOnly
+                ? connectPending
+                  ? undefined
+                  : () => handleConnect(undefined, app)
+                : () =>
+                    router.push(
+                      connectionsPath(
+                        { pathname, basePath },
+                        `/apps/${app.id}`,
+                      ),
+                    );
             return (
               <AppRow
                 key={app.id}
@@ -391,20 +427,9 @@ export const AppsTab = ({
                 connectionCount={count}
                 cloudOnly={isLocked}
                 hideDetails={connectOnly}
+                connectPending={connectPending}
                 onConnect={(e) => handleConnect(e, app)}
-                onClick={
-                  isLocked
-                    ? () => setProApp(app)
-                    : connectOnly
-                      ? () => handleConnect(undefined, app)
-                      : () =>
-                          router.push(
-                            connectionsPath(
-                              { pathname, basePath },
-                              `/apps/${app.id}`,
-                            ),
-                          )
-                }
+                onClick={handleRowClick}
               />
             );
           })
@@ -478,8 +503,11 @@ interface AppRowProps {
   connectionCount: number;
   cloudOnly?: boolean;
   hideDetails?: boolean;
+  /** Credential data needed to route this app's connect action hasn't arrived. */
+  connectPending?: boolean;
   onConnect: (e: React.MouseEvent) => void;
-  onClick: () => void;
+  /** Omitted while the row's action is held pending — the row renders inert. */
+  onClick?: () => void;
 }
 
 const AppRow = ({
@@ -489,6 +517,7 @@ const AppRow = ({
   connectionCount,
   cloudOnly,
   hideDetails,
+  connectPending,
   onConnect,
   onClick,
 }: AppRowProps) => {
@@ -496,7 +525,9 @@ const AppRow = ({
   return (
     <div
       className={cn(
-        "group flex items-center gap-3 rounded-xl border bg-card px-4 py-3.5 transition-colors cursor-pointer hover:bg-accent/50 has-[button:hover]:bg-card!",
+        "group flex items-center gap-3 rounded-xl border bg-card px-4 py-3.5 transition-colors",
+        onClick &&
+          "cursor-pointer hover:bg-accent/50 has-[button:hover]:bg-card!",
         connected && "border-brand/30",
       )}
       onClick={onClick}
@@ -535,9 +566,17 @@ const AppRow = ({
                 )}
               </div>
             ) : (
-              <Button size="xs" onClick={onConnect}>
-                Connect
-              </Button>
+              // A disabled Button is `pointer-events:none`, so a click aimed at
+              // it would otherwise fall through to the row and navigate away.
+              <div
+                onClick={
+                  connectPending ? (e) => e.stopPropagation() : undefined
+                }
+              >
+                <Button size="xs" loading={connectPending} onClick={onConnect}>
+                  Connect
+                </Button>
+              </div>
             )}
           </div>
         </div>

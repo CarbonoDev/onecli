@@ -193,7 +193,14 @@ export const DashboardHeader = () => {
                       <Link href={crumb.href}>{crumb.label}</Link>
                     </BreadcrumbLink>
                   ) : (
-                    crumb.label
+                    // A crumb with nowhere to go (`Settings`, or an ancestor
+                    // whose destination the next crumb repeats). Wrapped so it
+                    // is not an anchor and keeps the default cursor — the
+                    // affordance links get from `<a href>`. Deliberately NOT
+                    // dimmed: `--muted-foreground` is already at the AA
+                    // contrast floor, so fading it would trade one honesty
+                    // problem for a legibility one.
+                    <span className="cursor-default">{crumb.label}</span>
                   )}
                 </BreadcrumbItem>
               </span>

@@ -1,5 +1,5 @@
 import { db } from "@onecli/db";
-import { listProjects } from "./project-service";
+import { listProjectIds } from "./project-service";
 
 /**
  * Org-scope gateway usage: request volume for the rolling window, split by
@@ -72,14 +72,20 @@ const zeroSummary = (periodStart: Date, periodEnd: Date): UsageSummary => ({
 /**
  * Usage for every project the caller may reach in this org.
  *
- * `listProjects` is BOTH the org fence and the authorization fence, and it has
- * to be: `request_logs` has no `organization_id` column, so resolving the
+ * `listProjectIds` is BOTH the org fence and the authorization fence, and it
+ * has to be: `request_logs` has no `organization_id` column, so resolving the
  * project ids the caller may see is the only way to scope the aggregate to an
  * org at all. Consequently this read is member-visible with per-project
  * fencing rather than admin-only — a member sees exactly their bound projects'
  * traffic. A caller with no reachable projects gets a ZEROED summary carrying
  * real period bounds, never a 403: "you can see nothing" is an empty result,
  * not a permission error (the `GET /projects` precedent).
+ *
+ * The `Ids` half of that name is a COST choice, never a scope one — it is the
+ * same `visibleProjectsWhere` fence `listProjects` runs, differing only in
+ * selecting nothing but the id. Ids are all this function wants; `listProjects`
+ * would additionally bill every Usage load for the card grid's three grouped
+ * inventory counts and then discard them. Do not "simplify" this back.
  */
 export const getOrganizationUsage = async (
   organizationId: string,
@@ -89,9 +95,7 @@ export const getOrganizationUsage = async (
   const periodEnd = new Date(now);
   const periodStart = new Date(now - USAGE_WINDOW_MS);
 
-  const projectIds = (await listProjects(organizationId, userId)).map(
-    (p) => p.id,
-  );
+  const projectIds = await listProjectIds(organizationId, userId);
   if (projectIds.length === 0) return zeroSummary(periodStart, periodEnd);
 
   // Bounded at BOTH ends. `lt: periodEnd` is not redundant with "now": a

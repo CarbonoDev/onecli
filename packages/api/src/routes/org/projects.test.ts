@@ -854,6 +854,7 @@ vi.mock("@onecli/db", () => {
 import { createApiApp } from "../../app";
 import { registerOssOrgRoutes } from "./index";
 import { ossRoleResolver } from "../../services/org-role-resolver";
+import { listProjectIds, listProjects } from "../../services/project-service";
 
 const sessionProvider = {
   getSession: async () => {
@@ -1323,6 +1324,25 @@ describe("GET /projects (list)", () => {
     for (const id of ["proj-1", "proj-2", "proj-3", "proj-4"]) {
       const readable = (await get(id, {})).status === 200;
       expect(listed.has(id)).toBe(readable);
+    }
+  });
+
+  it("fences listProjectIds exactly as listProjects, arm for arm", async () => {
+    // The two entry points MUST agree. `listProjectIds` exists to spare a
+    // scope-only caller (`/v1/org/usage`, which wants ids and nothing else)
+    // this list's three grouped counts — it is a COST split, never a scope
+    // one, and both run the single `visibleProjectsWhere`. This is what would
+    // catch a future second copy of the predicate drifting: an id reachable
+    // through one and not the other is either a leak or a blind spot.
+    //
+    // One user per arm: ADMIN (whole org), MEMBER and MEMBER2 (direct and
+    // group-derived bindings), STRANGER (no role at all — the deny arm, which
+    // must return [] from both without querying).
+    for (const userId of [ADMIN, MEMBER, MEMBER2, STRANGER]) {
+      const listed = await listProjects(ORG, userId);
+      expect(await listProjectIds(ORG, userId)).toEqual(
+        listed.map((p) => p.id),
+      );
     }
   });
 

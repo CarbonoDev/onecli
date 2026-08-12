@@ -13,8 +13,9 @@ import { getOrganizationUsage } from "../../services/usage-service";
  * Policy, budgets, secrets and friends are `role: "admin"`. Usage is
  * deliberately NOT: it is **member-visible with per-project fencing**. The
  * fencing is not a second check bolted on — `getOrganizationUsage` scopes the
- * aggregate through `listProjects`, which returns only the projects the caller
- * may reach, so a member sees their own projects' traffic and nothing else. A
+ * aggregate through `listProjectIds`, which returns only the projects the
+ * caller may reach — the same fence `listProjects` applies, selecting only the
+ * ids — so a member sees their own projects' traffic and nothing else. A
  * member with no bindings gets a zeroed summary, not a 403 (same shape as
  * `GET /projects`, whose list IS its authorization).
  *

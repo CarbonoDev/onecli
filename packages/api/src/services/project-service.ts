@@ -1,4 +1,5 @@
 import { db } from "@onecli/db";
+import type { Prisma } from "@onecli/db";
 import { ServiceError } from "./errors";
 import {
   getRoleResolver,
@@ -348,17 +349,31 @@ export const getProject = async (
   return toSingleProjectRow(row);
 };
 
-const listAllProjects = async (organizationId: string): Promise<ProjectRow[]> =>
-  toProjectRows(
-    await db.project.findMany({
-      where: { organizationId },
-      select: projectRowSelect,
-      orderBy: [{ createdAt: "asc" }, { id: "asc" }],
-    }),
-  );
+/**
+ * Ordering for every listing entry point. Matches `findUserDefaultProject`
+ * (`createdAt asc, id asc`) so the project a caller lands on by default is the
+ * first one a switcher shows.
+ */
+const projectOrder = [
+  { createdAt: "asc" },
+  { id: "asc" },
+] satisfies Prisma.ProjectOrderByWithRelationInput[];
 
 /**
- * Every project in `organizationId` the caller may USE, oldest first.
+ * THE authorization boundary for listing projects, as a `where` — the SINGLE
+ * construction behind `listProjects` and `listProjectIds` alike.
+ *
+ * It is a `where` builder rather than a query precisely so a second entry point
+ * can exist without a second copy of the predicate. Two copies would be two
+ * things to keep in step, and the failure mode of drift is silent: a listing
+ * that is one arm wider than the gate leaks project names past their
+ * ProjectAccess bindings. There is one arm-for-arm definition, here, and every
+ * caller runs THIS object verbatim — differing only in `select`.
+ *
+ * `null` is DENY, and is deliberately not `{ id: { in: [] } }` or similar: the
+ * caller must return its empty result without querying at all, which is both
+ * the honest encoding of "no role, nothing to see" and one round trip saved on
+ * the common non-member path.
  *
  * THIS MUST MIRROR `canAccessProjectAsUser` — it is that per-row predicate
  * expressed as a query, arm for arm, and the two are required to agree. Drift
@@ -369,46 +384,93 @@ const listAllProjects = async (organizationId: string): Promise<ProjectRow[]> =>
  * The arms, in the same order and for the same reasons as the gate:
  *
  *  1. No RBAC — the gate no-ops (allows), so the list is the whole org.
- *  2. No role — suspended or not a member. Empty, and the binding arm is
+ *  2. No role — suspended or not a member. Deny, and the binding arm is
  *     INSIDE this gate, so a suspended user's stale binding is never consulted
  *     (the suspension invariant).
  *  3. Admin/owner — the whole org.
  *  4. Otherwise — projects carrying a binding for this user, direct or through
  *     a group. `role` is deliberately not filtered: usage is role-blind, and a
  *     plain `member` binding is a full use grant.
- *
- * Ordering matches `findUserDefaultProject` (`createdAt asc, id asc`) so the
- * project a caller lands on by default is the first one a switcher shows.
  */
-export const listProjects = async (
+const visibleProjectsWhere = async (
   organizationId: string,
   userId: string,
-): Promise<ProjectRow[]> => {
-  if (!CAPS.rbac) return listAllProjects(organizationId);
+): Promise<Prisma.ProjectWhereInput | null> => {
+  if (!CAPS.rbac) return { organizationId };
 
   const resolver = getRoleResolver();
   const role = resolver
     ? await resolver.getUserRole(userId, organizationId)
     : null;
-  if (!role) return [];
-  if (ROLE_HIERARCHY[role] >= ROLE_HIERARCHY.admin) {
-    return listAllProjects(organizationId);
-  }
+  if (!role) return null;
+  if (ROLE_HIERARCHY[role] >= ROLE_HIERARCHY.admin) return { organizationId };
+
+  return {
+    organizationId,
+    accessBindings: {
+      some: {
+        OR: [{ userId }, { group: { members: { some: { userId } } } }],
+      },
+    },
+  };
+};
+
+/**
+ * Every project in `organizationId` the caller may USE, oldest first, each with
+ * the inventory the card grid renders.
+ *
+ * Authorization is entirely `visibleProjectsWhere` — see there for the arms.
+ * What this adds is COST: the row select carries the owner column, and
+ * `toProjectRows` spends three more grouped statements on the counts. A caller
+ * that only needs to know WHICH projects wants `listProjectIds`, which shares
+ * this exact fence and pays for none of that.
+ */
+export const listProjects = async (
+  organizationId: string,
+  userId: string,
+): Promise<ProjectRow[]> => {
+  const where = await visibleProjectsWhere(organizationId, userId);
+  if (!where) return [];
 
   return toProjectRows(
     await db.project.findMany({
-      where: {
-        organizationId,
-        accessBindings: {
-          some: {
-            OR: [{ userId }, { group: { members: { some: { userId } } } }],
-          },
-        },
-      },
+      where,
       select: projectRowSelect,
-      orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+      orderBy: projectOrder,
     }),
   );
+};
+
+/**
+ * The ids of every project the caller may USE — `listProjects` with the fence
+ * and none of the payload.
+ *
+ * This exists for the callers that use the project list purely as a SCOPE, of
+ * which `getOrganizationUsage` is the archetype: `request_logs` has no
+ * `organization_id`, so the ids the caller may see are the only way to fence an
+ * aggregate to an org, and the usage page has no use whatever for a project's
+ * name, owner or resource inventory. Reaching for `listProjects` there charged
+ * every Usage load three grouped counts over `agents`, `secrets` and
+ * `app_connections` whose results were dropped on the next line.
+ *
+ * The saving is the counts and the owner column, NOT the fence: this is the
+ * same authorization boundary as `listProjects`, because it is the same
+ * `visibleProjectsWhere` object handed to the same query. An id a caller gets
+ * here is an id they would have got there, and never one more.
+ */
+export const listProjectIds = async (
+  organizationId: string,
+  userId: string,
+): Promise<string[]> => {
+  const where = await visibleProjectsWhere(organizationId, userId);
+  if (!where) return [];
+
+  const rows = await db.project.findMany({
+    where,
+    select: { id: true },
+    orderBy: projectOrder,
+  });
+  return rows.map((row) => row.id);
 };
 
 /** Prisma's unique-constraint code, same test as `org-group-service.ts`. */

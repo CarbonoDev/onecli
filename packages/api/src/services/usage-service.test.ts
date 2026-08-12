@@ -32,7 +32,8 @@ interface GroupByArgs {
 const store = vi.hoisted(() => ({
   logs: [] as LogRow[],
   agents: [] as AgentRow[],
-  projects: [] as { id: string }[],
+  /** The ids `listProjectIds` resolves for the caller — the service's fence. */
+  projectIds: [] as string[],
   /** Every `where` the service handed to `groupBy`, in call order. */
   groupByWheres: [] as GroupByArgs["where"][],
   /** Set to canned rows to force the injected aggregate out of range. */
@@ -98,8 +99,11 @@ vi.mock("@onecli/db", () => {
   };
 });
 
+// The service takes its scope from the id-only entry point, NOT `listProjects`
+// — same fence, no card-grid counts. Mocking the one it actually calls is what
+// keeps this suite from witnessing a shape the service no longer has.
 vi.mock("./project-service", () => ({
-  listProjects: async () => store.projects,
+  listProjectIds: async () => store.projectIds,
 }));
 
 const { getOrganizationUsage, USAGE_WINDOW_MS } =
@@ -126,7 +130,7 @@ beforeEach(() => {
     { id: "agent-b", projectId: "proj-1", name: "Bridge" },
     { id: "agent-c", projectId: "proj-2", name: "Beacon" },
   ];
-  store.projects = [{ id: "proj-1" }, { id: "proj-2" }];
+  store.projectIds = ["proj-1", "proj-2"];
   store.groupByWheres = [];
   store.injectedOverride = null;
   store.transactions = 0;
@@ -266,7 +270,7 @@ describe("getOrganizationUsage — agent resolution", () => {
 
   it("does not resolve names outside the caller's projects", async () => {
     // `agent-c` lives in proj-2, which this caller cannot reach.
-    store.projects = [{ id: "proj-1" }];
+    store.projectIds = ["proj-1"];
     store.logs = [log("agent-c", 1, 1, "proj-1")];
 
     const usage = await getOrganizationUsage(ORG, USER, NOW);
@@ -277,7 +281,7 @@ describe("getOrganizationUsage — agent resolution", () => {
 
 describe("getOrganizationUsage — no reachable projects", () => {
   it("returns a zeroed summary with real bounds, not an error", async () => {
-    store.projects = [];
+    store.projectIds = [];
 
     const usage = await getOrganizationUsage(ORG, USER, NOW);
 
@@ -291,7 +295,7 @@ describe("getOrganizationUsage — no reachable projects", () => {
   });
 
   it("issues no aggregate at all when there is nothing to scope to", async () => {
-    store.projects = [];
+    store.projectIds = [];
 
     await getOrganizationUsage(ORG, USER, NOW);
 

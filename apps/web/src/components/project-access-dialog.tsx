@@ -6,6 +6,7 @@ import { toast } from "sonner";
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle,
@@ -217,10 +218,14 @@ export const ProjectAccessDialog = ({
       <DialogContent className="gap-0 p-0 sm:max-w-lg">
         <DialogHeader className="p-6 pb-4">
           <DialogTitle>Manage project access</DialogTitle>
-          <p className="text-muted-foreground text-xs leading-relaxed">
+          {/* `DialogDescription`, not a bare `<p>`: the copy was always here,
+              but only this component is wired to the dialog's
+              `aria-describedby` — so a screen reader announced the title
+              alone, and Radix warned about the missing description. */}
+          <DialogDescription className="text-xs leading-relaxed">
             Choose who can use this project. Owners can also rename, share and
             delete it. Groups grant access to everyone in them.
-          </p>
+          </DialogDescription>
         </DialogHeader>
 
         <div className="px-6 pb-1">

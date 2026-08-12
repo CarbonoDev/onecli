@@ -6,6 +6,7 @@ import { toast } from "sonner";
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle,
@@ -130,10 +131,12 @@ export const GroupMembersDialog = ({
       <DialogContent className="gap-0 p-0 sm:max-w-lg">
         <DialogHeader className="p-6 pb-4">
           <DialogTitle>Members of {groupName}</DialogTitle>
-          <p className="text-muted-foreground text-xs leading-relaxed">
+          {/* The copy was already here as a bare `<p>`; only
+              `DialogDescription` is wired to the dialog's `aria-describedby`. */}
+          <DialogDescription className="text-xs leading-relaxed">
             Choose which organization members belong to this group. Project
             access granted to the group follows its membership.
-          </p>
+          </DialogDescription>
         </DialogHeader>
 
         <div className="px-6 pb-1">

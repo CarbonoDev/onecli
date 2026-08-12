@@ -5,6 +5,7 @@ import { Button } from "@onecli/ui/components/button";
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
   DialogHeader,
   DialogTitle,
 } from "@onecli/ui/components/dialog";
@@ -60,9 +61,12 @@ export const ConnectAppDialog = ({
             <DialogHeader className="items-center p-0">
               <DialogTitle className="text-lg">Connect {appName}</DialogTitle>
             </DialogHeader>
-            <p className="text-muted-foreground mt-1 text-xs">
+            {/* Already the dialog's description in every sense but the
+                accessible one — `DialogDescription` is what ties it to
+                `aria-describedby`. */}
+            <DialogDescription className="mt-1 text-xs">
               You&apos;ll be redirected to authenticate.
-            </p>
+            </DialogDescription>
           </div>
           <Button className="w-full" onClick={onConnect}>
             Continue

@@ -7,8 +7,8 @@ import { parse as parsePublicSuffix } from "tldts";
  * cosmetic nicety: `Example.COM`, `example.com.` and `münchen.de` must all
  * collapse to the one string the index sees, or the same name could be claimed
  * twice — once per spelling — by two different organizations. Every write path
- * runs a value through `normalizeDomain` before it reaches the database, and
- * every read compares against the normalized form.
+ * runs a value through `parseClaimableDomain` before it reaches the database,
+ * and every read compares against the normalized form.
  *
  * Pure and dependency-light so both the service and its tests can call it
  * directly.
@@ -93,7 +93,26 @@ const NOT_A_BARE_HOSTNAME = /[\s/\\@:?#%[\]]/;
 const NUMERIC_LABEL = /^\d+$/;
 
 /**
- * The canonical form of `raw`, or `null` if it is not a domain anyone could
+ * A canonical domain, or WHY it isn't one. Two rejection reasons, because they
+ * need two different things said to the person who typed the value:
+ *
+ * - `public_suffix` — the value IS a registry suffix (`com`, `co.uk`,
+ *   `github.io`). It is domain-SHAPED and spelled correctly; what is wrong is
+ *   that it is a shared root, so "enter a domain like example.com" describes
+ *   nothing they did wrong and leaves them retyping the same string. The
+ *   suffix travels with the reason so the message can name it.
+ * - `not_a_domain` — everything else: a URL, an email address, an IP literal,
+ *   an internal-only name, a malformed or over-long label.
+ */
+export type ParsedDomain =
+  | { ok: true; domain: string }
+  | { ok: false; reason: "not_a_domain" }
+  | { ok: false; reason: "public_suffix"; suffix: string };
+
+const NOT_A_DOMAIN = { ok: false, reason: "not_a_domain" } as const;
+
+/**
+ * The canonical form of `raw`, or the reason it is not a domain anyone could
  * prove ownership of over DNS.
  *
  * Rejects: IP literals (in every spelling), reserved and internal-only names
@@ -103,11 +122,11 @@ const NUMERIC_LABEL = /^\d+$/;
  * under — names too long to carry the challenge prefix, over-long labels, and
  * anything carrying a scheme, path, port, or userinfo.
  */
-export const normalizeDomain = (raw: string): string | null => {
+export const parseClaimableDomain = (raw: string): ParsedDomain => {
   // A trailing dot is the DNS root: `example.com.` and `example.com` name the
   // same zone, so they must never become two rows under the UNIQUE index.
   const trimmed = raw.trim().replace(/\.+$/, "");
-  if (!trimmed || NOT_A_BARE_HOSTNAME.test(trimmed)) return null;
+  if (!trimmed || NOT_A_BARE_HOSTNAME.test(trimmed)) return NOT_A_DOMAIN;
 
   // `URL` is the platform's own UTS-46/IDNA implementation: it lowercases and
   // punycodes in one step (`münchen.de` → `xn--mnchen-3ya.de`), which the
@@ -118,28 +137,11 @@ export const normalizeDomain = (raw: string): string | null => {
   try {
     hostname = new URL(`https://${trimmed}`).hostname;
   } catch {
-    return null;
+    return NOT_A_DOMAIN;
   }
 
   // Bounded so `challengeRecordName(domain)` still fits in a legal query name.
-  if (hostname.length > MAX_DOMAIN_LENGTH) return null;
-
-  const labels = hostname.split(".");
-  // At least one dot. A bare label is either a public suffix or an
-  // internal-only name; neither is provable over public DNS.
-  if (labels.length < 2) return null;
-  if (NUMERIC_LABEL.test(labels[labels.length - 1] ?? "")) return null;
-  if (isReservedName(hostname, labels)) return null;
-  if (
-    labels.some(
-      (label) =>
-        label.length === 0 ||
-        label.length > MAX_LABEL_LENGTH ||
-        !LABEL.test(label),
-    )
-  ) {
-    return null;
-  }
+  if (hostname.length > MAX_DOMAIN_LENGTH) return NOT_A_DOMAIN;
 
   // The public-suffix pass the character rules cannot do: `isIp` catches the IP
   // literals `URL` normalized into place, and a null `domain` means the input
@@ -152,9 +154,40 @@ export const normalizeDomain = (raw: string): string | null => {
   // on the global unique index. Subdomains are unaffected — `user.github.io`
   // still parses to a registrable domain and remains claimable.
   const parsed = parsePublicSuffix(hostname, { allowPrivateDomains: true });
-  if (parsed.isIp || !parsed.domain) return null;
 
-  return hostname;
+  const labels = hostname.split(".");
+  // At least one dot. A bare label is either a public suffix or an
+  // internal-only name; neither is provable over public DNS — but they are not
+  // the same mistake, so `isIcann` separates a real TLD someone typed on its
+  // own (`com`, `io`, `uk`) from a string that is no kind of domain
+  // (`localhost`, `printer`, a typo). Every RESERVED_TLD is absent from the
+  // ICANN list, so those keep landing in `not_a_domain` where they belong.
+  if (labels.length < 2) {
+    return parsed.isIcann
+      ? { ok: false, reason: "public_suffix", suffix: hostname }
+      : NOT_A_DOMAIN;
+  }
+  if (NUMERIC_LABEL.test(labels[labels.length - 1] ?? "")) return NOT_A_DOMAIN;
+  if (isReservedName(hostname, labels)) return NOT_A_DOMAIN;
+  if (
+    labels.some(
+      (label) =>
+        label.length === 0 ||
+        label.length > MAX_LABEL_LENGTH ||
+        !LABEL.test(label),
+    )
+  ) {
+    return NOT_A_DOMAIN;
+  }
+
+  if (parsed.isIp) return NOT_A_DOMAIN;
+  // Multi-label with no registrable domain under it means the value IS the
+  // suffix — `co.uk`, `github.io`, `s3.amazonaws.com`.
+  if (!parsed.domain) {
+    return { ok: false, reason: "public_suffix", suffix: hostname };
+  }
+
+  return { ok: true, domain: hostname };
 };
 
 /**
@@ -162,7 +195,8 @@ export const normalizeDomain = (raw: string): string | null => {
  * convention for control records (`_dmarc`, `_acme-challenge`), so it can never
  * collide with a real host in the claimant's zone.
  *
- * `normalizeDomain` bounds its input so this always fits a legal query name.
+ * `parseClaimableDomain` bounds its input so this always fits a legal query
+ * name.
  */
 export const challengeRecordName = (domain: string): string =>
   `${CHALLENGE_PREFIX}.${domain}`;

@@ -5,7 +5,7 @@ import { ServiceError } from "./errors";
 import {
   challengeRecordName,
   challengeRecordValue,
-  normalizeDomain,
+  parseClaimableDomain,
 } from "../lib/domain";
 
 /**
@@ -117,6 +117,10 @@ const DOMAIN_TAKEN =
 /** Same-org collisions leak nothing the caller can't already list. */
 const DOMAIN_ALREADY_YOURS = "You have already claimed this domain.";
 
+/** The catch-all shape complaint: a URL, an email, an IP, an internal name. */
+const NOT_A_DOMAIN_MESSAGE =
+  "Enter a domain like example.com — not a URL, an email address, or an IP address.";
+
 /**
  * Ceiling on how many domains ONE organization may hold.
  *
@@ -154,13 +158,20 @@ export const claimOrgDomain = async (
   userId: string,
   rawDomain: string,
 ): Promise<OrgDomainRow> => {
-  const domain = normalizeDomain(rawDomain);
-  if (!domain) {
+  const parsed = parseClaimableDomain(rawDomain);
+  if (!parsed.ok) {
+    // Two rejections, two messages. A public suffix is spelled perfectly and
+    // IS domain-shaped — telling its author to "enter a domain like
+    // example.com" describes nothing they got wrong, so they retype the same
+    // string. Naming the suffix and the shape of the fix is the whole point.
     throw new ServiceError(
       "UNPROCESSABLE",
-      "Enter a domain like example.com — not a URL, an email address, or an IP address.",
+      parsed.reason === "public_suffix"
+        ? `${parsed.suffix} is a shared suffix that many unrelated organizations publish under, so its root can't be claimed. Claim the name you hold under it, like your-org.${parsed.suffix}.`
+        : NOT_A_DOMAIN_MESSAGE,
     );
   }
+  const domain = parsed.domain;
 
   const held = await db.organizationDomain.count({ where: { organizationId } });
   if (held >= MAX_ORG_DOMAINS) {

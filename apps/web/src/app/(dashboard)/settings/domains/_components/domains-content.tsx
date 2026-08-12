@@ -4,10 +4,10 @@ import { Card, CardContent } from "@onecli/ui/components/card";
 import { Skeleton } from "@onecli/ui/components/skeleton";
 import { useDomains } from "@/hooks/use-domains";
 import { ApiError } from "@/lib/api";
+import { LoadErrorNotice } from "@/components/load-error-notice";
 import { AddDomainForm } from "./add-domain-form";
 import { AdminOnlyNotice } from "./admin-only-notice";
 import { DomainsList } from "./domains-list";
-import { LoadErrorNotice } from "./load-error-notice";
 import { LocalModeNotice } from "./local-mode-notice";
 
 export interface DomainsContentProps {
@@ -46,6 +46,7 @@ export const DomainsContent = ({ domainsEnabled }: DomainsContentProps) => {
       <AdminOnlyNotice />
     ) : (
       <LoadErrorNotice
+        title="Couldn't load domains"
         message={domains.error.message}
         onRetry={() => void domains.refetch()}
       />

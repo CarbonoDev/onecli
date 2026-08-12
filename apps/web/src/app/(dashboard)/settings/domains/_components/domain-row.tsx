@@ -118,9 +118,15 @@ export const DomainRow = ({ domain }: DomainRowProps) => {
       {!isVerified && (
         <div className="space-y-3 border-t px-4 py-3">
           <p className="text-muted-foreground text-xs">
-            Add this TXT record to your DNS, then check again.
+            Add this record to your DNS, then check again.
           </p>
+          {/* All THREE fields a DNS panel asks for. The type used to live only
+              in the sentence above ("add this TXT record"), which is prose to
+              read, not a field to transcribe — and a panel's form opens on
+              whatever type it defaults to. `copyable={false}`: the type is a
+              dropdown everywhere, not a paste target. */}
           <DnsRecordField label="Name" value={domain.recordName} />
+          <DnsRecordField label="Type" value="TXT" copyable={false} />
           <DnsRecordField label="Value" value={domain.recordValue} />
           {/* The failed CHECK, held here and nowhere else — it is what one
               lookup saw, not a state the domain is in, so nothing persists it

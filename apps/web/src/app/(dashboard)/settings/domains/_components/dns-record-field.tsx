@@ -4,9 +4,15 @@ import { Check, Copy } from "lucide-react";
 import { useCopyToClipboard } from "@/hooks/use-copy-to-clipboard";
 
 export interface DnsRecordFieldProps {
-  /** What the DNS provider's form calls this box ("Name", "Value"). */
+  /** What the DNS provider's form calls this box ("Name", "Type", "Value"). */
   label: string;
   value: string;
+  /**
+   * Whether the value gets a copy button. Off for the record TYPE: every DNS
+   * panel picks that from a dropdown, so there is nothing to paste into, and
+   * three characters are faster to read than to copy. Defaults to on.
+   */
+  copyable?: boolean;
 }
 
 /**
@@ -17,7 +23,11 @@ export interface DnsRecordFieldProps {
  * either one publishes a record that will never match. Same read-only-code
  * shape as the instance page's Public URL card.
  */
-export const DnsRecordField = ({ label, value }: DnsRecordFieldProps) => {
+export const DnsRecordField = ({
+  label,
+  value,
+  copyable = true,
+}: DnsRecordFieldProps) => {
   const { copied, copy } = useCopyToClipboard();
 
   return (
@@ -34,20 +44,22 @@ export const DnsRecordField = ({ label, value }: DnsRecordFieldProps) => {
             {value}
           </code>
         </div>
-        <button
-          type="button"
-          onClick={() => copy(value)}
-          aria-label={
-            copied ? `${label} copied` : `Copy ${label.toLowerCase()}`
-          }
-          className="text-muted-foreground hover:text-foreground shrink-0 rounded-md border p-2 transition-colors"
-        >
-          {copied ? (
-            <Check className="text-brand size-4" aria-hidden />
-          ) : (
-            <Copy className="size-4" aria-hidden />
-          )}
-        </button>
+        {copyable && (
+          <button
+            type="button"
+            onClick={() => copy(value)}
+            aria-label={
+              copied ? `${label} copied` : `Copy ${label.toLowerCase()}`
+            }
+            className="text-muted-foreground hover:text-foreground shrink-0 rounded-md border p-2 transition-colors"
+          >
+            {copied ? (
+              <Check className="text-brand size-4" aria-hidden />
+            ) : (
+              <Copy className="size-4" aria-hidden />
+            )}
+          </button>
+        )}
       </div>
     </div>
   );

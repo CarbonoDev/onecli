@@ -659,6 +659,34 @@ describe("POST /v1/org/domains (claim)", () => {
     expect(((await res.json()) as DomainBody).domain).toBe("acme.github.io");
   });
 
+  // A suffix is spelled perfectly and IS domain-shaped, so the generic "enter
+  // a domain like example.com" describes nothing its author got wrong — they
+  // retype the same string. The message has to name the suffix and the fix.
+  it("explains a shared-suffix rejection instead of calling it malformed", async () => {
+    for (const suffix of ["github.io", "co.uk", "com"]) {
+      const message = await messageOf(await claim({ domain: suffix }));
+      expect(message, suffix).toContain(suffix);
+      expect(message, suffix).toContain(`your-org.${suffix}`);
+      expect(message, suffix).not.toContain("not a URL");
+    }
+
+    // Everything that is merely not domain-shaped keeps the generic message —
+    // including the reserved names, which are absent from the ICANN list and
+    // must not be described as suffixes anyone could publish under.
+    for (const value of [
+      "https://example.com",
+      "user@example.com",
+      "127.0.0.1",
+      "localhost",
+      "printer.local",
+      "-example.com",
+    ]) {
+      expect(await messageOf(await claim({ domain: value })), value).toContain(
+        "not a URL, an email address, or an IP address",
+      );
+    }
+  });
+
   // The cap is on what the CHALLENGE name has to satisfy, not on the domain:
   // a 247-char domain is legal but yields a 265-char query name, which c-ares
   // rejects as EBADNAME without emitting a packet — a resolver-shaped failure

@@ -3,6 +3,7 @@
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
   DialogHeader,
   DialogTitle,
 } from "@onecli/ui/components/dialog";
@@ -54,9 +55,13 @@ export const ProAppDialog = ({
             <UnavailableBadge />
           </div>
 
-          <p className="mt-4 text-center text-sm leading-relaxed text-muted-foreground text-balance">
+          {/* The caller's `description` prop already IS this dialog's
+              description — it only had to be the element `aria-describedby`
+              points at. The title is a bare app name, so without this a screen
+              reader announced nothing about why the dialog opened. */}
+          <DialogDescription className="mt-4 text-center text-sm leading-relaxed text-balance">
             {description}
-          </p>
+          </DialogDescription>
           <p className="mt-1.5 text-center text-xs text-muted-foreground/70 text-balance">
             Not yet available in this build.
           </p>

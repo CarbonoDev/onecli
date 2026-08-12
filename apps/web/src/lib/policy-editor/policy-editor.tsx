@@ -249,6 +249,7 @@ export const PolicyEditor = ({ scope }: PolicyEditorProps) => {
                 ? `No rules match “${query.trim()}”.`
                 : "No rules yet. Add your first rule to get started."
             }
+            filtered={!!q}
             // The uniform per-level default law (step 9): each level's verdict
             // is its first matching rule, else its Default Rule — deny wins.
             // The gateway enforces the project default like the org one; Block

@@ -3,16 +3,15 @@
 import * as React from "react";
 import Image from "next/image";
 import Link from "next/link";
-import { usePathname } from "next/navigation";
 import { NavMain } from "./nav-main";
 import { NavUser } from "./nav-user";
 import { ProjectSwitcher } from "./project-switcher";
 import { OrgSwitcher } from "./org-switcher";
+import { useNavShell } from "@/hooks/use-nav-shell";
 import {
   orgNavItems,
   projectBackLink,
   projectNavItems,
-  resolveNavShell,
 } from "@/lib/nav-config";
 import {
   Sidebar,
@@ -25,10 +24,9 @@ import {
 export const DashboardSidebar = ({
   ...props
 }: React.ComponentProps<typeof Sidebar>) => {
-  const pathname = usePathname();
-  // Derived from the pathname, not from context: the header derives the same
-  // shell from the same pure function, so the two can never disagree.
-  const shell = resolveNavShell(pathname);
+  // Derived, not held in context: the header calls the same hook, so the two
+  // can never disagree about which shell they are in.
+  const shell = useNavShell();
 
   return (
     <Sidebar collapsible="icon" variant="inset" {...props}>

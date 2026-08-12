@@ -10,17 +10,10 @@ import {
 
 /**
  * `resolveNavShell` is pure and reads no `CAPS`, so unlike `hasProjectContext`
- * it needs no `vi.stubEnv` + `vi.resetModules` dance — the URL-scoped branches
- * are just two more inputs.
+ * it needs no `vi.stubEnv` + `vi.resetModules` dance — every case is just an
+ * input string.
  */
 describe("resolveNavShell", () => {
-  it("reads the shell off URL-scoped prefixes", () => {
-    expect(resolveNavShell("/org/o1")).toBe("org");
-    expect(resolveNavShell("/org/o1/global-connections")).toBe("org");
-    expect(resolveNavShell("/p/p1")).toBe("project");
-    expect(resolveNavShell("/p/p1/agents")).toBe("project");
-  });
-
   it("puts the project nav items in the project shell", () => {
     expect(resolveNavShell("/overview")).toBe("project");
     expect(resolveNavShell("/install")).toBe("project");

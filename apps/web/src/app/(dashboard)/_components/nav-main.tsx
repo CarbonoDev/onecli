@@ -12,6 +12,9 @@ import {
   SidebarSeparator,
 } from "@onecli/ui/components/sidebar";
 import { cn } from "@onecli/ui/lib/utils";
+// Type-only the other way (`nav-config` imports `NavItem` from here), so this
+// is a one-way runtime dependency — no cycle.
+import { isPathUnderNavItem } from "@/lib/nav-config";
 
 const sidebarMenuButtonActiveStyles =
   "font-normal data-[active=true]:bg-brand/10 data-[active=true]:font-medium data-[active=true]:text-brand data-[active=true]:hover:bg-brand/15 dark:data-[active=true]:bg-brand/10 dark:data-[active=true]:text-brand dark:data-[active=true]:hover:bg-brand/15";
@@ -26,10 +29,9 @@ interface NavMainProps {
   items: NavItem[] | NavItem[][];
   /**
    * Pinned above the nav list and rendered muted — the project shell's
-   * "‹ All projects" escape hatch. OPTIONAL on purpose: the EE overlay
-   * sidebars import this same component and pass no back link, so requiring it
-   * would break them. Never rendered as active; it points out of this shell,
-   * not at a page inside it.
+   * "‹ All projects" escape hatch. Optional because the org shell has nowhere
+   * to go back TO: it is the outer scope, so it passes no back link. Never
+   * rendered as active; it points out of this shell, not at a page inside it.
    */
   backLink?: NavItem;
 }
@@ -37,13 +39,12 @@ interface NavMainProps {
 export const NavMain = ({ items, backLink }: NavMainProps) => {
   const pathname = usePathname();
 
-  // Segment-boundary match, not a bare `startsWith`: `/policy` must not light
-  // up for `/policy-drafts`. Mirrors `isPathUnderNavItem` in `@/lib/nav-config`
-  // — kept inline rather than imported because that module is edition-aliased
-  // and this component is shared with the overlay sidebars.
+  // The same "is this page under that nav item" rule `resolveNavShell` uses,
+  // so the sidebar highlight and the shell split can never disagree. A bare
+  // `startsWith` would light `/policy` up for `/policy-drafts`.
   const isActive = (url: string) => {
     if (url === "/") return pathname === "/";
-    return pathname === url || pathname.startsWith(`${url}/`);
+    return isPathUnderNavItem(pathname, url);
   };
 
   const groups: NavItem[][] =

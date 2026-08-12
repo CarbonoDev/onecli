@@ -20,7 +20,6 @@ import {
   UsersRound,
 } from "lucide-react";
 import type { NavItem } from "@/app/(dashboard)/_components/nav-main";
-import { ORG_PATH_RE, PROJECT_PATH_RE } from "@/lib/navigation";
 
 export interface SettingsNavItem {
   title: string;
@@ -105,27 +104,33 @@ export const projectBackLink: NavItem = {
   icon: ChevronLeft,
 };
 
+/** `orgNavItems` without its group structure. Hoisted rather than flattened
+ * per call — `resolveNavShell` runs on every sidebar and header render. */
+const flatOrgNavItems: NavItem[] = orgNavItems.flat();
+
 /**
  * Which shell `pathname` belongs to.
  *
- * URL-scoped editions say so in the path (`/org/<id>`, `/p/<id>`); flat
- * editions have to be read off the route table, so the bare path is matched
- * against both nav lists and the LONGEST match wins — that is what separates
- * `/settings/project` from `/settings/organization`. Anything in neither list
- * (`/settings/profile`, `/account/*`, a 404) falls back to the org shell,
- * which is the default scope.
+ * Read off the route table: the path is matched against both nav lists and the
+ * LONGEST match wins — that is what separates `/settings/project` from
+ * `/settings/organization`. Anything in neither list (`/settings/profile`,
+ * `/account/*`, a 404) falls back to the org shell, which is the default
+ * scope.
+ *
+ * Paths only, no `/org/<id>` or `/p/<id>` prefixes: `proxy.ts` REDIRECTS those
+ * away on this edition, so `usePathname()` never sees one. Handling them here
+ * would be a branch nothing can reach, and a misleading one — the sidebar
+ * still emits bare hrefs and the header still matches bare urls, so a
+ * half-supported prefix would break both.
  *
  * Deliberately NOT `hasProjectContext()`: that answers "does the gateway
- * resolve a project for this request", which is `true` for every path in a
- * flat edition — it would put `/team` and `/groups` in the project shell.
+ * resolve a project for this request", which is `true` for every path here —
+ * it would put `/team` and `/groups` in the project shell.
  *
  * A new page with no nav entry lands in the org shell by default. Add it to
  * one of the lists above rather than special-casing it here.
  */
 export const resolveNavShell = (pathname: string): NavShell => {
-  if (ORG_PATH_RE.test(pathname)) return "org";
-  if (PROJECT_PATH_RE.test(pathname)) return "project";
-
   let best: { shell: NavShell; length: number } | undefined;
   const consider = (items: NavItem[], shell: NavShell) => {
     for (const item of items) {
@@ -136,14 +141,14 @@ export const resolveNavShell = (pathname: string): NavShell => {
     }
   };
   consider(projectNavItems, "project");
-  consider(orgNavItems.flat(), "org");
+  consider(flatOrgNavItems, "org");
 
   return best?.shell ?? "org";
 };
 
 /** The shell's nav items, flattened — for lookups rather than rendering. */
 export const navItemsForShell = (shell: NavShell): NavItem[] =>
-  shell === "project" ? projectNavItems : orgNavItems.flat();
+  shell === "project" ? projectNavItems : flatOrgNavItems;
 
 export const getSettingsSections = (
   // The EE org-UI override uses orgId to prefix URLs with /org/<id>
@@ -206,7 +211,7 @@ const NAV_BREADCRUMB_OVERRIDES: Record<string, string> = {
 const NAV_BREADCRUMB_LABELS: Record<string, string> = {
   ...Object.fromEntries(
     [
-      ...orgNavItems.flat(),
+      ...flatOrgNavItems,
       ...projectNavItems,
       ...settingsSections.flatMap((section) => section.items),
     ].map((item) => [item.url, item.title]),

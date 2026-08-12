@@ -24,27 +24,40 @@ import {
   isPathUnderNavItem,
   navBreadcrumbLabel,
   navItemsForShell,
-  resolveNavShell,
 } from "@/lib/nav-config";
+import type { NavItem } from "./nav-main";
 import {
   useCurrentOrganizationId,
   useOrganizationsList,
 } from "@/hooks/use-organizations";
+import { useNavShell } from "@/hooks/use-nav-shell";
 import { useCurrentProjectId, useProjectsList } from "@/hooks/use-projects";
 import { GetStartedButton } from "./get-started-button";
 import { ApprovalsBell } from "@/lib/components/approvals";
 
-/** A rendered breadcrumb entry. The last one is the current page and never
- * links; every earlier one does. */
+/** A rendered breadcrumb entry. The last one is the current page; earlier ones
+ * link, except where `href` is dropped because the destination would be a
+ * no-op (see `crumbs` below). */
 interface Crumb {
   label: string;
   href?: string;
 }
 
-/** Owns `/settings/*` pages that belong to neither nav list (Profile, API
- * Keys, Instance, Encryption, Domains, SSO) so they keep rendering
- * `Settings › <Page>` instead of collapsing to `Dashboard`. */
-const SETTINGS_FALLBACK = { title: "Settings", url: "/settings" };
+/**
+ * Every `/settings/*` page crumbs as `Settings › <rail title>`, whichever nav
+ * list also claims it. Eight sibling pages render the same settings rail; the
+ * sidebar's "Organization Settings" / "Project Settings" labels would give
+ * three different crumb shapes for one screen.
+ *
+ * `url` is for path math only — the crumb is NOT linked. `/settings` is a
+ * redirect to the first rail entry, so following it from `/settings/profile`
+ * would land on `/settings/project` and flip the whole sidebar into project
+ * scope.
+ */
+const SETTINGS_FALLBACK: Pick<NavItem, "title" | "url"> = {
+  title: "Settings",
+  url: "/settings",
+};
 
 const GitHubIcon = ({ className }: { className?: string }) => (
   <svg
@@ -72,7 +85,8 @@ export const DashboardHeader = () => {
   const pathname = usePathname();
   const { resolvedTheme, setTheme } = useTheme();
 
-  const shell = resolveNavShell(pathname);
+  // The same hook the sidebar uses, so nav and breadcrumb agree on the shell.
+  const shell = useNavShell();
 
   // Same react-query keys the sidebar switchers already subscribe to, so the
   // org and project crumbs cost no extra request. Both resolve after
@@ -89,15 +103,14 @@ export const DashboardHeader = () => {
   const project = projects?.find((p) => p.id === projectId);
   const projectName = project?.name ?? project?.slug;
 
-  // Longest match wins, so `/settings/project` resolves to "Project Settings"
-  // rather than to whichever entry happened to be listed first.
-  const navItem =
-    navItemsForShell(shell)
-      .filter((item) => isPathUnderNavItem(pathname, item.url))
-      .sort((a, b) => b.url.length - a.url.length)[0] ??
-    (isPathUnderNavItem(pathname, SETTINGS_FALLBACK.url)
-      ? SETTINGS_FALLBACK
-      : undefined);
+  // Settings is checked FIRST so all eight rail pages crumb identically, even
+  // the two a nav list also names. Everywhere else the longest nav match wins.
+  const isSettings = isPathUnderNavItem(pathname, SETTINGS_FALLBACK.url);
+  const navItem = isSettings
+    ? SETTINGS_FALLBACK
+    : navItemsForShell(shell)
+        .filter((item) => isPathUnderNavItem(pathname, item.url))
+        .sort((a, b) => b.url.length - a.url.length)[0];
 
   const subPath = navItem
     ? pathname.slice(navItem.url.length).replace(/^\//, "")
@@ -113,18 +126,28 @@ export const DashboardHeader = () => {
   const formatSegment = (s: string) =>
     s.charAt(0).toUpperCase() + s.slice(1).replace(/-/g, " ");
 
-  // Org › [All projects › Project ›] Page › Sub-page. The scope crumbs are
-  // dropped rather than stubbed while their names load.
+  // Org › [All projects › Project ›] Page › Sub-page. Every crumb whose text
+  // comes from the network is omitted until it has one — never stubbed, and
+  // never half-shown: the project group appears atomically, so the first paint
+  // of `/overview` doesn't read "All projects › Overview" (which describes a
+  // different page) before the names land.
   const crumbs: Crumb[] = [];
   if (organizationName) {
     crumbs.push({ label: organizationName, href: "/projects" });
   }
-  if (shell === "project") {
+  if (shell === "project" && projectName) {
     crumbs.push({ label: "All projects", href: "/projects" });
-    if (projectName) crumbs.push({ label: projectName, href: "/overview" });
+    crumbs.push({ label: projectName, href: "/overview" });
   }
   if (navItem) {
-    crumbs.push({ label: navItem.title, href: navItem.url });
+    crumbs.push({
+      // The crumb label, not the sidebar label: the nav item reads "Projects"
+      // (a section), the crumb reads "All projects" (the place you go back to).
+      label: navBreadcrumbLabel(navItem.url) ?? navItem.title,
+      // `Settings` is a section header, not a destination — see
+      // `SETTINGS_FALLBACK`.
+      href: isSettings ? undefined : navItem.url,
+    });
     subSegments.forEach((segment, i) => {
       const href = `${navItem.url}/${subSegments.slice(0, i + 1).join("/")}`;
       // Prefer the label the nav already declares for this exact path — that
@@ -139,27 +162,38 @@ export const DashboardHeader = () => {
     crumbs.push({ label: "Dashboard" });
   }
 
+  // Don't offer a link that goes nowhere: to the page you are already on, or
+  // to wherever the very next crumb goes anyway (the org crumb and
+  // "All projects" both point at `/projects`). Those crumbs stay as text.
+  const renderedCrumbs = crumbs.map((crumb, i) => ({
+    ...crumb,
+    href:
+      crumb.href === pathname || crumb.href === crumbs[i + 1]?.href
+        ? undefined
+        : crumb.href,
+  }));
+
   return (
     <div className="flex w-full items-center gap-2 px-4">
       <SidebarTrigger className="-ml-1" />
       <Separator orientation="vertical" className="mr-2 h-4!" />
       <Breadcrumb className="min-w-0 flex-1 overflow-hidden">
         <BreadcrumbList className="flex-nowrap overflow-hidden">
-          {crumbs.map((crumb, i) => {
-            const isLast = i === crumbs.length - 1;
+          {renderedCrumbs.map((crumb, i) => {
+            const isLast = i === renderedCrumbs.length - 1;
             return (
-              <span
-                key={`${crumb.href ?? ""}:${crumb.label}`}
-                className="contents"
-              >
+              <span key={`${i}:${crumb.label}`} className="contents">
                 {i > 0 && <BreadcrumbSeparator />}
                 <BreadcrumbItem>
-                  {isLast || !crumb.href ? (
+                  {isLast ? (
+                    // `aria-current="page"` — only ever the leaf.
                     <BreadcrumbPage>{crumb.label}</BreadcrumbPage>
-                  ) : (
+                  ) : crumb.href ? (
                     <BreadcrumbLink asChild>
                       <Link href={crumb.href}>{crumb.label}</Link>
                     </BreadcrumbLink>
+                  ) : (
+                    crumb.label
                   )}
                 </BreadcrumbItem>
               </span>

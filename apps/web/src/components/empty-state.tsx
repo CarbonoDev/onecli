@@ -30,12 +30,16 @@ export type EmptyStateProps = {
   className?: string;
 } & EmptyStateCopy;
 
-// Card's base is `flex flex-col gap-6 rounded-xl border py-6`; `gap-0 py-0`
-// neutralises the flex gap and vertical padding so all spacing below is
-// controlled by the badge/title/body margins alone.
+// Card's base is `flex flex-col gap-6 rounded-xl border py-6`; `gap-0`
+// neutralises the flex gap so vertical rhythm comes from the badge/title/body
+// margins alone. The padding is the floor, not the height: `min-h` sets the
+// resting height (230/140px, both taller than the padded content), and the
+// padding only starts doing work once the content grows past it — with an
+// `action`, or with unusually long copy — so nothing ever sits flush on the
+// border.
 const FRAME_CLASSES: Record<EmptyStateVariant, string> = {
-  card: "min-h-[230px] gap-0 px-6 py-0",
-  dashed: "min-h-[140px] rounded-xl border border-dashed px-6",
+  card: "min-h-[230px] gap-0 px-6 py-6",
+  dashed: "min-h-[140px] rounded-xl border border-dashed px-6 py-4",
 };
 
 const BADGE_CLASSES: Record<EmptyStateVariant, string> = {

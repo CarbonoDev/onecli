@@ -11,7 +11,9 @@ export default function ProjectSettingsLoading() {
         title="Project Settings"
         description="Rename this project, choose who can use it, or delete it."
       />
-      {[1, 2, 3].map((i) => (
+      {/* Same count as `project-settings-content.tsx`'s own skeleton, which
+          takes over from this one: Name, Details, Access, Delete. */}
+      {[1, 2, 3, 4].map((i) => (
         <Card key={i} className="p-6">
           <div className="space-y-3">
             <Skeleton className="h-5 w-32" />

@@ -6,6 +6,7 @@ import { useProject } from "@/hooks/use-projects";
 import { useProjectAccess } from "@/hooks/use-project-access";
 import { useOrgMembersList } from "@/hooks/use-org-members";
 import { ProjectNameCard } from "./project-name-card";
+import { ProjectDetailsCard } from "./project-details-card";
 import { ProjectAccessCard } from "./project-access-card";
 import { DeleteProjectCard } from "./delete-project-card";
 import { ReadOnlyNotice } from "../../_components/read-only-notice";
@@ -55,7 +56,10 @@ export const ProjectSettingsContent = ({
   if (project.isPending || probesPending) {
     return (
       <>
-        {[1, 2, 3].map((i) => (
+        {/* One per card below (Name, Details, Access, Delete), and the same
+            count as `loading.tsx` — the two fallbacks hand over to each other,
+            so a mismatch is a visible jump mid-load. */}
+        {[1, 2, 3, 4].map((i) => (
           <Card key={i} className="p-6">
             <div className="space-y-3">
               <Skeleton className="h-5 w-32" />
@@ -87,6 +91,10 @@ export const ProjectSettingsContent = ({
         <ReadOnlyNotice description="Only a project owner or an organization admin can rename this project, change who can use it, or delete it." />
       )}
       <ProjectNameCard project={project.data} canManage={canManage} />
+      {/* Read-only, so it takes no `canManage` — there is nothing here to
+          refuse, and anyone who can reach this page has already passed the
+          route's read gate (`requireReadableProject`). */}
+      <ProjectDetailsCard project={project.data} />
       <ProjectAccessCard
         projectId={projectId}
         userId={userId}

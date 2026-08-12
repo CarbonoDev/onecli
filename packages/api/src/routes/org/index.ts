@@ -9,6 +9,7 @@ import { ossOrgBudgetRoutes } from "./budgets";
 import { ossOrgSecretRoutes } from "./secrets";
 import { ossOrgConnectionRoutes } from "./connections";
 import { ossOrgAppRoutes } from "./apps";
+import { ossOrgUsageRoutes } from "./usage";
 import { ossProjectRoutes } from "./projects";
 import { ossOrganizationRoutes } from "./organizations";
 
@@ -44,6 +45,7 @@ export const registerOssOrgRoutes = (app: Hono<ApiEnv>) => {
   app.route("/org/secrets", ossOrgSecretRoutes());
   app.route("/org/connections", ossOrgConnectionRoutes());
   app.route("/org/apps", ossOrgAppRoutes());
+  app.route("/org/usage", ossOrgUsageRoutes());
   app.route("/projects", ossProjectRoutes());
   app.route("/organizations", ossOrganizationRoutes());
 };

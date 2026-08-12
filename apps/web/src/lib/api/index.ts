@@ -19,6 +19,7 @@ import * as appPermissions from "./app-permissions";
 import * as vaults from "./vaults";
 import * as dropbox from "./dropbox";
 import * as budgets from "./budgets";
+import * as usage from "./usage";
 
 export {
   agents,
@@ -42,6 +43,7 @@ export {
   vaults,
   dropbox,
   budgets,
+  usage,
 };
 export type {
   Agent,
@@ -97,6 +99,7 @@ export type {
   CreateBudgetInput,
   UpdateBudgetInput,
 } from "./budgets";
+export type { UsageSummary, UsageAgentRow } from "./usage";
 export { appsPath, secretsPath } from "./scope";
 export type { PageScope } from "./scope";
 export type { AppConfigStatus } from "./app-config";

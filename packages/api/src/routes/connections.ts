@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { db } from "@onecli/db";
 import type { ApiEnv } from "../types";
+import type { ResourceScope } from "../services/resource-scope";
 import { authMiddleware, requireProjectId } from "../middleware/auth";
 import {
   listConnections,
@@ -23,17 +24,48 @@ import {
 
 type Auth = ApiEnv["Variables"]["auth"];
 
-// Ownership: a project-scoped row in the caller's project, or an org-scoped
-// row in the caller's organization (project members may manage org rows via
-// the project surface — longstanding behavior).
-const findOwnedConnection = (auth: Auth, connectionId: string) =>
+/**
+ * The rows a surface may manage. The PROJECT surface carries both keys — a
+ * project-scoped row in the caller's project, or an org-scoped row in the
+ * caller's organization (project members may manage org rows through the
+ * project surface — longstanding behavior). The ORG surface carries
+ * `organizationId` ONLY: it has no project context to require, and project
+ * rows must not be reachable there.
+ */
+export interface ConnectionOwnership {
+  projectId?: string;
+  organizationId?: string;
+}
+
+/** The PROJECT surface's ownership set, shared with the legacy /v1/apps aliases. */
+export const projectConnectionOwnership = (
+  auth: Auth,
+): ConnectionOwnership => ({
+  projectId: requireProjectId(auth),
+  organizationId: auth.organizationId,
+});
+
+const findOwnedConnection = (own: ConnectionOwnership, connectionId: string) =>
   db.appConnection.findFirst({
     where: {
       id: connectionId,
       OR: [
-        { projectId: requireProjectId(auth) },
-        ...(auth.organizationId
-          ? [{ organizationId: auth.organizationId }]
+        ...(own.projectId ? [{ projectId: own.projectId }] : []),
+        // `scope` is pinned here, not just `organizationId`. A project row
+        // carries a null `organizationId` today (`scopeCreate` writes exactly
+        // one key), so the id alone would be enough — but that is an invariant
+        // held in `connection-service`, and if anything ever denormalizes the
+        // org id onto a project row this arm would start matching it. The write
+        // would still be refused a layer down by `scopeOwnership`, yet the
+        // `isOrg === false` branch below would first call `requireProjectId` on
+        // a router that may have no project context. Fence it at the route.
+        ...(own.organizationId
+          ? [
+              {
+                organizationId: own.organizationId,
+                scope: "organization" as const,
+              },
+            ]
           : []),
       ],
     },
@@ -49,8 +81,9 @@ const findOwnedConnection = (auth: Auth, connectionId: string) =>
 export const disconnectOwnedConnection = async (
   auth: Auth,
   connectionId: string,
+  own: ConnectionOwnership = projectConnectionOwnership(auth),
 ): Promise<boolean> => {
-  const connection = await findOwnedConnection(auth, connectionId);
+  const connection = await findOwnedConnection(own, connectionId);
   if (!connection) return false;
 
   const isOrg = connection.scope === "organization";
@@ -98,8 +131,9 @@ export const renameOwnedConnection = async (
   auth: Auth,
   connectionId: string,
   label: string,
+  own: ConnectionOwnership = projectConnectionOwnership(auth),
 ) => {
-  const connection = await findOwnedConnection(auth, connectionId);
+  const connection = await findOwnedConnection(own, connectionId);
   if (!connection) return null;
 
   const isOrg = connection.scope === "organization";
@@ -125,22 +159,31 @@ export const renameOwnedConnection = async (
   );
 };
 
-// Connections as a top-level resource. The legacy /v1/apps/connections* paths
-// remain as aliases (routes/apps.ts) sharing the cores above; unlike them,
-// this surface filters via ?provider= (never the path — the single-segment
-// GET slot stays reserved for get-by-id) and returns bare arrays.
-export const connectionRoutes = () => {
-  const app = new Hono<ApiEnv>();
-  app.use("*", authMiddleware);
+// ── Unified connection routes (/v1/connections, /v1/org/connections) ───────
+// One set of handlers, an injected scope — the `registerPolicyRoutes` pattern.
 
+export interface ConnectionRouteScope {
+  /**
+   * The scope a LIST reads from. The PROJECT router passes BOTH keys on
+   * purpose: `scopeWhere` ORs the org's org-scoped rows in, which is how an org
+   * connection inherits into every project. The ORG router passes
+   * `organizationId` ONLY.
+   */
+  readScope: (auth: Auth) => ResourceScope;
+  /** The rows a rename/disconnect on this surface may reach. */
+  ownership: (auth: Auth) => ConnectionOwnership;
+}
+
+/** Registers the connection handlers on a router whose auth middleware is already set. */
+export const registerConnectionRoutes = (
+  app: Hono<ApiEnv>,
+  cfg: ConnectionRouteScope,
+) => {
   // ── GET /connections?provider= ── list connections ─────────────────────
   app.get("/", async (c) => {
     const auth = c.get("auth");
     const provider = c.req.query("provider");
-    const scope = {
-      projectId: requireProjectId(auth),
-      organizationId: auth.organizationId,
-    };
+    const scope = cfg.readScope(auth);
     const connections = provider
       ? await listConnectionsByProvider(scope, provider)
       : await listConnections(scope);
@@ -160,7 +203,12 @@ export const connectionRoutes = () => {
       return c.json({ error: "Label is required" }, 400);
     }
 
-    const updated = await renameOwnedConnection(auth, connectionId, label);
+    const updated = await renameOwnedConnection(
+      auth,
+      connectionId,
+      label,
+      cfg.ownership(auth),
+    );
     if (!updated) {
       return c.json({ error: "Connection not found" }, 404);
     }
@@ -171,11 +219,32 @@ export const connectionRoutes = () => {
   app.delete("/:connectionId", async (c) => {
     const auth = c.get("auth");
     const connectionId = c.req.param("connectionId");
-    const deleted = await disconnectOwnedConnection(auth, connectionId);
+    const deleted = await disconnectOwnedConnection(
+      auth,
+      connectionId,
+      cfg.ownership(auth),
+    );
     if (!deleted) {
       return c.json({ error: "Connection not found" }, 404);
     }
     return c.body(null, 204);
+  });
+};
+
+// Connections as a top-level resource. The legacy /v1/apps/connections* paths
+// remain as aliases (routes/apps.ts) sharing the cores above; unlike them,
+// this surface filters via ?provider= (never the path — the single-segment
+// GET slot stays reserved for get-by-id) and returns bare arrays.
+export const connectionRoutes = () => {
+  const app = new Hono<ApiEnv>();
+  app.use("*", authMiddleware);
+
+  registerConnectionRoutes(app, {
+    readScope: (auth) => ({
+      projectId: requireProjectId(auth),
+      organizationId: auth.organizationId,
+    }),
+    ownership: projectConnectionOwnership,
   });
 
   return app;

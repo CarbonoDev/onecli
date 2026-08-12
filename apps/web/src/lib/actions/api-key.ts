@@ -14,7 +14,10 @@ import {
 
 export const getApiKey = async () => {
   const { userId, userEmail, projectId } = await resolveProjectContext();
-  const { apiKey, created } = await ensureApiKeyService(userId, { projectId });
+  const { apiKey, created, lastUsedAt, createdAt } = await ensureApiKeyService(
+    userId,
+    { projectId },
+  );
   if (created) {
     await recordAuditEvent({
       projectId,
@@ -25,7 +28,13 @@ export const getApiKey = async () => {
       metadata: { scope: "project", autoProvisioned: true },
     });
   }
-  return { apiKey };
+  // ISO strings, not Dates: the card is a client component reading this
+  // through react-query, and the usage labels take either.
+  return {
+    apiKey,
+    lastUsedAt: lastUsedAt?.toISOString() ?? null,
+    createdAt: createdAt.toISOString(),
+  };
 };
 
 export const regenerateApiKey = async () => {

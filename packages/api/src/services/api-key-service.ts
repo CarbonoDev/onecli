@@ -5,6 +5,86 @@ import { logger } from "../lib/logger";
 import type { ResourceScope } from "./resource-scope";
 import { scopeWhere, scopeCreate, isOrgScope } from "./resource-scope";
 
+/**
+ * How stale a key's stored `lastUsedAt` may get before an authentication
+ * writes it forward.
+ *
+ * The whole point of the column is to make a leaked key *observable* — "is
+ * this key still in circulation, and how recently" — which needs coarse
+ * recency, not per-request precision. Fifteen minutes is well under the
+ * granularity anything renders ("3h ago", "2d ago") while capping the write
+ * rate at one row per key per window no matter how hot the key is.
+ *
+ * MUST move together with `LAST_USED_THROTTLE_MINUTES` in
+ * `apps/gateway/src/db.rs` — the gateway authenticates the same keys and
+ * writes the same column, and nothing but this comment ties the two values.
+ */
+export const API_KEY_LAST_USED_THROTTLE_MS = 15 * 60 * 1000;
+
+/**
+ * Record that `apiKey` just authenticated — throttled, and deliberately NOT a
+ * write on the per-request path.
+ *
+ * Two guards, in order:
+ *
+ * 1. The stored `lastUsedAt` comes back on the row the auth lookup already
+ *    read, so the freshness check costs zero extra I/O. Inside the throttle
+ *    window this returns immediately having touched nothing — which is the
+ *    overwhelming majority of authenticated requests.
+ * 2. When the window HAS elapsed, the update repeats the staleness test in its
+ *    own `where`. That makes the write idempotent across concurrent requests
+ *    and across replicas: a burst that all read the same stale row issues N
+ *    statements but only the first matches a row, the rest are no-ops.
+ *
+ * The `where` also pins the key VALUE, not just the row id. Without it,
+ * rotation races the write: `regenerateApiKey` swaps in a new secret and
+ * clears `lastUsedAt` on the SAME row, so a request that authenticated with
+ * the OLD secret milliseconds earlier could land afterwards, match the
+ * `lastUsedAt: null` arm precisely *because* rotation just cleared it, and
+ * stamp the new secret as used — showing "Last used just now" on a key nobody
+ * has ever held, at the exact moment an operator rotates a leak and checks.
+ *
+ * Never throws and never reports failure upward — usage telemetry must not be
+ * able to turn a request that authenticates today into one that 401s tomorrow.
+ * Returns whether a write was attempted (the throttle's observable behaviour).
+ *
+ * Note it goes through Prisma, so a write also advances the row's `@updatedAt`.
+ * Nothing reads `api_keys.updated_at` today; if anything ever wants to mean
+ * "when this secret was last rotated", it needs its own column rather than
+ * that one.
+ */
+export const recordApiKeyUse = async (
+  apiKey: { id: string; key: string; lastUsedAt: Date | null },
+  now: number = Date.now(),
+): Promise<boolean> => {
+  // Defensive: a caller that forgot to select `id`/`key` must be a silent
+  // no-op, not a crash inside authentication.
+  if (!apiKey?.id || !apiKey.key) return false;
+
+  const staleBefore = new Date(now - API_KEY_LAST_USED_THROTTLE_MS);
+  if (apiKey.lastUsedAt !== null && apiKey.lastUsedAt > staleBefore) {
+    return false;
+  }
+
+  try {
+    await db.apiKey.updateMany({
+      where: {
+        id: apiKey.id,
+        // The secret that actually authenticated — see the rotation race above.
+        key: apiKey.key,
+        OR: [{ lastUsedAt: null }, { lastUsedAt: { lt: staleBefore } }],
+      },
+      data: { lastUsedAt: new Date(now) },
+    });
+  } catch (err) {
+    logger.warn(
+      { err },
+      "Failed to record API key usage; authentication is unaffected.",
+    );
+  }
+  return true;
+};
+
 export const generateApiKey = (scope?: ResourceScope) => {
   const prefix = scope && isOrgScope(scope) ? "oc_org_" : "oc_";
   return `${prefix}${randomBytes(32).toString("hex")}`;
@@ -24,7 +104,11 @@ export const regenerateApiKey = async (
   if (existing) {
     await db.apiKey.update({
       where: { id: existing.id },
-      data: { key },
+      // Regenerate mints a NEW secret on the same row, so the old secret's
+      // usage history does not describe the new one — carrying `lastUsedAt`
+      // over would report a key nobody has ever presented as recently used,
+      // which is exactly backwards for the leak it was rotated to fix.
+      data: { key, lastUsedAt: null },
     });
   } else {
     const user = await db.user.findUniqueOrThrow({
@@ -51,26 +135,48 @@ export const regenerateApiKey = async (
  *
  * `created` is `true` only when a key was actually minted, letting callers audit
  * the first provision without logging on every read.
+ *
+ * `lastUsedAt`/`createdAt` ride along so the dashboard can say whether the key
+ * it is about to show is in circulation — a freshly minted key reports a null
+ * `lastUsedAt` against a just-now `createdAt`, which reads as a truthful
+ * "Never used" rather than an ambiguous blank.
  */
 export const ensureApiKey = async (
   userId: string,
   scope: ResourceScope,
-): Promise<{ apiKey: string; created: boolean }> => {
+): Promise<{
+  apiKey: string;
+  created: boolean;
+  lastUsedAt: Date | null;
+  createdAt: Date;
+}> => {
   const existing = await db.apiKey.findFirst({
     where: { userId, ...scopeWhere(scope) },
-    select: { key: true },
+    select: { key: true, lastUsedAt: true, createdAt: true },
   });
-  if (existing) return { apiKey: existing.key, created: false };
+  if (existing)
+    return {
+      apiKey: existing.key,
+      created: false,
+      lastUsedAt: existing.lastUsedAt,
+      createdAt: existing.createdAt,
+    };
 
   const user = await db.user.findUniqueOrThrow({
     where: { id: userId },
     select: { email: true },
   });
   const key = generateApiKey(scope);
-  await db.apiKey.create({
+  const row = await db.apiKey.create({
     data: { key, userId, userEmail: user.email, ...scopeCreate(scope) },
+    select: { lastUsedAt: true, createdAt: true },
   });
-  return { apiKey: key, created: true };
+  return {
+    apiKey: key,
+    created: true,
+    lastUsedAt: row.lastUsedAt,
+    createdAt: row.createdAt,
+  };
 };
 
 /**

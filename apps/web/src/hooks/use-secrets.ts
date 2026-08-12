@@ -19,8 +19,13 @@ export const useSecrets = () =>
 // it.
 export const useScopedSecrets = (scope: PageScope = "project") =>
   useQuery({
-    queryKey: [...queryKeys.secrets.list(), scope, "policy-target"],
+    queryKey: [...queryKeys.secrets.list(scope), "policy-target"],
     queryFn: () => secrets.listScoped(scope),
+    // Admin-gated at org scope: a member's 403 is deterministic, not a
+    // transport blip. Conditional spread rather than a ternary to `undefined`
+    // — see `use-connections.ts`; a present-but-undefined key overwrites the
+    // client's `retry: 1` and lands on the retryer's default of 3.
+    ...(scope === "organization" ? { retry: false as const } : {}),
   });
 
 export const useCreateSecret = () => {

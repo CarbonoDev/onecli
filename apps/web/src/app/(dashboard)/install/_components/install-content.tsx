@@ -133,13 +133,18 @@ export const InstallContent = () => {
               command={installCommand ?? manualCommand}
               secret={installSecret}
             />
-            <p className="text-muted-foreground mt-2 text-xs">
-              This command carries your project API key. Rotate it in{" "}
-              <Link href="/settings/api-keys" className="underline">
-                Settings → API keys
-              </Link>{" "}
-              if it is ever shared.
-            </p>
+            {/* Only once there IS a key: while the query is pending the block
+                shows the `oc_...` placeholder, and warning about a key that
+                isn't on screen yet is just noise. */}
+            {installSecret && (
+              <p className="text-muted-foreground mt-2 text-xs">
+                This command carries your project API key. Rotate it in{" "}
+                <Link href="/settings/api-keys" className="underline">
+                  Settings → API keys
+                </Link>{" "}
+                if it is ever shared.
+              </p>
+            )}
             {installCommand && pinIdentifier && (
               <p className="text-muted-foreground mt-2 text-xs">
                 Already have the CLI?{" "}

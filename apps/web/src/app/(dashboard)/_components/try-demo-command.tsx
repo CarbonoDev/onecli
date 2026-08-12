@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Copy, Check, Eye, EyeOff } from "lucide-react";
 import { Button } from "@onecli/ui/components/button";
 import { cn } from "@onecli/ui/lib/utils";
@@ -30,6 +30,18 @@ export const TryDemoCommand = ({
   const masked = !!secret && !revealed;
   const shownCommand =
     masked && secret ? command.replaceAll(secret, maskSecret(secret)) : command;
+
+  // The worst failure mode for a masking control is looking like it worked. A
+  // `secret` that isn't a substring of `command` makes `replaceAll` a no-op:
+  // the eye and `select-none` still appear, over the RAW command. Dev only.
+  useEffect(() => {
+    if (process.env.NODE_ENV === "production") return;
+    if (secret && !command.includes(secret)) {
+      console.warn(
+        "TryDemoCommand: `secret` does not occur in `command`, so nothing is masked even though the block renders as masked.",
+      );
+    }
+  }, [command, secret]);
 
   const renderCommand = () => {
     if (!highlight) return shownCommand;

@@ -6,12 +6,19 @@
 
 ## Status
 
-| #   | Slice                         | Size | State                                    |
-| --- | ----------------------------- | ---- | ---------------------------------------- |
-| 1   | `GET /v1/projects` — list     | S    | PR open                                  |
-| 2   | `POST /v1/projects` — create  | M    | PR open                                  |
-| 3   | Web: switcher + create dialog | M    | PR open (split 3a transport / 3b UI)     |
-| 4   | Org switching (follow-up)     | M–L  | not started, blocked on v1.45.0 adoption |
+| #   | Slice                         | Size | State                                          |
+| --- | ----------------------------- | ---- | ---------------------------------------------- |
+| 1   | `GET /v1/projects` — list     | S    | PR open (#21)                                  |
+| 2   | `POST /v1/projects` — create  | M    | PR open (#22)                                  |
+| 3   | Web: switcher + create dialog | M    | PR open (#23 transport / #24 UI)               |
+| 4   | Org switching                 | M–L  | PR open (#26), plus fixes #30/#31 from testing |
+| 5   | Invite to an existing project | M    | PR open (#32)                                  |
+| 6   | Projects view                 | M    | built (`feat/projects-view`, stacked on #32)   |
+| 7   | Org settings page (rename)    | S    | PR open (#34)                                  |
+
+Slices 1–4 were built before anyone ran them. Slices 5–7 come from actually
+using the feature, and 5 is a root-cause fix rather than an addition — see
+"What testing changed" below.
 
 ## The gap in one line
 
@@ -155,7 +162,9 @@ This is why org switching is a genuine follow-up rather than a sibling of the pr
 - Changing URL namespacing on flat editions (Decision 1, option B)
 - Project transfer between orgs
 - Per-project settings beyond what `settings/project` already has
-- Reworking `ensureMemberDefaultProject` — once users can create projects deliberately, auto-creating one per invited member becomes questionable, but that is a follow-up decision, not part of this scope
+- ~~Reworking `ensureMemberDefaultProject`~~ — **done in slice 5 (#32)**: it
+  became `attachMemberToProject`, binding invitees to an existing project
+  instead of minting one each
 - Org **creation** from the UI (`bootstrapOrganization` / `joinSharedOrganization` remain the only writers) — switching between orgs you already belong to is the ask; creating orgs is a separate product decision
 - Leaving an org, and org deletion
 
@@ -166,3 +175,109 @@ This is why org switching is a genuine follow-up rather than a sibling of the pr
 - Lockout: create a second project, delete the first, confirm the user still resolves a project (exercises invariant 1)
 - Switcher: create project B, switch, confirm agents/secrets/policy all scope to B and the gateway resolves B's connections
 - Upstream: confirm `GetStartedPicker` on an `orgScopedUI: true` build now lists projects instead of 404ing
+
+# What testing changed
+
+Slices 1–4 shipped green — full suites, type checks, a real-Postgres run — and
+still had three defects that only a person clicking around could find. Worth
+recording, because they share a shape: **a scope that was correct on the server
+and wrong on the client, with no error anywhere.**
+
+1. **The proxy never runs on API calls.** `proxy.ts` translates the scope
+   cookies into headers, but its matcher excludes `v1`. Page requests carried
+   the selected project; every client call to `/v1/*` did not, so
+   `resolveProjectId` fell back to the caller's DEFAULT project and writes
+   landed in the wrong place while the page around them looked right. Fixed in
+   #30 by implementing `getProjectId`/`getOrganizationId` — which existed as
+   `undefined` stubs for exactly this purpose — and having `apiFetch` send them.
+2. **The lockout fallback was too broad.** Selecting an org with no reachable
+   project silently resolved a project in the DEFAULT org, and since `session.ts`
+   derives org from project, every page then read from the wrong org. Fixed in
+   #31: the fallback is now opt-out via `strict`, passed whenever the org was
+   chosen explicitly. Returning null is safe — "this org, no project yet" is a
+   state the API already models.
+3. **Mount effects don't re-run.** Both switchers read their cookie in a
+   `useEffect(…, [])`, which does not fire again when they write a new one;
+   `router.refresh()` re-renders server components but leaves client state
+   alone. They now hold the pending selection.
+
+The lesson for slices 6 and 7: **exercise the client path, not just the server
+one.** Every one of these passed every automated check.
+
+# Slice 6: projects view
+
+## The gap
+
+#31 made "this org, no project yet" a correct, reachable state — and a dead
+end, because there is nowhere in the UI to create or pick a project from. The
+switcher only lists what you can already reach.
+
+## Scope
+
+A `/projects` page listing the current org's projects with, per row, the access
+dialog from #13 and rename/delete from `project-service`. Almost entirely
+assembly: `GET` (#21), `POST` (#22), `PATCH`/`DELETE` and `GET/PUT
+/:projectId/access` all exist and are tested.
+
+- Nav entry alongside Groups and Team, admin-visible on the same "render it and
+  let the API 403" pattern the rest of the dashboard uses.
+- Empty state that offers creation — this is what the org-with-no-project case
+  lands on.
+- Reuse `CreateProjectDialog`; do not write a second one.
+
+## What to watch
+
+- **`GET /v1/projects` returns only what the caller may reach.** An org admin
+  sees every project, a member sees their bindings. The page must not imply the
+  list is the org's full inventory to a non-admin.
+- **Deleting your last project is a lockout.** `deleteProject` already guards it
+  (`hasResolvableProjectExcluding`); surface that refusal as a clear message
+  rather than a generic error.
+- Switching to a project from this page should go through the same cookie write
+  the switcher uses, not a second mechanism.
+
+## Decisions recorded during implementation
+
+- **Nav entry is always visible**, not admin-visible: every caller has a
+  meaningful page (a member sees their bound projects), and hiding it would
+  require a session role field. Same D-J comment as Team/Groups.
+- **The switch sequence is extracted** into `useSwitchProject`
+  (cookie write → `queryClient.clear()` → `router.refresh()`); the sidebar
+  switcher and the page rows both delegate to it.
+- **`useCurrentProjectId`'s cookie read is query-backed** rather than a mount
+  effect — defect 3 fixed at the source: both switch surfaces clear the query
+  cache, so every subscriber re-reads the cookie after a switch from either
+  one. The sidebar switcher keeps its `pendingId` to cover the async refetch.
+- **`ProjectAccessDialog` (and its admin-only notice) moved** from
+  `settings/project/_components/` to the shared `apps/web/src/components/`
+  home; the settings card and the projects rows render the same dialog.
+- **Delete 409s surface twice** — the hook's toast (verbatim server message)
+  plus inline destructive text in the still-open dialog. Accepted as-is.
+- The page stays on `/projects` after a row switch, and after deleting the
+  currently selected project (cookie cleared, server re-resolves a default).
+
+# Slice 7: org settings page (rename)
+
+## The gap
+
+Organizations can only be renamed by DB surgery. `validateOrgName` already
+exists in `organization-service.ts` and is unused.
+
+## Scope
+
+- `PATCH /v1/organizations/:organizationId` — only `GET /` exists today
+  (`routes/org/organizations.ts`, added in #26). Admin-only, org-fenced,
+  `withAudit`, and the same `scope === "project"` fence the file already
+  applies: a leaked agent key must not rename the organization.
+- A settings page mirroring `settings/project`, which is the closest existing
+  shape — reuse its card layout rather than inventing one.
+
+## What to watch
+
+- **Renaming must not touch `slug`.** It is `@@unique([organizationId, slug])`
+  and is write-only provenance, exactly as `renameProject` treats a project's
+  slug. Changing it would break any URL or record that captured it.
+- Name is not unique across orgs and should not become so — the same reasoning
+  as `projectNameSchema`.
+- The org name appears in the switcher; invalidate `queryKeys.organizations`
+  after a rename or it shows the old name until reload.

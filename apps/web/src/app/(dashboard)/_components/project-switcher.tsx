@@ -1,8 +1,6 @@
 "use client";
 
 import { useState } from "react";
-import { useRouter } from "next/navigation";
-import { useQueryClient } from "@tanstack/react-query";
 import { Check, ChevronsUpDown, FolderOpen, Plus } from "lucide-react";
 import {
   DropdownMenu,
@@ -18,7 +16,7 @@ import {
 } from "@onecli/ui/components/sidebar";
 import { cn } from "@onecli/ui/lib/utils";
 import { useCurrentProjectId, useProjectsList } from "@/hooks/use-projects";
-import { writeDefaultProjectCookie } from "@/lib/navigation";
+import { useSwitchProject } from "@/hooks/use-switch-project";
 import { CreateProjectDialog } from "./create-project-dialog";
 
 /**
@@ -30,23 +28,18 @@ import { CreateProjectDialog } from "./create-project-dialog";
  * simply renders nothing.
  */
 export const ProjectSwitcher = () => {
-  const router = useRouter();
-  const queryClient = useQueryClient();
   const { data: projects = [], isLoading } = useProjectsList();
+  // No local pending state: `useSwitchProject` seeds the cookie query
+  // synchronously, so this re-renders with the new id from any switch surface
+  // — a local override here would go stale the moment another surface
+  // switched.
   const currentId = useCurrentProjectId();
   const [createOpen, setCreateOpen] = useState(false);
+  const doSwitch = useSwitchProject();
 
   const switchTo = (projectId: string) => {
     if (projectId === currentId) return;
-    writeDefaultProjectCookie(projectId);
-    // Every cached query has to go, not just the project list. Query keys are
-    // scoped by `getProjectId()`, which is an `undefined` stub in this edition,
-    // so switching projects does NOT change any key — cached agents, secrets
-    // and policy would otherwise be served for the previous project.
-    queryClient.clear();
-    // The cookie only reaches the server on the next request, and most of this
-    // dashboard is server-rendered, so refresh rather than re-render.
-    router.refresh();
+    doSwitch(projectId);
   };
 
   // Nothing to switch between and nothing loaded yet — stay out of the way

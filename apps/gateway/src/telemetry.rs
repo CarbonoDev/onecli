@@ -42,15 +42,49 @@ async fn record_spend(pool: &PgPool, cache: &dyn CacheStore, key: &SpendKey, del
     match crate::db::upsert_budget_spend(pool, secret_id, organization_id, period_key, delta).await
     {
         Ok(total) => {
+            // RECONCILE, don't overwrite. The cache was already incremented for
+            // this charge (`charge_cache` below), and may have been incremented
+            // again for a charge that lands in the NEXT batch. A blind
+            // `set_raw(total)` would roll those newer charges back and let spend
+            // through twice.
+            //
+            // The durable row is a FLOOR: raise the counter to it when the cache
+            // is behind (cold start, eviction, a lost increment), never lower it.
             let counter = crate::budget::counter_key(secret_id, organization_id, period_key);
-            cache
-                .set_raw(&counter, &total.to_string(), crate::budget::PERIOD_TTL)
-                .await;
+            let cached = cache
+                .get_raw(&counter)
+                .await
+                .and_then(|raw| raw.parse::<i64>().ok());
+            if cached.is_none_or(|c| c < total) {
+                cache
+                    .set_raw(&counter, &total.to_string(), crate::budget::PERIOD_TTL)
+                    .await;
+            }
         }
         Err(e) => {
             warn!(error = %e, secret_id = %secret_id, "budget: failed to record spend");
         }
     }
+}
+
+/// Apply a charge to the hot counter the moment it is drained from the channel,
+/// rather than waiting for the batch to reach PostgreSQL.
+///
+/// `pre_forward` reads this counter to decide whether to deny with 402. Before
+/// this, the counter only moved when the flush loop completed its upsert, so
+/// requests arriving between a charge and its flush all read the same stale
+/// total and were all admitted. The window was small — `collect_batch` returns
+/// as soon as one event arrives, so the 5s interval only applies when idle —
+/// but it was wide enough for concurrent requests against one budget.
+///
+/// Fail-open, like every other budget read: a cache miss returns None and the
+/// request proceeds. The durable floor in `record_spend` repairs the counter.
+async fn charge_cache(cache: &dyn CacheStore, key: &SpendKey, delta: i64) {
+    let (secret_id, organization_id, period_key) = key;
+    let counter = crate::budget::counter_key(secret_id, organization_id, period_key);
+    cache
+        .incr_by(&counter, delta, crate::budget::PERIOD_TTL)
+        .await;
 }
 
 async fn insert_batch(pool: &PgPool, events: &[RequestEvent]) -> Result<(), sqlx::Error> {
@@ -181,7 +215,14 @@ async fn flush_loop(
             }
         }
 
-        // Persist the aggregated spend deltas (few keys per flush in practice).
+        // Move the hot counter FIRST, before the (slower) database round-trip:
+        // this is what `pre_forward` reads, so every microsecond it lags is a
+        // window in which a concurrent request sees a stale total.
+        for (key, delta) in &charges {
+            charge_cache(cache.as_ref(), key, *delta).await;
+        }
+
+        // Then persist, and reconcile the counter against the durable floor.
         for (key, delta) in &charges {
             record_spend(&pool, cache.as_ref(), key, *delta).await;
         }

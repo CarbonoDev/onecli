@@ -5,9 +5,28 @@ const scope = () =>
   [getOrganizationId() ?? "default", getProjectId() ?? "default"] as const;
 
 export const queryKeys = {
+  /**
+   * The selection cookies, held in the query cache so a switch re-renders every
+   * subscriber instead of stranding them on a mount-effect read.
+   *
+   * Deliberately NOT `scope()`-prefixed, and this is the one group that must
+   * not be: these keys ARE the scope source, so prefixing them with the scope
+   * they produce would be circular — the key would change identity the moment
+   * its own value did.
+   */
+  scope: {
+    organizationCookie: () => ["scope", "org-cookie"] as const,
+    projectCookie: () => ["scope", "project-cookie"] as const,
+  },
   agents: {
     all: () => ["agents", ...scope()] as const,
     list: () => [...queryKeys.agents.all(), "list"] as const,
+    detail: (agentId: string) =>
+      [...queryKeys.agents.all(), "detail", agentId] as const,
+    // Explicitly-targeted project (the org-level picker) — keyed by that
+    // project, deliberately outside the URL-derived scope() prefix.
+    forProject: (projectId: string) =>
+      ["agents", "for-project", projectId] as const,
   },
   secrets: {
     all: () => ["secrets", ...scope()] as const,
@@ -58,7 +77,13 @@ export const queryKeys = {
     all: () => ["projects", ...scope()] as const,
     detail: (projectId: string) =>
       [...queryKeys.projects.all(), projectId] as const,
-    list: () => [...queryKeys.projects.all(), "list"] as const,
+    // organizationId only when explicitly overridden (account-route picker).
+    list: (organizationId?: string) =>
+      [...queryKeys.projects.all(), "list", organizationId ?? "url"] as const,
+  },
+  organizations: {
+    all: () => ["organizations"] as const,
+    list: () => [...queryKeys.organizations.all(), "list"] as const,
   },
   projectAccess: {
     all: () => ["project-access", ...scope()] as const,
@@ -85,6 +110,9 @@ export const queryKeys = {
   },
   counts: {
     all: () => ["counts", ...scope()] as const,
+  },
+  installInfo: {
+    all: () => ["install-info", ...scope()] as const,
   },
   userPlan: {
     all: () => ["user-plan", ...scope()] as const,

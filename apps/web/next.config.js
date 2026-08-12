@@ -5,18 +5,23 @@ const isCloud = process.env.NEXT_PUBLIC_EDITION === "cloud";
 const isOnpremFull = process.env.NEXT_PUBLIC_EDITION === "onprem-full";
 const isOnpremSlim = process.env.NEXT_PUBLIC_EDITION === "onprem-slim";
 
+// The monorepo root. process.cwd() is apps/web during `next dev`/`next build`
+// (turbo runs each task from its own package), so the root is two levels up.
+// Named explicitly for `turbopack.root` below: left to infer it, Next walks up
+// looking for lockfiles and takes the LAST one it finds, so a stray lockfile in
+// a parent of the checkout (e.g. $HOME/package-lock.json) silently wins over
+// this repo's pnpm-lock.yaml and the workspace root lands outside the repo.
+const workspaceRoot = path.join(process.cwd(), "..", "..");
+
 // Build-time app version, exposed to the app as NEXT_PUBLIC_APP_VERSION (client +
 // server, inlined by Next). Cloud stamps APP_VERSION (semver + short git sha, e.g.
 // "1.38.0+f6cca6e5") as a build arg; OSS / self-host / local falls back to the
-// monorepo root package.json version, else "dev". process.cwd() is apps/web here.
+// monorepo root package.json version, else "dev".
 const resolveAppVersion = () => {
   if (process.env.APP_VERSION) return process.env.APP_VERSION;
   try {
     const pkg = JSON.parse(
-      readFileSync(
-        path.join(process.cwd(), "..", "..", "package.json"),
-        "utf8",
-      ),
+      readFileSync(path.join(workspaceRoot, "package.json"), "utf8"),
     );
     return pkg.version || "dev";
   } catch {
@@ -194,6 +199,7 @@ const nextConfig = {
       : "http://localhost:10255",
   },
   turbopack: {
+    root: workspaceRoot,
     resolveAlias: isCloud
       ? CLOUD_ALIASES
       : isOnpremFull

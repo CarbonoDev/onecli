@@ -15,8 +15,8 @@ export const AdminOnlyNotice = () => (
     <p className="text-sm font-medium">Admins only</p>
     <p className="text-muted-foreground mt-1 max-w-xs text-xs">
       Browsing the organization&apos;s members and groups requires an admin. Ask
-      an admin to share this project, or remove existing access from the list
-      behind this dialog.
+      an admin to share this project, or remove existing access from the
+      project&apos;s settings.
     </p>
   </div>
 );

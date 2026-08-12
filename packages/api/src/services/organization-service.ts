@@ -3,8 +3,13 @@ import { generateApiKey, ensureBootstrapOrgApiKey } from "./api-key-service";
 import { generateAccessToken } from "./agent-service";
 import { DEFAULT_AGENT_NAME, DEFAULT_AGENT_IDENTIFIER } from "../lib/constants";
 import { generateProjectId, generateOrganizationId } from "../lib/ids";
-import { getNewOrgPolicySeeder } from "../providers";
+import {
+  getNewOrgPolicySeeder,
+  getRoleResolver,
+  ROLE_HIERARCHY,
+} from "../providers";
 import { logger } from "../lib/logger";
+import { ServiceError } from "./errors";
 
 export const slugify = (raw: string) =>
   raw
@@ -51,6 +56,19 @@ export const activeMembershipWhere = {
  */
 export const findUserDefaultProject = async (
   userId: string,
+  preferredOrgId?: string,
+  /**
+   * Refuse to look outside `preferredOrgId`.
+   *
+   * The unfenced fallback exists so an unusable SELECTION never strands a
+   * caller with no project at all. But when the org was chosen EXPLICITLY (the
+   * switcher's header), silently answering with another org's project is worse
+   * than answering with none: the switcher says one org while every page reads
+   * from another. "No project in this organization" is a legitimate state —
+   * `session.ts` still resolves org context via `resolveOrganizationId`, so
+   * this returns null without a lockout.
+   */
+  strict = false,
 ): Promise<{ id: string; organizationId: string } | null> => {
   // Cheap early-out for the pre-bootstrap user, and the reason both arms below
   // can assume at least one active membership exists.
@@ -65,31 +83,59 @@ export const findUserDefaultProject = async (
     organization: { members: { some: { userId, ...activeMembershipWhere } } },
   };
 
-  const created = await db.project.findFirst({
-    where: { ...inActiveMemberOrg, createdByUserId: userId },
-    select: { id: true, organizationId: true },
-    orderBy: [{ createdAt: "asc" }, { id: "asc" }],
-  });
-  if (created) return created;
+  // Both arms, optionally fenced to one organization. `preferredOrgId` is the
+  // org switcher's selection: it NARROWS which projects are candidates, it
+  // never widens them — the active-membership fence still applies, so an org
+  // the caller does not belong to simply yields nothing and we fall through to
+  // the unfenced pass below.
+  const resolve = async (organizationId?: string) => {
+    const orgFence = organizationId ? { organizationId } : {};
+    const created = await db.project.findFirst({
+      where: { ...inActiveMemberOrg, ...orgFence, createdByUserId: userId },
+      select: { id: true, organizationId: true },
+      orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+    });
+    if (created) return created;
 
-  return db.project.findFirst({
-    where: {
-      ...inActiveMemberOrg,
-      accessBindings: {
-        some: {
-          OR: [{ userId }, { group: { members: { some: { userId } } } }],
+    return db.project.findFirst({
+      where: {
+        ...inActiveMemberOrg,
+        ...orgFence,
+        accessBindings: {
+          some: {
+            OR: [{ userId }, { group: { members: { some: { userId } } } }],
+          },
         },
       },
-    },
-    select: { id: true, organizationId: true },
-    orderBy: [{ createdAt: "asc" }, { id: "asc" }],
-  });
+      select: { id: true, organizationId: true },
+      orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+    });
+  };
+
+  // A selection that resolves nothing (org left, membership suspended, its
+  // last project deleted) must not strand the caller with no project at all —
+  // that is the lockout `hasResolvableProjectExcluding` exists to prevent. Fall
+  // back to the unfenced answer, which is exactly the pre-switcher behaviour.
+  if (preferredOrgId) {
+    const preferred = await resolve(preferredOrgId);
+    if (preferred) return preferred;
+    if (strict) return null;
+  }
+  return resolve();
 };
 
 /**
  * Whether `userId` would still resolve SOME project if `excludeProjectId`
  * disappeared — the delete guard's lockout oracle
  * (`deleteProject`, project-service).
+ *
+ * Deliberately takes NO `preferredOrgId`. The org fence in
+ * `findUserDefaultProject` only ever narrows, and always falls back to the
+ * unfenced answer, so the set of projects that can EVER resolve is unchanged —
+ * which is precisely the set this predicate has to describe. Adding a fence
+ * here would make it answer a narrower question than the one the delete guard
+ * asks ("will this user resolve SOMETHING afterwards?") and reintroduce the
+ * lockout.
  *
  * THESE TWO MUST AGREE: this is exactly `findUserDefaultProject`'s disjunction
  * (created-by-them, OR bound directly / through a group), fenced to orgs the
@@ -353,18 +399,82 @@ export const joinSharedOrganization = async (
  * an existing org already owns the plain `default` slug, so the member's slug
  * carries their user id.
  */
-export const ensureMemberDefaultProject = async (
+/**
+ * Give an invited member a project to land on, by ATTACHING them to an existing
+ * one rather than minting a personal one.
+ *
+ * The old behaviour (`ensureMemberDefaultProject`) created a project named
+ * "Default" per invitee, slug `default-<userId>`. That is why project names are
+ * deliberately non-unique per org, and why an org accumulated one project per
+ * person while nobody landed anywhere shared.
+ *
+ * Resolution order:
+ *  1. A project the member can ALREADY reach — created by them, or bound
+ *     directly/through a group. Keeps accept idempotent and never re-binds on a
+ *     second click.
+ *  2. `preferredProjectId`, when the inviter chose one and it is still in this
+ *     org. Silently ignored otherwise: a project deleted between invite and
+ *     accept must not fail the accept.
+ *  3. The organization's OLDEST project — its de-facto default. Deterministic,
+ *     and the same ordering `findUserDefaultProject` uses.
+ *  4. Only if the org has no project at all: create one. This is the bootstrap
+ *     edge (an org whose every project was deleted), not the common path.
+ *
+ * The binding is `member`, never `owner`: being invited grants use of a
+ * project, not authority over it. An org admin already has management authority
+ * through their role.
+ */
+export const attachMemberToProject = async (
   organizationId: string,
   userId: string,
   userEmail: string,
+  preferredProjectId?: string | null,
 ) => {
-  const existing = await db.project.findFirst({
-    where: { organizationId, createdByUserId: userId },
+  // 1. Already reachable — the idempotent path.
+  const reachable = await db.project.findFirst({
+    where: {
+      organizationId,
+      OR: [
+        { createdByUserId: userId },
+        {
+          accessBindings: {
+            some: {
+              OR: [{ userId }, { group: { members: { some: { userId } } } }],
+            },
+          },
+        },
+      ],
+    },
     select: { id: true, organizationId: true },
-    orderBy: { createdAt: "asc" },
+    orderBy: [{ createdAt: "asc" }, { id: "asc" }],
   });
-  if (existing) return existing;
+  if (reachable) return reachable;
 
+  // 2/3. The chosen project if it still belongs to this org, else the oldest.
+  const target =
+    (preferredProjectId
+      ? await db.project.findFirst({
+          where: { id: preferredProjectId, organizationId },
+          select: { id: true, organizationId: true },
+        })
+      : null) ??
+    (await db.project.findFirst({
+      where: { organizationId },
+      select: { id: true, organizationId: true },
+      orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+    }));
+
+  if (target) {
+    // `createMany` + skipDuplicates rather than `create`: two accepts racing on
+    // the same invitation must not collide on @@unique([projectId, userId]).
+    await db.projectAccess.createMany({
+      data: [{ projectId: target.id, userId, role: "member" }],
+      skipDuplicates: true,
+    });
+    return target;
+  }
+
+  // 4. Bootstrap edge only: an organization with no projects at all.
   const project = await db.project.create({
     data: {
       id: generateProjectId(),
@@ -396,7 +506,10 @@ export const ensureMemberDefaultProject = async (
 export const validateOrgName = (raw: string): string => {
   const trimmed = raw.trim();
   if (!trimmed || trimmed.length > 255) {
-    throw new Error("Organization name must be 1-255 characters");
+    throw new ServiceError(
+      "UNPROCESSABLE",
+      "Organization name must be 1-255 characters",
+    );
   }
   return trimmed;
 };
@@ -436,4 +549,107 @@ export const ensureProjectSeeds = async (
       },
     });
   }
+};
+
+export interface OrganizationRow {
+  id: string;
+  name: string;
+  slug: string;
+  role: string;
+}
+
+/**
+ * Organizations the caller is an ACTIVE member of, oldest membership first —
+ * the org switcher's source.
+ *
+ * Fenced by `activeMembershipWhere` for the usual reason: a suspended member is
+ * a non-member to every authorization check, so listing their old org would
+ * offer a switch that resolves to nothing.
+ *
+ * Multi-org membership is ordinary here, not exotic: `bootstrapOrganization`
+ * gives every user their own org as `owner`, and accepting an invitation adds a
+ * membership in someone else's — so anyone who has accepted an invite belongs
+ * to at least two.
+ */
+export const listUserOrganizations = async (
+  userId: string,
+): Promise<OrganizationRow[]> => {
+  const rows = await db.organizationMember.findMany({
+    where: { userId, ...activeMembershipWhere },
+    select: {
+      role: true,
+      organization: { select: { id: true, name: true, slug: true } },
+    },
+    orderBy: [{ createdAt: "asc" }],
+  });
+
+  return rows.map((row) => ({
+    id: row.organization.id,
+    name: row.organization.name,
+    slug: row.organization.slug,
+    role: row.role,
+  }));
+};
+
+/**
+ * ADMIN authority over the organization itself — the per-resource check the
+ * `/v1/organizations` router needs, because it cannot take a `role: "admin"`
+ * filter globally: `GET /` is deliberately member-visible.
+ *
+ * Same two invariants as `resolveAuthority` in `project-service`:
+ *
+ *  - The role is resolved FIRST and a null role denies (the suspension
+ *    invariant): `ossRoleResolver` reads a suspended membership as no role, so
+ *    a suspended admin cannot rename the org.
+ *  - Deliberately NOT gated on `CAPS.rbac`. A usage check must no-op (allow)
+ *    for editions without roles; a MANAGEMENT check that allowed everyone
+ *    there would let any member rename the organization. With no resolver
+ *    registered the role reads null and we deny — fail closed.
+ */
+export const requireOrgAdmin = async (
+  userId: string,
+  organizationId: string,
+): Promise<void> => {
+  const resolver = getRoleResolver();
+  const role = resolver
+    ? await resolver.getUserRole(userId, organizationId)
+    : null;
+  if (!role || ROLE_HIERARCHY[role] < ROLE_HIERARCHY.admin) {
+    throw new ServiceError(
+      "FORBIDDEN",
+      "You do not have permission to manage this organization.",
+    );
+  }
+};
+
+/**
+ * Rename. `name` ONLY — `slug` is strictly immutable, and more so than a
+ * project's: `Organization.slug` is GLOBALLY `@unique`, and unlike a project's
+ * it IS read — `findOrCreateSharedOrg` looks the onprem bootstrap org up by
+ * `SHARED_ORG_SLUG`. Rewriting it could both collide and strand that lookup.
+ * Names are NOT unique across orgs (see `orgNameSchema`), so a rename-to-self
+ * and a rename onto another org's name are both permitted 200s.
+ */
+export const renameOrganization = async (
+  organizationId: string,
+  name: string,
+): Promise<Omit<OrganizationRow, "role">> => {
+  const trimmed = validateOrgName(name);
+
+  // Conditional write, mirroring `renameProject`: count 0 means the row
+  // vanished between authorization and the write — 404, not a 500.
+  const { count } = await db.organization.updateMany({
+    where: { id: organizationId },
+    data: { name: trimmed },
+  });
+  if (count === 0) {
+    throw new ServiceError("NOT_FOUND", "Organization not found.");
+  }
+
+  const row = await db.organization.findUnique({
+    where: { id: organizationId },
+    select: { id: true, name: true, slug: true },
+  });
+  if (!row) throw new ServiceError("NOT_FOUND", "Organization not found.");
+  return row;
 };

@@ -41,8 +41,8 @@ import {
   useProjectAccess,
   useSetProjectAccess,
 } from "@/hooks/use-project-access";
+import { ProjectAccessDialog } from "@/components/project-access-dialog";
 import { LocalModeNotice } from "./local-mode-notice";
-import { ProjectAccessDialog } from "./project-access-dialog";
 
 export interface ProjectAccessCardProps {
   projectId: string;

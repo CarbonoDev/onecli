@@ -7,7 +7,7 @@ import {
   toDirectoryPage,
   type DirectoryPage,
 } from "../lib/cursor";
-import { ensureMemberDefaultProject } from "./organization-service";
+import { attachMemberToProject } from "./organization-service";
 import { IDENTITY_CONFLICT_ERROR } from "../routes/auth-session";
 import type { CreateInvitationInput } from "../validations/org";
 import type { z } from "zod";
@@ -221,10 +221,26 @@ export const createOrgInvitation = async (
     );
   }
 
+  // Fence the chosen project to THIS organization. Resolve-then-reject, so a
+  // cross-org id reads as absent rather than confirming it exists.
+  if (input.projectId) {
+    const inOrg = await db.project.findFirst({
+      where: { id: input.projectId, organizationId },
+      select: { id: true },
+    });
+    if (!inOrg) {
+      throw new ServiceError(
+        "BAD_REQUEST",
+        "That project does not belong to this organization.",
+      );
+    }
+  }
+
   const fresh = {
     token: generateInvitationToken(),
     status: "pending",
     role: input.role,
+    projectId: input.projectId ?? null,
     invitedById,
     invitedByEmail,
     expiresAt: invitationExpiry(),
@@ -440,9 +456,10 @@ export interface AcceptResult {
  *    $transaction (zero usage in this package); the known trade-off is that a
  *    post-claim failure burns the invitation and the admin re-invites.
  * 7. membership upsert (idempotent against a concurrent join);
- * 8. `ensureMemberDefaultProject` is awaited and NOT best-effort: without a
- *    project the session redirect dead-ends on /create-org, which does not
- *    exist in OSS.
+ * 8. `attachMemberToProject` is awaited and NOT best-effort: without a project
+ *    the session redirect dead-ends on /create-org, which does not exist in
+ *    OSS. It ATTACHES to an existing project (the one the inviter chose, else
+ *    the org's oldest) rather than minting a personal one.
  */
 export const acceptInvitation = async (
   token: string,
@@ -500,10 +517,11 @@ export const acceptInvitation = async (
       where: { id: invitation.id, status: "pending" },
       data: { status: "accepted" },
     });
-    const project = await ensureMemberDefaultProject(
+    const project = await attachMemberToProject(
       organizationId,
       userId,
       userEmail,
+      invitation.projectId,
     );
     return {
       organizationId,
@@ -534,10 +552,11 @@ export const acceptInvitation = async (
     update: {},
   });
 
-  const project = await ensureMemberDefaultProject(
+  const project = await attachMemberToProject(
     organizationId,
     userId,
     userEmail,
+    invitation.projectId,
   );
 
   return {

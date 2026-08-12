@@ -4,6 +4,7 @@ import * as policy from "./policy";
 import * as connections from "./connections";
 import * as grants from "./grants";
 import * as projects from "./projects";
+import * as organizations from "./organizations";
 import * as projectAccess from "./project-access";
 import * as orgMembers from "./org-members";
 import * as invitations from "./invitations";
@@ -25,6 +26,7 @@ export {
   connections,
   grants,
   projects,
+  organizations,
   projectAccess,
   orgMembers,
   invitations,
@@ -46,6 +48,7 @@ export type {
   CreatedSecret,
   Connection,
   Project,
+  Organization,
   ProjectAccessBindings,
   ProjectAccessUserRow,
   ProjectAccessGroupRow,
@@ -78,6 +81,7 @@ export type {
   AgentGrantSecret,
   ConnectionGrants,
   ConnectionGrantInput,
+  GrantResources,
   AgentGrantsSummary,
   AgentWithGrantsSummary,
   GrantsSummaryEntry,

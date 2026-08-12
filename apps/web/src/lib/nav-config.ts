@@ -1,15 +1,18 @@
 import {
   LayoutDashboard,
+  Download,
   Bot,
   Settings,
   Plug,
   Activity,
+  FolderKanban,
   User,
   Users,
   UsersRound,
   KeyRound,
   ShieldCheck,
   Globe,
+  Building2,
 } from "lucide-react";
 import type { NavItem } from "@/app/(dashboard)/_components/nav-main";
 
@@ -26,6 +29,7 @@ export interface SettingsNavSection {
 
 export const navItems: NavItem[] = [
   { title: "Overview", url: "/overview", icon: LayoutDashboard },
+  { title: "Install", url: "/install", icon: Download },
   { title: "Agents", url: "/agents", icon: Bot },
   { title: "Connections", url: "/connections", icon: Plug },
   // Always visible: the organization policy surface degrades for non-admins
@@ -40,6 +44,9 @@ export const navItems: NavItem[] = [
   // groups in local auth mode — hiding the item would require a session role
   // field.
   { title: "Groups", url: "/groups", icon: UsersRound },
+  // Always visible (D-J): the page itself degrades — a member sees only their
+  // bound projects and the API's 403 is the authority on any mutation.
+  { title: "Projects", url: "/projects", icon: FolderKanban },
   { title: "Settings", url: "/settings", icon: Settings },
 ];
 
@@ -50,7 +57,19 @@ export const getSettingsSections = (
 ): SettingsNavSection[] => [
   {
     label: "General",
-    items: [{ title: "Instance", url: "/settings/instance", icon: Globe }],
+    items: [
+      // Project first: it is the thing users manage; the instance is operator
+      // config. Bare paths, no /org/<id> prefix — orgScopedUI stays false.
+      { title: "Project", url: "/settings/project", icon: FolderKanban },
+      // Always visible: the page degrades for non-admins (the API's 403 is the
+      // authority), so hiding it would require a session role field.
+      {
+        title: "Organization",
+        url: "/settings/organization",
+        icon: Building2,
+      },
+      { title: "Instance", url: "/settings/instance", icon: Globe },
+    ],
   },
   {
     label: "Account",

@@ -3,8 +3,8 @@
 import { useState } from "react";
 import { FolderKanban, Plus } from "lucide-react";
 import { Button } from "@onecli/ui/components/button";
-import { Card } from "@onecli/ui/components/card";
 import { CreateProjectDialog } from "@dashboard/create-project-dialog";
+import { EmptyState } from "@/components/empty-state";
 import { useSwitchProject } from "@/hooks/use-switch-project";
 
 /**
@@ -18,22 +18,21 @@ export const ProjectsEmptyState = () => {
 
   return (
     <>
-      <Card className="flex flex-col items-center justify-center py-12 text-center">
-        <div className="bg-muted mb-4 flex size-12 items-center justify-center rounded-full">
-          <FolderKanban className="text-muted-foreground size-6" />
-        </div>
-        {/* Binding-accurate, not inventory-claiming: the org may well have
-            projects this caller simply cannot reach. */}
-        <p className="text-sm font-medium">No projects to show</p>
-        <p className="text-muted-foreground mt-1 max-w-xs text-xs">
-          You don&apos;t have access to any projects in this organization yet.
-          Create one to get started.
-        </p>
-        <Button size="sm" className="mt-4" onClick={() => setCreateOpen(true)}>
-          <Plus className="size-3.5" />
-          Create project
-        </Button>
-      </Card>
+      <EmptyState
+        variant="card"
+        icon={FolderKanban}
+        // The `title` escape hatch, not `things`: `No projects yet` would
+        // claim an inventory this page cannot see. Binding-accurate — the org
+        // may well have projects this caller simply cannot reach.
+        title="No projects to show"
+        description="You don't have access to any projects in this organization yet. Create one to get started."
+        action={
+          <Button size="sm" onClick={() => setCreateOpen(true)}>
+            <Plus className="size-3.5" />
+            Create project
+          </Button>
+        }
+      />
 
       <CreateProjectDialog
         open={createOpen}

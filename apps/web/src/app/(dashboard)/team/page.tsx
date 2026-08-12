@@ -24,7 +24,7 @@ export default function TeamPage() {
           the heading doesn't change while the list resolves. */}
       <PageHeader
         title="Members"
-        description="Manage your organization's members and invite teammates."
+        description="Manage members and roles for your organization."
       />
       <Suspense>
         <TeamContent teamEnabled={teamEnabled} />

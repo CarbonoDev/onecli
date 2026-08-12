@@ -4,8 +4,8 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { projects } from "@/lib/api";
 import { queryKeys } from "@/lib/api/keys";
-import { apiFetch } from "@/lib/api-fetch";
 import { readDefaultProjectCookie } from "@/lib/navigation";
+import { useSessionScope } from "./use-session-scope";
 
 /** The caller's visible projects. Org comes from the URL scope by default; the
  * explicit organizationId override serves the account-route Get Started picker
@@ -49,9 +49,11 @@ export const useProject = (projectId: string | undefined) =>
  * both switch surfaces call `queryClient.clear()`, which makes every
  * subscriber re-read the cookie after a switch from either one.
  *
- * Note the session endpoint deliberately reports the DEFAULT project, not the
- * selected one (it resolves through `findUserDefaultProject` and ignores the
- * header), which is exactly why the cookie has to take precedence here.
+ * Note the session endpoint reports the DEFAULT project, not the selected one
+ * (it resolves through `findUserDefaultProject` and ignores the project
+ * header), which is exactly why the cookie has to take precedence here. It
+ * does honour the ORG header, so this fallback answers with a project from the
+ * selected org rather than from the caller's own.
  */
 export const useCurrentProjectId = (): string | undefined => {
   const cookie = useQuery({
@@ -61,17 +63,9 @@ export const useCurrentProjectId = (): string | undefined => {
     staleTime: Infinity,
   });
 
-  const session = useQuery({
-    queryKey: ["session", "project"],
-    queryFn: async () => {
-      const res = await apiFetch("/v1/auth/session");
-      if (!res.ok) return null;
-      return (await res.json()) as { projectId?: string };
-    },
-    staleTime: Infinity,
-  });
+  const resolved = useSessionScope();
 
-  return cookie.data ?? session.data?.projectId;
+  return cookie.data ?? resolved.data?.projectId;
 };
 
 export const useCreateProject = () => {

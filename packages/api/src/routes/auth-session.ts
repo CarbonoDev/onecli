@@ -9,6 +9,7 @@ import {
   joinSharedOrganization,
   ensureProjectSeeds,
 } from "../services/organization-service";
+import { resolveOrganizationId } from "../middleware/auth/resolve";
 import { CAPS } from "../lib/env";
 
 /** Extra attributes to spread into the user upsert (create + update). */
@@ -153,7 +154,25 @@ export const authSessionRoutes = () => {
         }
       }
 
-      let defaultProject = await findUserDefaultProject(dbUser.id);
+      // The org the caller has SELECTED (the switcher's cookie, turned into a
+      // header by the proxy and by `apiFetch`). Fencing the default-project
+      // lookup to it is what makes an org switch land somewhere: this endpoint
+      // is where the web learns which project it is operating in, and an
+      // unfenced answer reports the caller's GLOBAL default — their own org's
+      // project — no matter which org they just switched to.
+      //
+      // STRICT when the header is present, exactly as `resolveProjectId` is,
+      // and for the same reason: answering with another org's project would
+      // make the client show one org while every request reads from another.
+      // "This org, no project yet" is a legitimate state the response already
+      // models by omitting `projectId`.
+      const selectedOrgId = c.req.header("x-organization-id") ?? undefined;
+
+      let defaultProject = await findUserDefaultProject(
+        dbUser.id,
+        selectedOrgId,
+        Boolean(selectedOrgId),
+      );
 
       const bootstrappedOrg =
         !defaultProject &&
@@ -199,10 +218,25 @@ export const authSessionRoutes = () => {
 
       const responseExtra = await _hooks.augmentSessionResponse(dbUser.id);
 
+      // An explicitly selected org still answers when it holds no project this
+      // caller can reach — the state the strict fence above deliberately
+      // produces. Report it: without it the dashboard reads "no project" as
+      // "no organization at all" and bounces the user to /create-org, which
+      // OSS does not even serve. Validated against ACTIVE memberships, so a
+      // stale or forged header contributes nothing. `responseExtra` stays last
+      // — an edition that reports its own org keeps winning.
+      const selectedOrganizationId = await resolveOrganizationId(
+        c.req.raw,
+        dbUser.id,
+      );
+
       return c.json({
         id: dbUser.id,
         email: dbUser.email,
         name: dbUser.name,
+        ...(selectedOrganizationId
+          ? { organizationId: selectedOrganizationId }
+          : {}),
         ...responseExtra,
       });
     } catch (err) {

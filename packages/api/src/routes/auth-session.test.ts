@@ -22,6 +22,14 @@ const state = vi.hoisted(() => ({
   upserts: [] as Record<string, unknown>[],
   defaultProject: null as { id: string; organizationId: string } | null,
   bootstraps: 0,
+  /** Every `findUserDefaultProject` call, to pin the org fence it is given. */
+  defaultProjectCalls: [] as Array<{
+    userId: string;
+    preferredOrgId?: string;
+    strict?: boolean;
+  }>,
+  /** Orgs the caller is an ACTIVE member of, for `resolveOrganizationId`. */
+  memberships: [] as string[],
 }));
 
 vi.mock("@onecli/db", () => ({
@@ -41,6 +49,14 @@ vi.mock("@onecli/db", () => ({
         return { id: "user-1", email: "guy@acme.com", name: "Guy" };
       },
     },
+    // Reached only by `resolveOrganizationId`, and only when the request
+    // carries an X-Organization-Id header.
+    organizationMember: {
+      findFirst: async ({ where }: { where: { organizationId: string } }) =>
+        state.memberships.includes(where.organizationId)
+          ? { organizationId: where.organizationId }
+          : null,
+    },
   },
 }));
 
@@ -48,7 +64,26 @@ vi.mock("@onecli/db", () => ({
 // established-user path (no bootstrap); onUserCreated-seam tests null it to
 // drive the bootstrap decision.
 vi.mock("../services/organization-service", () => ({
-  findUserDefaultProject: async () => state.defaultProject,
+  // `resolve.ts` spreads this into its membership filters; the mocked db
+  // ignores the shape, but the export has to exist for the module to import.
+  activeMembershipWhere: {},
+  findUserDefaultProject: async (
+    userId: string,
+    preferredOrgId?: string,
+    strict?: boolean,
+  ) => {
+    state.defaultProjectCalls.push({ userId, preferredOrgId, strict });
+    // A fenced lookup only answers for the org it was fenced to — the strict
+    // behavior the real service implements.
+    if (
+      strict &&
+      preferredOrgId &&
+      state.defaultProject?.organizationId !== preferredOrgId
+    ) {
+      return null;
+    }
+    return state.defaultProject;
+  },
   bootstrapOrganization: async () => {
     state.bootstraps += 1;
     return { project: { id: "boot-proj", organizationId: "boot-org" } };
@@ -73,6 +108,8 @@ beforeEach(() => {
   state.upserts = [];
   state.defaultProject = { id: "proj-1", organizationId: "org-1" };
   state.bootstraps = 0;
+  state.defaultProjectCalls = [];
+  state.memberships = ["org-1"];
 });
 
 afterEach(() => {
@@ -263,6 +300,90 @@ describe("GET /auth/session onUserCreated seam", () => {
     const res = await app.request("/");
     expect(res.status).toBe(200);
     expect(calls).toEqual([]);
+  });
+});
+
+// The web learns which project it is operating in from this endpoint, so an
+// unfenced answer sends the org switcher back to the caller's own org: it
+// would report their global default project no matter which org was selected.
+describe("GET /auth/session org-scoped default project", () => {
+  const asExistingUser = () => {
+    state.session = { id: "same-sub", email: "guy@acme.com" };
+    state.dbUser = {
+      id: "user-1",
+      email: "guy@acme.com",
+      externalAuthId: "same-sub",
+    };
+  };
+
+  it("fences the lookup to the selected org, strictly", async () => {
+    asExistingUser();
+    state.defaultProject = { id: "proj-2", organizationId: "org-2" };
+    state.memberships = ["org-1", "org-2"];
+
+    const res = await app.request("/", {
+      headers: { "x-organization-id": "org-2" },
+    });
+    expect(res.status).toBe(200);
+    expect(state.defaultProjectCalls).toEqual([
+      { userId: "user-1", preferredOrgId: "org-2", strict: true },
+    ]);
+    const body = (await res.json()) as {
+      projectId?: string;
+      organizationId?: string;
+    };
+    expect(body).toMatchObject({
+      projectId: "proj-2",
+      organizationId: "org-2",
+    });
+  });
+
+  it("stays unfenced when no org is selected", async () => {
+    asExistingUser();
+
+    const res = await app.request("/");
+    expect(res.status).toBe(200);
+    expect(state.defaultProjectCalls).toEqual([
+      { userId: "user-1", preferredOrgId: undefined, strict: false },
+    ]);
+    const body = (await res.json()) as { projectId?: string };
+    expect(body.projectId).toBe("proj-1");
+  });
+
+  it("reports the selected org even when it holds no reachable project", async () => {
+    asExistingUser();
+    // Selected org-2; the caller's only project lives in org-1, and the fence
+    // refuses to answer with it.
+    state.memberships = ["org-1", "org-2"];
+
+    const res = await app.request("/", {
+      headers: { "x-organization-id": "org-2" },
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      projectId?: string;
+      organizationId?: string;
+    };
+    expect(body.projectId).toBeUndefined();
+    // Without this the dashboard reads "no project" as "no org" and redirects
+    // to /create-org.
+    expect(body.organizationId).toBe("org-2");
+  });
+
+  it("ignores an org the caller is not an active member of", async () => {
+    asExistingUser();
+    state.memberships = ["org-1"];
+
+    const res = await app.request("/", {
+      headers: { "x-organization-id": "org-stale" },
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      projectId?: string;
+      organizationId?: string;
+    };
+    expect(body.projectId).toBeUndefined();
+    expect(body.organizationId).toBeUndefined();
   });
 });
 

@@ -5,6 +5,7 @@ import { toast } from "sonner";
 import { organizations } from "@/lib/api";
 import { queryKeys } from "@/lib/api/keys";
 import { readDefaultOrgCookie } from "@/lib/navigation";
+import { useSessionScope } from "./use-session-scope";
 
 /**
  * The organizations the caller is an active member of — the org switcher's
@@ -15,6 +16,20 @@ export const useOrganizationsList = () =>
   useQuery({
     queryKey: queryKeys.organizations.list(),
     queryFn: () => organizations.list(),
+  });
+
+/**
+ * Create an organization. Owns no cache invalidation on purpose: the caller
+ * switches to the new org, and `useSwitchOrganization` clears the whole cache
+ * — invalidating the org list here would only race that clear.
+ */
+export const useCreateOrganization = () =>
+  useMutation({
+    mutationFn: (name: string) => organizations.create(name),
+    onError: (err) =>
+      toast.error(
+        err instanceof Error ? err.message : "Failed to create organization",
+      ),
   });
 
 /**
@@ -41,6 +56,13 @@ export const useRenameOrganization = () =>
  * then derives the org FROM the resolved project — so the cookie is upstream of
  * everything and has to win here too.
  *
+ * Last comes the scope the SERVER resolved. Without it, a user who has never
+ * touched the switcher — every user until their first switch, and every invitee
+ * on the org they were just added to — has no cookie and no SSR fallback, so
+ * the switcher labelled itself "Select organization" while every request was
+ * happily reading from a real org. That is the empty-org state; the server
+ * always knew the answer, nothing was asking it.
+ *
  * The cookie is held in the QUERY CACHE rather than in a mount effect. It has to
  * be: an effect with an empty dep array runs once, and `router.refresh()` — all
  * the org switcher does after writing the cookie — leaves client state alone. A
@@ -63,5 +85,6 @@ export const useCurrentOrganizationId = (
     queryFn: () => readDefaultOrgCookie() ?? null,
     staleTime: Infinity,
   });
-  return cookieId ?? fallbackOrganizationId;
+  const resolved = useSessionScope();
+  return cookieId ?? fallbackOrganizationId ?? resolved.data?.organizationId;
 };

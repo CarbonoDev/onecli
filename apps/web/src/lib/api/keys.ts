@@ -17,6 +17,14 @@ export const queryKeys = {
   scope: {
     organizationCookie: () => ["scope", "org-cookie"] as const,
     projectCookie: () => ["scope", "project-cookie"] as const,
+    /**
+     * `GET /v1/auth/session` — the scope the SERVER resolved, the fallback both
+     * `useCurrentProjectId` and `useCurrentOrganizationId` fall back to when no
+     * cookie has been written. One key so the two hooks share one request and
+     * can never disagree about what the server answered. Un-prefixed for the
+     * same reason as its siblings: it is a scope source, not a scoped read.
+     */
+    session: () => ["scope", "session"] as const,
   },
   agents: {
     all: () => ["agents", ...scope()] as const,
@@ -107,6 +115,12 @@ export const queryKeys = {
   appAvailability: {
     all: () => ["appAvailability", ...scope()] as const,
     available: () => [...queryKeys.appAvailability.all(), "available"] as const,
+  },
+  apiKey: {
+    all: () => ["api-key", ...scope()] as const,
+    /** The caller's personal key IN the current project — scope()-prefixed, so
+     * a project or org switch re-keys it instead of showing the last one. */
+    current: () => [...queryKeys.apiKey.all(), "current"] as const,
   },
   counts: {
     all: () => ["counts", ...scope()] as const,

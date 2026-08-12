@@ -4,11 +4,15 @@ import { auth } from "../../middleware/auth";
 import { ServiceError } from "../../services/errors";
 import { parse } from "./parse";
 import {
+  createOrganization,
   listUserOrganizations,
   renameOrganization,
   requireOrgAdmin,
 } from "../../services/organization-service";
-import { renameOrganizationSchema } from "../../validations/org";
+import {
+  createOrganizationSchema,
+  renameOrganizationSchema,
+} from "../../validations/org";
 import {
   withAudit,
   AUDIT_ACTIONS,
@@ -17,7 +21,7 @@ import {
 } from "../../services/audit-service";
 
 /**
- * `/v1/organizations` — the org switcher's source, plus the org rename.
+ * `/v1/organizations` — the org switcher's source, plus create and rename.
  *
  * Guard stack mirrors `/v1/projects`: `requireProject: false` (this is not a
  * project-scoped surface), no `role` filter (every active member may see the
@@ -48,6 +52,53 @@ export const ossOrganizationRoutes = () => {
   app.get("/", async (c) => {
     const auth = c.get("auth");
     return c.json(await listUserOrganizations(auth.userId));
+  });
+
+  // POST /organizations — create another organization, caller as owner.
+  //
+  // SESSION-ONLY, a fence the sibling routes do not need. The router already
+  // refuses project-scoped keys, but an ORGANIZATION key would otherwise pass:
+  // that credential belongs to one org and carries its authority, and minting
+  // a brand-new tenant is not authority over the org it was issued for. A
+  // leaked automation key must not be able to provision.
+  //
+  // No `requireOrgAdmin` — this creates an org rather than touching the
+  // current one, so the caller's role in `auth.organizationId` is irrelevant.
+  // The service is the authorization: it fences the edition and the per-user
+  // cap, and the caller is the only member of what it creates.
+  app.post("/", async (c) => {
+    const auth = c.get("auth");
+    if (auth.scope !== "session") {
+      throw new ServiceError(
+        "FORBIDDEN",
+        "Creating an organization requires a signed-in user.",
+      );
+    }
+
+    const body = await c.req.json().catch(() => null);
+    const input = parse(createOrganizationSchema, body);
+
+    const organization = await withAudit(
+      () => createOrganization(auth.userId, auth.userEmail, input.name),
+      (created) => ({
+        // The NEW org, not the one the request resolved to: this row belongs
+        // to the tenant that came into existence, and reading its audit log
+        // should show its own creation as the first entry.
+        organizationId: created.id,
+        userId: auth.userId,
+        userEmail: auth.userEmail,
+        service: AUDIT_SERVICES.ORGANIZATION,
+        source: AUDIT_SOURCE.API,
+        action: AUDIT_ACTIONS.CREATE,
+        metadata: {
+          organizationId: created.id,
+          name: created.name,
+          slug: created.slug,
+          projectId: created.projectId,
+        },
+      }),
+    );
+    return c.json(organization, 201);
   });
 
   // PATCH /organizations/:organizationId — rename (name only; `slug` is

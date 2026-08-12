@@ -1,6 +1,7 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { RefreshCw, Eye, EyeOff, Copy, Check } from "lucide-react";
 import { toast } from "sonner";
 import {
@@ -24,21 +25,24 @@ import {
   AlertDialogTrigger,
 } from "@onecli/ui/components/alert-dialog";
 import { useCopyToClipboard } from "@/hooks/use-copy-to-clipboard";
+import { queryKeys } from "@/lib/api/keys";
 import { getApiKey, regenerateApiKey } from "@/lib/actions/api-key";
 
 export const ApiKeyCard = () => {
-  const [apiKey, setApiKey] = useState("");
-  const [loading, setLoading] = useState(true);
+  const queryClient = useQueryClient();
   const [revealed, setRevealed] = useState(false);
   const [regenerating, setRegenerating] = useState(false);
   const { copied, copy } = useCopyToClipboard();
 
-  useEffect(() => {
-    getApiKey().then((result) => {
-      setApiKey(result.apiKey ?? "");
-      setLoading(false);
-    });
-  }, []);
+  // A QUERY, not a mount effect. The key it shows belongs to the current
+  // project, and a switch re-renders this card without remounting it — an
+  // effect with an empty dep array would keep displaying the PREVIOUS
+  // project's key next to a Regenerate button that acts on the current one.
+  // `scope()`-prefixed, so the switch's cookie write re-keys it on its own.
+  const { data: apiKey = "", isPending: loading } = useQuery({
+    queryKey: queryKeys.apiKey.current(),
+    queryFn: () => getApiKey().then((result) => result.apiKey ?? ""),
+  });
 
   const truncatedKey = apiKey
     ? `${apiKey.slice(0, 6)}${"•".repeat(12)}${apiKey.slice(-4)}`
@@ -48,7 +52,7 @@ export const ApiKeyCard = () => {
     setRegenerating(true);
     try {
       const result = await regenerateApiKey();
-      setApiKey(result.apiKey);
+      queryClient.setQueryData(queryKeys.apiKey.current(), result.apiKey);
       setRevealed(true);
       toast.success("API key regenerated");
     } catch {

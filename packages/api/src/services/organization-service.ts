@@ -9,6 +9,7 @@ import {
   ROLE_HIERARCHY,
 } from "../providers";
 import { logger } from "../lib/logger";
+import { CAPS } from "../lib/env";
 import { ServiceError } from "./errors";
 
 export const slugify = (raw: string) =>
@@ -201,32 +202,33 @@ export const defaultProjectSeed = (userId: string, userEmail: string) => ({
 });
 
 /**
- * Create an organization with a default project, API key, and default agent
- * for a user who has no organization yet. Returns the created project.
- *
- * This is the single source of truth for the "first login" bootstrap flow.
- * Called by:
- *   - `GET /v1/auth/session` (cloud + OSS)
- *   - `ensureLocalUser()` (OSS local-auth mode)
- *   - `ensureUserDefaultOrgAndProject()` (EE project management)
+ * Provision an organization owned by `userId`, with the default project every
+ * org is born with. The one write path — `bootstrapOrganization` (first login)
+ * and `createOrganization` (a user asking for another one) differ ONLY in how
+ * they name and slug the org, never in what gets created, so a seed added here
+ * reaches both.
  */
-export const bootstrapOrganization = async (
-  userId: string,
-  userEmail: string,
-  displayName?: string,
-) => {
-  const orgName = displayName || userEmail.split("@")[0] || "Personal";
-  const baseSlug = slugify(orgName) || "personal";
-  const orgSlug = `${baseSlug}-${userId.slice(0, 8)}`;
-
+const provisionOrganization = async ({
+  userId,
+  userEmail,
+  name,
+  slug,
+}: {
+  userId: string;
+  userEmail: string;
+  name: string;
+  slug: string;
+}) => {
   const org = await db.organization.create({
     data: {
       id: generateOrganizationId(),
-      name: orgName,
-      slug: orgSlug,
+      name,
+      slug,
       members: { create: { userId, userEmail, role: "owner" } },
     },
-    select: { id: true },
+    // `slug` too, not just the id: it is searched-for rather than derived on
+    // the create path, so the caller cannot reconstruct what actually landed.
+    select: { id: true, slug: true },
   });
 
   const project = await db.project.create({
@@ -257,6 +259,144 @@ export const bootstrapOrganization = async (
   }
 
   return { project, organization: org };
+};
+
+/**
+ * Create an organization with a default project, API key, and default agent
+ * for a user who has no organization yet. Returns the created project.
+ *
+ * This is the single source of truth for the "first login" bootstrap flow.
+ * Called by:
+ *   - `GET /v1/auth/session` (cloud + OSS)
+ *   - `ensureLocalUser()` (OSS local-auth mode)
+ *   - `ensureUserDefaultOrgAndProject()` (EE project management)
+ *
+ * The slug is derived from the user id rather than searched for a free one:
+ * this runs on the first-login path where a lookup is pure cost, and one
+ * bootstrap per user means it cannot collide with itself.
+ */
+export const bootstrapOrganization = async (
+  userId: string,
+  userEmail: string,
+  displayName?: string,
+) => {
+  const orgName = displayName || userEmail.split("@")[0] || "Personal";
+  const baseSlug = slugify(orgName) || "personal";
+
+  return provisionOrganization({
+    userId,
+    userEmail,
+    name: orgName,
+    slug: `${baseSlug}-${userId.slice(0, 8)}`,
+  });
+};
+
+/**
+ * How many organizations one user may own. Not a licensing knob — a bound on
+ * what a single account can provision by accident or by script, since every
+ * org mints a project, an API key and an agent. Set well above any plausible
+ * honest use; raise it freely.
+ */
+export const MAX_ORGS_PER_USER = 25;
+
+/**
+ * A globally free slug for `name`.
+ *
+ * `Organization.slug` is `@unique` across the whole install (a project's is
+ * only unique within its org), so the scan cannot be fenced to the caller —
+ * two unrelated users naming their org "Acme" collide, and the second gets
+ * `acme-2`. Mirrors `freeSlug` in project-service; the same `startsWith` scan,
+ * the same `-2, -3, …` ladder, the same random-tail backstop.
+ */
+const freeOrgSlug = async (name: string): Promise<string> => {
+  const base = slugify(name) || "org";
+  const taken = new Set(
+    (
+      await db.organization.findMany({
+        where: { slug: { startsWith: base } },
+        select: { slug: true },
+      })
+    ).map((row) => row.slug),
+  );
+  if (!taken.has(base)) return base;
+  for (let n = 2; n <= taken.size + 2; n++) {
+    const candidate = `${base}-${n}`;
+    if (!taken.has(candidate)) return candidate;
+  }
+  // Unreachable by construction (the loop bound exceeds the taken set), but a
+  // random tail is a safer fallback than throwing on a naming detail.
+  return `${base}-${generateOrganizationId().slice(0, 8)}`;
+};
+
+/** Prisma's unique-constraint code — the `createProject` test. */
+const isUniqueViolation = (err: unknown) =>
+  typeof err === "object" &&
+  err !== null &&
+  (err as { code?: string }).code === "P2002";
+
+/**
+ * Create an organization on a user's request, with them as its `owner`.
+ *
+ * Distinct from `bootstrapOrganization` (which answers "this user has none
+ * yet") in exactly two ways: the name comes from the caller, and the slug is
+ * SEARCHED rather than derived — a user creating a second org called the same
+ * thing as their first must not collide with it. Everything the org is born
+ * with is shared, so the two can't drift.
+ *
+ * Refused on `single-org-shared` (onprem): that edition has one organization by
+ * construction and every member lands in it — a second one would be
+ * unreachable, not useful.
+ *
+ * The slug search and the insert are not atomic, so a concurrent create of the
+ * same name can lose the race on `@unique`. That is a naming collision, not a
+ * failed request: retry once with a random tail rather than surfacing a
+ * P2002 the user can do nothing about.
+ */
+export const createOrganization = async (
+  userId: string,
+  userEmail: string,
+  name: string,
+): Promise<OrganizationRow & { projectId: string }> => {
+  if (CAPS.tenancy === "single-org-shared") {
+    throw new ServiceError(
+      "FORBIDDEN",
+      "This deployment uses a single shared organization.",
+    );
+  }
+
+  const trimmed = validateOrgName(name);
+
+  // Counts EVERY membership, not just owned ones: the cap bounds provisioning
+  // by one account, and an org someone was invited into is one they can
+  // already reach.
+  const owned = await db.organizationMember.count({ where: { userId } });
+  if (owned >= MAX_ORGS_PER_USER) {
+    throw new ServiceError(
+      "CONFLICT",
+      `You have reached the limit of ${MAX_ORGS_PER_USER} organizations.`,
+    );
+  }
+
+  const provision = (slug: string) =>
+    provisionOrganization({ userId, userEmail, name: trimmed, slug });
+
+  const created = await provision(await freeOrgSlug(trimmed)).catch(
+    async (err) => {
+      if (!isUniqueViolation(err)) throw err;
+      const base = slugify(trimmed) || "org";
+      return provision(`${base}-${generateOrganizationId().slice(0, 8)}`);
+    },
+  );
+
+  return {
+    id: created.organization.id,
+    name: trimmed,
+    slug: created.organization.slug,
+    // Bootstrap-only role, and the only one this path can produce: you own
+    // what you create. `orgMemberRoleSchema` cannot assign it elsewhere.
+    role: "owner",
+    projectId: created.project.id,
+  };
 };
 
 /** The single shared organization for onprem (`single-org-shared` tenancy). */

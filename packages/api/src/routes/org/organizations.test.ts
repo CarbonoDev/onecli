@@ -147,6 +147,39 @@ vi.mock("@onecli/db", () => {
           for (const row of rows) Object.assign(row, data);
           return { count: rows.length };
         },
+        // The create path: the free-slug scan, then the insert with its nested
+        // owner membership (materialized so the response's role can be read
+        // back from the same store every other case uses).
+        findMany: async ({
+          where,
+        }: {
+          where: { slug?: { startsWith?: string } };
+        }) => {
+          const prefix = where.slug?.startsWith;
+          return store.organizations
+            .filter((o) => prefix === undefined || o.slug.startsWith(prefix))
+            .map((o) => ({ slug: o.slug }));
+        },
+        create: async ({
+          data,
+        }: {
+          data: OrgRow & {
+            members?: { create: { userId: string; role: string } };
+          };
+        }) => {
+          const row: OrgRow = { id: data.id, name: data.name, slug: data.slug };
+          store.organizations.push(row);
+          if (data.members) {
+            store.members.push({
+              organizationId: row.id,
+              userId: data.members.create.userId,
+              role: data.members.create.role,
+              status: "active",
+              createdAt: at(9),
+            });
+          }
+          return row;
+        },
       },
       organizationMember: {
         findUnique: async ({ where }: { where: MemberKey }) => {
@@ -210,6 +243,13 @@ vi.mock("@onecli/db", () => {
       project: {
         findFirst: async () => ({ id: "proj-1", organizationId: ORG }),
         findUnique: async () => ({ id: "proj-1", organizationId: ORG }),
+        // The new org's default project. Seeds (api key, agent, owner binding)
+        // ride along as nested writes this route never reads back.
+        create: async ({
+          data,
+        }: {
+          data: { id: string; organizationId: string };
+        }) => ({ id: data.id, organizationId: data.organizationId }),
       },
       projectAccess: { findFirst: async () => null },
       auditLog: {
@@ -362,6 +402,97 @@ describe("GET /v1/organizations", () => {
   it("never audits a read", async () => {
     await app.request("/v1/organizations", asAdmin);
     expect(store.audits).toHaveLength(0);
+  });
+});
+
+describe("POST /v1/organizations", () => {
+  const post = (body: unknown, init: RequestInit = {}) =>
+    app.request("/v1/organizations", {
+      ...init,
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+
+  it("creates an org owned by the caller and audits against the NEW org", async () => {
+    store.sessionUserId = MEMBER;
+
+    const res = await post({ name: "  Beta  " });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as OrganizationBody & { projectId: string };
+    expect(body).toMatchObject({ name: "Beta", slug: "beta", role: "owner" });
+    expect(body.id).not.toBe(ORG);
+    expect(body.projectId).toBeTruthy();
+
+    // The membership the caller now switches into.
+    expect(
+      store.members.find(
+        (m) => m.organizationId === body.id && m.userId === MEMBER,
+      )?.role,
+    ).toBe("owner");
+
+    // Attributed to the org that came into existence, not to the one the
+    // request happened to resolve to.
+    expect(store.audits).toHaveLength(1);
+    expect(store.audits[0]).toMatchObject({
+      organizationId: body.id,
+      userId: MEMBER,
+      action: "create",
+      service: "organization",
+      source: "api",
+    });
+    expect(store.audits[0]?.metadata).toMatchObject({
+      organizationId: body.id,
+      name: "Beta",
+      slug: "beta",
+    });
+  });
+
+  it("403s an ORGANIZATION-scoped key — provisioning a tenant is not that key's authority", async () => {
+    const res = await post({ name: "Beta" }, asAdmin);
+    expect(res.status).toBe(403);
+    expect(store.organizations).toHaveLength(2);
+    expect(store.audits).toHaveLength(0);
+  });
+
+  it("403s a project-scoped key", async () => {
+    const res = await post({ name: "Beta" }, asProjectKey);
+    expect(res.status).toBe(403);
+    expect(store.organizations).toHaveLength(2);
+  });
+
+  it("401s an unauthenticated caller", async () => {
+    const res = await post({ name: "Beta" });
+    expect(res.status).toBe(401);
+    expect(store.organizations).toHaveLength(2);
+  });
+
+  it("422s an empty, overlong, non-string or missing name, writing nothing", async () => {
+    store.sessionUserId = MEMBER;
+    for (const body of [
+      { name: "   " },
+      { name: "x".repeat(256) },
+      { name: 42 },
+      {},
+    ]) {
+      expect((await post(body)).status).toBe(422);
+    }
+    expect(store.organizations).toHaveLength(2);
+    expect(store.audits).toHaveLength(0);
+  });
+
+  it("never accepts a slug from the body — it is derived", async () => {
+    store.sessionUserId = MEMBER;
+    const res = await post({ name: "Beta", slug: "acme" });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as OrganizationBody;
+    expect(body.slug).toBe("beta");
+  });
+
+  it("disambiguates against an existing slug instead of failing", async () => {
+    store.sessionUserId = MEMBER;
+    const res = await post({ name: "Acme" });
+    expect(res.status).toBe(201);
+    expect(((await res.json()) as OrganizationBody).slug).toBe("acme-2");
   });
 });
 

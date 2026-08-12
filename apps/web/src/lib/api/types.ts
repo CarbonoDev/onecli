@@ -436,3 +436,24 @@ export interface Organization {
   slug: string;
   role: string;
 }
+
+/**
+ * A just-created org (`POST /v1/organizations`), plus the default project it
+ * was born with — what a switch to it needs.
+ */
+export interface CreatedOrganization extends Organization {
+  projectId: string;
+}
+
+/**
+ * `GET /v1/auth/session` — the caller's identity plus the scope the server
+ * resolved for them. `projectId`/`organizationId` are OPTIONAL because "no
+ * reachable project in the selected org" is a legitimate answer, not an error.
+ */
+export interface SessionInfo {
+  id: string;
+  email: string;
+  name: string | null;
+  projectId?: string;
+  organizationId?: string;
+}

@@ -36,6 +36,13 @@ export const orgNameSchema = z.string().trim().min(1).max(255);
 
 export const renameOrganizationSchema = z.object({ name: orgNameSchema });
 
+/**
+ * `POST /v1/organizations` body. Name only — `slug` is derived server-side and
+ * immutable thereafter (it is GLOBALLY unique, so accepting one from the body
+ * would let a caller squat on another tenant's identity).
+ */
+export const createOrganizationSchema = z.object({ name: orgNameSchema });
+
 export const orgMemberStatusSchema = z.enum(["active", "suspended"]);
 
 /** Assignable member roles: `owner` is not assignable through this surface. */

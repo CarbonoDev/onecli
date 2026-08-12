@@ -1,13 +1,14 @@
 "use client";
 
+import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { useQueryClient } from "@tanstack/react-query";
-import { Building2, Check, ChevronsUpDown } from "lucide-react";
+import { Building2, Check, ChevronsUpDown, Loader2, Plus } from "lucide-react";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuLabel,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@onecli/ui/components/dropdown-menu";
 import {
@@ -20,55 +21,75 @@ import {
   useCurrentOrganizationId,
   useOrganizationsList,
 } from "@/hooks/use-organizations";
-import {
-  clearDefaultProjectCookie,
-  writeDefaultOrgCookie,
-} from "@/lib/navigation";
-import { queryKeys } from "@/lib/api/keys";
+import { useSwitchOrganization } from "@/hooks/use-switch-organization";
+import { session, type CreatedOrganization } from "@/lib/api";
+import { CAPS } from "@/lib/env";
+import { usePlanGate } from "@/lib/plan-gate";
+import { CreateOrganizationDialog } from "./create-organization-dialog";
 
 /**
- * Switch between the organizations a user belongs to.
+ * Whether this edition lets a user create organizations. `single-org-shared`
+ * (onprem) has exactly one by construction and puts every member in it, so a
+ * second would be unreachable rather than useful — the same refusal the
+ * service enforces server-side.
+ */
+const CAN_CREATE_ORG = CAPS.tenancy !== "single-org-shared";
+
+/**
+ * Switch between the organizations a user belongs to, and create new ones.
  *
  * Multi-org membership is ordinary rather than exotic: every user gets their
  * own org at bootstrap, and accepting an invitation adds a membership in
  * someone else's — so anyone who has accepted an invite belongs to at least
  * two, and until now had no way to reach the second.
  *
- * Renders only when there is a genuine choice. Gated on the membership COUNT,
- * not an edition flag: `single-org-shared` deployments have one org by
- * construction, and a one-item switcher is noise on any edition.
+ * Rendered whenever there is somewhere to GO: two or more memberships, or one
+ * plus the ability to create another. A single-org user on an edition that
+ * forbids creating more still gets nothing — a switcher that can neither
+ * switch nor create is noise.
  */
 export const OrgSwitcher = () => {
   const router = useRouter();
-  const queryClient = useQueryClient();
   const { data: orgs = [], isLoading } = useOrganizationsList();
   const currentId = useCurrentOrganizationId();
+  const switchOrganization = useSwitchOrganization();
+  const planGate = usePlanGate();
+  const [switching, setSwitching] = useState(false);
+  const [createOpen, setCreateOpen] = useState(false);
 
-  const switchTo = (organizationId: string) => {
-    if (organizationId === currentId) return;
-    writeDefaultOrgCookie(organizationId);
-    // Non-negotiable: a project cookie from the PREVIOUS org would otherwise
-    // win, because the project header takes precedence over the org header and
-    // the org is derived from the resolved project. Clearing it lets the new
-    // org's default project resolve.
-    clearDefaultProjectCookie();
-    // Everything cached belongs to the old org. `getOrganizationId()` now
-    // returns the cookie so keys do change, but clearing drops the old org's
-    // entries rather than leaving them resident.
-    queryClient.clear();
-    // Re-seed AFTER the clear (which dropped it too), synchronously: every
-    // `useCurrentOrganizationId` subscriber — this switcher's own label, and
-    // any page already mounted — moves to the new org in the same render. The
-    // cookie query would otherwise not re-read until a remount, and
-    // `router.refresh()` does not remount client components.
-    queryClient.setQueryData(
-      queryKeys.scope.organizationCookie(),
-      organizationId,
-    );
+  const switchTo = async (organizationId: string) => {
+    if (organizationId === currentId || switching) return;
+    setSwitching(true);
+    // Ask the server where this switch LANDS before touching any cookie. The
+    // org's default project is `findUserDefaultProject`'s answer and nothing
+    // else; deriving it here ("first row of the projects list") would be a
+    // second definition, free to drift from the one every request resolves
+    // against. A failed lookup is not fatal — switch with no project and let
+    // the org-scoped default answer on the next request.
+    const landing = await session.get({ organizationId }).catch(() => null);
+    switchOrganization({ organizationId, projectId: landing?.projectId });
     router.refresh();
+    setSwitching(false);
   };
 
-  if (isLoading || orgs.length < 2) return null;
+  // A brand-new org holds nothing the current page can show, and the page may
+  // not even exist there (an agent detail route scoped to the old org). Land
+  // on the overview rather than refreshing in place.
+  const handleCreated = (organization: CreatedOrganization) => {
+    switchOrganization({
+      organizationId: organization.id,
+      projectId: organization.projectId,
+    });
+    router.push("/overview");
+  };
+
+  const openCreate = () => {
+    // No-op in OSS; the cloud gate opens its paywall and swallows the click.
+    if (planGate.guard("organization.create")) return;
+    setCreateOpen(true);
+  };
+
+  if (isLoading || (orgs.length < 2 && !CAN_CREATE_ORG)) return null;
 
   const current = orgs.find((o) => o.id === currentId);
   const label = current?.name ?? "Select organization";
@@ -82,7 +103,11 @@ export const OrgSwitcher = () => {
               className="data-[state=open]:bg-sidebar-accent"
               tooltip={label}
             >
-              <Building2 className="size-4 shrink-0" />
+              {switching ? (
+                <Loader2 className="size-4 shrink-0 animate-spin" />
+              ) : (
+                <Building2 className="size-4 shrink-0" />
+              )}
               <span className="truncate">{label}</span>
               <ChevronsUpDown className="ml-auto size-4 shrink-0 opacity-50" />
             </SidebarMenuButton>
@@ -99,7 +124,7 @@ export const OrgSwitcher = () => {
             {orgs.map((org) => (
               <DropdownMenuItem
                 key={org.id}
-                onSelect={() => switchTo(org.id)}
+                onSelect={() => void switchTo(org.id)}
                 className="gap-2"
               >
                 <Check
@@ -114,9 +139,24 @@ export const OrgSwitcher = () => {
                 </span>
               </DropdownMenuItem>
             ))}
+            {CAN_CREATE_ORG && (
+              <>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem onSelect={openCreate} className="gap-2">
+                  <Plus className="size-4 shrink-0" />
+                  New organization
+                </DropdownMenuItem>
+              </>
+            )}
           </DropdownMenuContent>
         </DropdownMenu>
       </SidebarMenuItem>
+
+      <CreateOrganizationDialog
+        open={createOpen}
+        onOpenChange={setCreateOpen}
+        onCreated={handleCreated}
+      />
     </SidebarMenu>
   );
 };

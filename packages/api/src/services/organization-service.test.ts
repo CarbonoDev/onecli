@@ -54,6 +54,9 @@ const store = vi.hoisted(() => ({
   groupMembers: [] as GroupMemberRow[],
   apiKeys: [] as ApiKeyRow[],
   seq: 0,
+  /** Arm a ONE-SHOT slug collision on the next org insert, to drive the
+   * lost-race retry without needing real concurrency. */
+  slugRaceOnce: false,
   /** What `getRoleResolver()` answers — null models an edition with none. */
   roleResolver: null as RoleResolver | null,
 }));
@@ -185,12 +188,45 @@ vi.mock("@onecli/db", () => {
           if (!org) throw new Error(`org ${slug} not found`);
           return org;
         },
-        create: async ({ data }: { data: OrgRow }) => {
+        // The free-slug scan: every slug starting with the candidate base.
+        findMany: async ({
+          where,
+        }: {
+          where: { slug?: { startsWith?: string } };
+        }) => {
+          const prefix = where.slug?.startsWith;
+          return store.orgs
+            .filter((o) => prefix === undefined || o.slug.startsWith(prefix))
+            .map((o) => ({ slug: o.slug }));
+        },
+        create: async ({
+          data,
+        }: {
+          data: OrgRow & { members?: { create: MemberRow } };
+        }) => {
+          if (store.slugRaceOnce) {
+            store.slugRaceOnce = false;
+            throw Object.assign(new Error("unique constraint"), {
+              code: "P2002",
+            });
+          }
           if (store.orgs.some((o) => o.slug === data.slug)) {
-            throw new Error("unique constraint: organization.slug");
+            // Prisma's shape, not a bare Error: `createOrganization` retries
+            // on P2002 specifically and must rethrow anything else.
+            throw Object.assign(new Error("unique constraint"), {
+              code: "P2002",
+            });
           }
           const org: OrgRow = { id: data.id, slug: data.slug, name: data.name };
           store.orgs.push(org);
+          // Materialize the nested membership write, as project.create does
+          // for its bindings — the owner row is what every role check reads.
+          if (data.members) {
+            store.members.push({
+              ...data.members.create,
+              organizationId: org.id,
+            });
+          }
           return org;
         },
       },
@@ -266,6 +302,9 @@ vi.mock("@onecli/db", () => {
                 (m.status ?? "active") === where.status.not
               ),
           ) ?? null,
+        // The per-user org cap.
+        count: async ({ where }: { where: { userId: string } }) =>
+          store.members.filter((m) => m.userId === where.userId).length,
       },
       projectAccess: {
         // attachMemberToProject binds via createMany + skipDuplicates so two
@@ -383,6 +422,8 @@ vi.mock("../providers", async (importOriginal) => {
 
 import {
   attachMemberToProject,
+  createOrganization,
+  MAX_ORGS_PER_USER,
   joinSharedOrganization,
   hasResolvableProjectExcluding,
   findUserDefaultProject,
@@ -403,6 +444,7 @@ beforeEach(() => {
   store.groupMembers = [];
   store.apiKeys = [];
   store.seq = 0;
+  store.slugRaceOnce = false;
   store.roleResolver = ossRoleResolver;
   delete process.env.ONECLI_ORG_API_KEY;
   delete process.env.ONECLI_ORG_API_KEY_FILE;
@@ -732,6 +774,94 @@ describe("findUserDefaultProject with a preferred organization", () => {
       hasResolvableProjectExcluding(GUEST, "proj-other"),
     ).resolves.toBe(true);
     expect(await findUserDefaultProject(GUEST, OTHER_ORG)).not.toBeNull();
+  });
+});
+
+describe("createOrganization", () => {
+  const USER = "user-aaaaaaaa";
+  const EMAIL = "a@example.com";
+
+  it("creates an org the caller owns, landing them on its default project", async () => {
+    const created = await createOrganization(USER, EMAIL, "  Acme  ");
+
+    expect(created).toMatchObject({
+      name: "Acme",
+      slug: "acme",
+      role: "owner",
+    });
+    expect(store.members).toContainEqual(
+      expect.objectContaining({
+        organizationId: created.id,
+        userId: USER,
+        role: "owner",
+      }),
+    );
+    // The contract the switcher depends on: the project it reports is the one
+    // the server resolves for that org, so the new org never opens empty.
+    const landing = await findUserDefaultProject(USER, created.id, true);
+    expect(landing?.id).toBe(created.projectId);
+  });
+
+  it("gives a second org of the same name a distinct slug", async () => {
+    const first = await createOrganization(USER, EMAIL, "Acme");
+    const second = await createOrganization(USER, EMAIL, "Acme");
+
+    expect(first.slug).toBe("acme");
+    expect(second.slug).toBe("acme-2");
+    expect(second.id).not.toBe(first.id);
+    // Same name on both — names are deliberately not unique.
+    expect(second.name).toBe("Acme");
+  });
+
+  it("does not collide with an unrelated user's org of the same name", async () => {
+    const theirs = await createOrganization(
+      "user-bbbbbbbb",
+      "b@example.com",
+      "Acme",
+    );
+    const mine = await createOrganization(USER, EMAIL, "Acme");
+
+    expect(theirs.slug).toBe("acme");
+    expect(mine.slug).toBe("acme-2");
+  });
+
+  it("retries with a random tail when the slug is taken between search and insert", async () => {
+    store.slugRaceOnce = true;
+
+    const created = await createOrganization(USER, EMAIL, "Acme");
+
+    expect(created.slug).toMatch(/^acme-.+/);
+    expect(created.slug).not.toBe("acme");
+    expect(store.orgs).toHaveLength(1);
+  });
+
+  it("still produces a usable slug for a name with nothing slug-worthy in it", async () => {
+    const created = await createOrganization(USER, EMAIL, "!!!");
+    expect(created.slug).toBe("org");
+  });
+
+  it("refuses at the per-user cap, writing nothing", async () => {
+    for (let n = 0; n < MAX_ORGS_PER_USER; n++) {
+      store.members.push({
+        organizationId: `org-${n}`,
+        userId: USER,
+        userEmail: EMAIL,
+        role: "member",
+      });
+    }
+
+    await expect(
+      createOrganization(USER, EMAIL, "Acme"),
+    ).rejects.toBeInstanceOf(ServiceError);
+    expect(store.orgs).toHaveLength(0);
+  });
+
+  it("rejects an empty name before writing anything", async () => {
+    await expect(createOrganization(USER, EMAIL, "   ")).rejects.toBeInstanceOf(
+      ServiceError,
+    );
+    expect(store.orgs).toHaveLength(0);
+    expect(store.members).toHaveLength(0);
   });
 });
 

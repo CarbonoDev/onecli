@@ -31,7 +31,7 @@ import {
  */
 export const acceptInvitationAction = async (
   token: string,
-): Promise<ActionResult<{ projectId: string }>> =>
+): Promise<ActionResult<{ organizationId: string; projectId: string }>> =>
   safeAction(async () => {
     // Mirror the /join page's guard (it notFound()s in local mode): the
     // action must not be invocable with the ambient local identity either.
@@ -108,5 +108,11 @@ export const acceptInvitationAction = async (
       }),
     );
 
-    return { projectId: result.projectId };
+    // Both ids, not just the project: the caller writes them as the selected
+    // scope so the dashboard opens in the org that was just joined instead of
+    // wherever the visitor's previous selection (or their own org) points.
+    return {
+      organizationId: result.organizationId,
+      projectId: result.projectId,
+    };
   });

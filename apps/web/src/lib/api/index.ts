@@ -5,6 +5,7 @@ import * as connections from "./connections";
 import * as grants from "./grants";
 import * as projects from "./projects";
 import * as organizations from "./organizations";
+import * as session from "./session";
 import * as projectAccess from "./project-access";
 import * as orgMembers from "./org-members";
 import * as invitations from "./invitations";
@@ -27,6 +28,7 @@ export {
   grants,
   projects,
   organizations,
+  session,
   projectAccess,
   orgMembers,
   invitations,
@@ -49,6 +51,8 @@ export type {
   Connection,
   Project,
   Organization,
+  CreatedOrganization,
+  SessionInfo,
   ProjectAccessBindings,
   ProjectAccessUserRow,
   ProjectAccessGroupRow,

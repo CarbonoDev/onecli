@@ -1,7 +1,8 @@
 "use client";
 
 import { useState } from "react";
-import { ChevronsUpDown, Loader2, LogOut } from "lucide-react";
+import Link from "next/link";
+import { ChevronsUpDown, KeyRound, Loader2, LogOut, User } from "lucide-react";
 
 import { APP_VERSION } from "@/lib/env";
 import { useAuth } from "@/providers/auth-provider";
@@ -74,6 +75,19 @@ export const NavUser = () => {
                 </p>
               </div>
             </DropdownMenuLabel>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem asChild>
+              <Link href="/settings/profile">
+                <User />
+                Profile
+              </Link>
+            </DropdownMenuItem>
+            <DropdownMenuItem asChild>
+              <Link href="/settings/api-keys">
+                <KeyRound />
+                API Keys
+              </Link>
+            </DropdownMenuItem>
             <DropdownMenuSeparator />
             <DropdownMenuItem
               disabled={signingOut}

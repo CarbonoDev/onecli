@@ -164,6 +164,16 @@ export const queryKeys = {
     all: () => ["budgets", ...scope()] as const,
     list: () => [...queryKeys.budgets.all(), "list"] as const,
   },
+  usage: {
+    /**
+     * `scope()`-prefixed even though `/v1/org/usage` takes no project: the
+     * response IS org-specific (it aggregates the projects the caller may reach
+     * in the SELECTED org), so an org switch must refetch rather than show the
+     * previous org's numbers under the new org's name.
+     */
+    all: () => ["usage", ...scope()] as const,
+    summary: () => [...queryKeys.usage.all(), "summary"] as const,
+  },
   billing: {
     all: () => ["billing", ...scope()] as const,
     planUsage: () => [...queryKeys.billing.all(), "planUsage"] as const,

@@ -10,6 +10,20 @@ import { lastActivity, type LastActivity } from "./last-activity";
  * authenticated, while an older key's null only means it has not authenticated
  * *since the column existed*. Hard-coded on purpose — it is a fact about the
  * schema's history, not a tunable.
+ *
+ * TWO CAVEATS, both erring toward over-claiming "Never used":
+ *
+ * 1. This is when the migration was AUTHORED, not when it was APPLIED, and
+ *    environments deploy on their own schedules. A key minted in the gap —
+ *    after this timestamp but before the migration actually landed in that
+ *    environment — reads "Never used" even if it was in daily use, because
+ *    nothing was recording yet. The gap closes on the key's first
+ *    authentication after the migration lands, so this is transient for any
+ *    key actually in circulation; it is only misleading for a key that went
+ *    dormant inside the gap.
+ * 2. Nothing mechanically ties this value to the migration directory, so
+ *    renaming or re-timestamping that migration silently desyncs it. If the
+ *    migration moves, move this too.
  */
 export const API_KEY_USAGE_TRACKED_SINCE = Date.parse("2026-08-12T10:15:00Z");
 

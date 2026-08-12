@@ -30,17 +30,23 @@ const state = vi.hoisted(() => ({
   } | null,
   /** The stored column, mutated by the write so the throttle is observable. */
   lastUsedAt: {} as Record<string, Date | null>,
+  /** The secret currently stored on each row — rotation swaps it in place. */
+  currentKey: {} as Record<string, string>,
 }));
 
+// Stands in for the real statement: the `where` must match on BOTH the row id
+// and the secret, so a row whose key has been rotated out from under an
+// in-flight request matches nothing.
 const updateMany = vi.hoisted(() =>
   vi.fn(
     async ({
       where,
       data,
     }: {
-      where: { id: string };
+      where: { id: string; key: string };
       data: { lastUsedAt: Date };
     }) => {
+      if (state.currentKey[where.id] !== where.key) return { count: 0 };
       state.lastUsedAt[where.id] = data.lastUsedAt;
       return { count: 1 };
     },
@@ -55,6 +61,7 @@ vi.mock("@onecli/db", () => ({
         if (where.key === ORG_KEY)
           return {
             id: ORG_KEY_ID,
+            key: ORG_KEY,
             userId: USER,
             organizationId: "org-1",
             scope: "organization",
@@ -63,6 +70,7 @@ vi.mock("@onecli/db", () => ({
         if (where.key === PROJECT_KEY)
           return {
             id: PROJECT_KEY_ID,
+            key: PROJECT_KEY,
             userId: USER,
             projectId: "proj-1",
             lastUsedAt: state.lastUsedAt[PROJECT_KEY_ID] ?? null,
@@ -116,6 +124,7 @@ const touchedIds = () =>
 beforeEach(() => {
   state.member = { role: "owner", status: "active" };
   state.lastUsedAt = {};
+  state.currentKey = { [PROJECT_KEY_ID]: PROJECT_KEY, [ORG_KEY_ID]: ORG_KEY };
   updateMany.mockClear();
   initStrictApiKeyAuth(false);
 });
@@ -238,6 +247,46 @@ describe("the throttle keeps the write off the per-request path", () => {
     await app.request("/v1/agents", bearer(PROJECT_KEY));
 
     expect(touchedIds()).toEqual([PROJECT_KEY_ID, ORG_KEY_ID]);
+  });
+});
+
+// The scenario this feature is consulted in: an operator rotates a leaked key
+// and immediately reads the card. A request that authenticated with the OLD
+// secret must not be able to land afterwards and stamp the NEW one — that
+// would print "Last used just now" on a secret nobody has ever held, i.e. the
+// headline reading inverted, at the worst possible moment.
+describe("a rotation cannot inherit the old secret's use", () => {
+  it("drops an in-flight write whose secret was rotated away underneath it", async () => {
+    const { recordApiKeyUse } = await import("../../services/api-key-service");
+
+    // Read the row the way authentication does, mid-request.
+    const inFlight = {
+      id: PROJECT_KEY_ID,
+      key: PROJECT_KEY,
+      lastUsedAt: null,
+    };
+
+    // Rotation lands first: new secret on the same row, usage cleared.
+    state.currentKey[PROJECT_KEY_ID] = "oc_rotated-key";
+    state.lastUsedAt[PROJECT_KEY_ID] = null;
+
+    await recordApiKeyUse(inFlight);
+
+    // The statement ran but matched nothing — the new secret stays unused.
+    expect(updateMany).toHaveBeenCalledTimes(1);
+    expect(state.lastUsedAt[PROJECT_KEY_ID]).toBeNull();
+  });
+
+  it("still records normally when no rotation intervened", async () => {
+    const { recordApiKeyUse } = await import("../../services/api-key-service");
+
+    await recordApiKeyUse({
+      id: PROJECT_KEY_ID,
+      key: PROJECT_KEY,
+      lastUsedAt: null,
+    });
+
+    expect(state.lastUsedAt[PROJECT_KEY_ID]).toBeInstanceOf(Date);
   });
 });
 

@@ -30,6 +30,15 @@ import { queryKeys } from "@/lib/api/keys";
 import { maskSecret } from "@/lib/mask-secret";
 import { getApiKey, regenerateApiKey } from "@/lib/actions/api-key";
 
+/**
+ * The honest limit of the usage reading, on hover for the arms that assert an
+ * absence. Only a *successful* authentication is recorded — a rejected key,
+ * and an org key that never named a project, both leave nothing behind — so
+ * these labels can never be read as "nobody has tried this key".
+ */
+const NO_USAGE_CAVEAT =
+  "Only successful authentications are recorded, so this does not mean the key was never presented.";
+
 export const ApiKeyCard = () => {
   const queryClient = useQueryClient();
   const [revealed, setRevealed] = useState(false);
@@ -165,7 +174,7 @@ export const ApiKeyCard = () => {
         {!loading && apiKey && lastUsed && (
           <p
             className="text-muted-foreground mt-2 inline-flex items-center gap-1.5 text-xs"
-            title={lastUsed.exactAt?.toLocaleString()}
+            title={lastUsed.exactAt?.toLocaleString() ?? NO_USAGE_CAVEAT}
           >
             {lastUsed.fresh && (
               <span

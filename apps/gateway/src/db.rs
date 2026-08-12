@@ -1,8 +1,10 @@
 //! Direct database access via SQLx.
 //!
 //! Used when `DATABASE_URL` is set to query the PostgreSQL database directly,
-//! bypassing the Next.js API. Vault connection state is managed by the gateway;
-//! all other tables are read-only (Prisma / Next.js remains the writer).
+//! bypassing the Next.js API. Prisma / Next.js owns the schema, but the gateway
+//! is a writer too, not a read-only consumer: it manages `vault_connections`
+//! and `app_connections`, records `secrets`, `budget_spends` and
+//! `request_logs`, and stamps `api_keys.last_used_at` on authentication.
 
 use anyhow::{Context, Result};
 use sqlx::postgres::PgPoolOptions;
@@ -143,6 +145,16 @@ pub(crate) async fn find_default_project_id_by_user(
     Ok(row.map(|(id,)| id))
 }
 
+/// How stale `api_keys.last_used_at` may get before an authentication writes it
+/// forward.
+///
+/// MUST move together with `API_KEY_LAST_USED_THROTTLE_MS` in
+/// `packages/api/src/services/api-key-service.ts` — the two authentication
+/// paths write the same column, and nothing but this comment ties them. It is
+/// bound as a parameter rather than inlined as an SQL literal so the value has
+/// exactly one home on this side.
+const LAST_USED_THROTTLE_MINUTES: i32 = 15;
+
 /// Look up an API key (`oc_...`) and return its user_id and project_id,
 /// stamping `last_used_at` in the same statement.
 ///
@@ -153,10 +165,17 @@ pub(crate) async fn find_default_project_id_by_user(
 /// The write is a data-modifying CTE rather than a follow-up query on purpose:
 /// Postgres runs it exactly once regardless of whether the primary query reads
 /// it, so recording usage costs the same ONE round trip the lookup already
-/// cost — no second statement, no write on the response path. Its `WHERE`
-/// carries the same throttle as the TypeScript path
-/// (`API_KEY_LAST_USED_THROTTLE_MS`), so a hot key writes at most one row per
-/// 15 minutes and concurrent requests across replicas collapse into no-ops.
+/// cost — no second statement, no write on the response path. `matched` is
+/// referenced twice so PG12+ materializes it; the UPDATE reads *from* it and
+/// cannot feed back into the returned row.
+///
+/// The update pins `k.key = $1`, not just the row id. Without it, rotation
+/// races the write: `regenerateApiKey` swaps in a new secret and clears
+/// `last_used_at` on the SAME row, so a request that authenticated with the
+/// OLD secret milliseconds earlier would land afterwards, match the
+/// `IS NULL` arm precisely *because* rotation just cleared it, and stamp the
+/// brand-new secret as used. An operator rotating a leaked key would refresh
+/// the card and read "Last used just now" on a secret nobody has ever held.
 ///
 /// `project_id IS NOT NULL` fences out org keys (`oc_org_*`), which reach here
 /// too because the caller only checks the `oc_` prefix. They never
@@ -182,13 +201,16 @@ pub(crate) async fn find_api_key(pool: &PgPool, key: &str) -> Result<Option<ApiK
                   SET last_used_at = NOW() AT TIME ZONE 'UTC'
                  FROM matched m
                 WHERE k.id = m.id
+                  AND k.key = $1
                   AND (k.last_used_at IS NULL
                        OR k.last_used_at
-                          < (NOW() AT TIME ZONE 'UTC') - interval '15 minutes')
+                          < (NOW() AT TIME ZONE 'UTC')
+                            - make_interval(mins => $2))
            )
            SELECT user_id, project_id FROM matched"#,
     )
     .bind(key)
+    .bind(LAST_USED_THROTTLE_MINUTES)
     .fetch_optional(pool)
     .await
     .context("querying api_keys by key")

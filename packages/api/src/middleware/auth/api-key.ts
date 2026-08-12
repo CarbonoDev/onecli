@@ -42,10 +42,13 @@ export const authenticateApiKey = async (
   if (token.startsWith("oc_org_")) {
     const apiKey = await db.apiKey.findUnique({
       where: { key: token },
-      // `id`/`lastUsedAt` ride along for the usage write-back — the row is
-      // already being read, so recency costs nothing extra here.
+      // `id`/`key`/`lastUsedAt` ride along for the usage write-back — the row
+      // is already being read, so recency costs nothing extra here. `key`
+      // pins the write to the secret that authenticated, so a concurrent
+      // rotation cannot inherit this request's use.
       select: {
         id: true,
+        key: true,
         userId: true,
         organizationId: true,
         scope: true,
@@ -107,7 +110,13 @@ export const authenticateApiKey = async (
   // Project key (oc_*)
   const apiKey = await db.apiKey.findUnique({
     where: { key: token },
-    select: { id: true, userId: true, projectId: true, lastUsedAt: true },
+    select: {
+      id: true,
+      key: true,
+      userId: true,
+      projectId: true,
+      lastUsedAt: true,
+    },
   });
   if (!apiKey || !apiKey.projectId) return "invalid-key";
 

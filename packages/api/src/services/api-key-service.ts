@@ -14,6 +14,10 @@ import { scopeWhere, scopeCreate, isOrgScope } from "./resource-scope";
  * recency, not per-request precision. Fifteen minutes is well under the
  * granularity anything renders ("3h ago", "2d ago") while capping the write
  * rate at one row per key per window no matter how hot the key is.
+ *
+ * MUST move together with `LAST_USED_THROTTLE_MINUTES` in
+ * `apps/gateway/src/db.rs` — the gateway authenticates the same keys and
+ * writes the same column, and nothing but this comment ties the two values.
  */
 export const API_KEY_LAST_USED_THROTTLE_MS = 15 * 60 * 1000;
 
@@ -32,6 +36,14 @@ export const API_KEY_LAST_USED_THROTTLE_MS = 15 * 60 * 1000;
  *    and across replicas: a burst that all read the same stale row issues N
  *    statements but only the first matches a row, the rest are no-ops.
  *
+ * The `where` also pins the key VALUE, not just the row id. Without it,
+ * rotation races the write: `regenerateApiKey` swaps in a new secret and
+ * clears `lastUsedAt` on the SAME row, so a request that authenticated with
+ * the OLD secret milliseconds earlier could land afterwards, match the
+ * `lastUsedAt: null` arm precisely *because* rotation just cleared it, and
+ * stamp the new secret as used — showing "Last used just now" on a key nobody
+ * has ever held, at the exact moment an operator rotates a leak and checks.
+ *
  * Never throws and never reports failure upward — usage telemetry must not be
  * able to turn a request that authenticates today into one that 401s tomorrow.
  * Returns whether a write was attempted (the throttle's observable behaviour).
@@ -42,12 +54,12 @@ export const API_KEY_LAST_USED_THROTTLE_MS = 15 * 60 * 1000;
  * that one.
  */
 export const recordApiKeyUse = async (
-  apiKey: { id: string; lastUsedAt: Date | null },
+  apiKey: { id: string; key: string; lastUsedAt: Date | null },
   now: number = Date.now(),
 ): Promise<boolean> => {
-  // Defensive: a caller that forgot to select `id` must be a silent no-op, not
-  // a crash inside authentication.
-  if (!apiKey?.id) return false;
+  // Defensive: a caller that forgot to select `id`/`key` must be a silent
+  // no-op, not a crash inside authentication.
+  if (!apiKey?.id || !apiKey.key) return false;
 
   const staleBefore = new Date(now - API_KEY_LAST_USED_THROTTLE_MS);
   if (apiKey.lastUsedAt !== null && apiKey.lastUsedAt > staleBefore) {
@@ -58,6 +70,8 @@ export const recordApiKeyUse = async (
     await db.apiKey.updateMany({
       where: {
         id: apiKey.id,
+        // The secret that actually authenticated — see the rotation race above.
+        key: apiKey.key,
         OR: [{ lastUsedAt: null }, { lastUsedAt: { lt: staleBefore } }],
       },
       data: { lastUsedAt: new Date(now) },

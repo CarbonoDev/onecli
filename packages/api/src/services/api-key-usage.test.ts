@@ -4,9 +4,12 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 // authentication is allowed to write, so what matters here is how rarely it
 // writes and how loudly it fails: never, and not at all.
 
+const SECRET = "oc_the-secret-that-authenticated";
+
 interface UpdateManyArg {
   where: {
     id: string;
+    key: string;
     OR: [{ lastUsedAt: null }, { lastUsedAt: { lt: Date } }];
   };
   data: { lastUsedAt: Date };
@@ -37,7 +40,10 @@ beforeEach(() => {
 
 describe("recordApiKeyUse", () => {
   it("writes for a key that has never been used", async () => {
-    const wrote = await recordApiKeyUse({ id: "key-1", lastUsedAt: null }, NOW);
+    const wrote = await recordApiKeyUse(
+      { id: "key-1", key: SECRET, lastUsedAt: null },
+      NOW,
+    );
 
     expect(wrote).toBe(true);
     expect(updateMany).toHaveBeenCalledTimes(1);
@@ -47,7 +53,11 @@ describe("recordApiKeyUse", () => {
 
   it("writes once the stored value has aged past the throttle", async () => {
     const wrote = await recordApiKeyUse(
-      { id: "key-1", lastUsedAt: ago(API_KEY_LAST_USED_THROTTLE_MS + 1000) },
+      {
+        id: "key-1",
+        key: SECRET,
+        lastUsedAt: ago(API_KEY_LAST_USED_THROTTLE_MS + 1000),
+      },
       NOW,
     );
 
@@ -63,7 +73,10 @@ describe("recordApiKeyUse", () => {
 
     for (let i = 0; i < 50; i++) {
       expect(
-        await recordApiKeyUse({ id: "key-1", lastUsedAt: fresh }, NOW),
+        await recordApiKeyUse(
+          { id: "key-1", key: SECRET, lastUsedAt: fresh },
+          NOW,
+        ),
       ).toBe(false);
     }
 
@@ -72,7 +85,11 @@ describe("recordApiKeyUse", () => {
 
   it("treats a value exactly at the throttle boundary as stale", async () => {
     const wrote = await recordApiKeyUse(
-      { id: "key-1", lastUsedAt: ago(API_KEY_LAST_USED_THROTTLE_MS) },
+      {
+        id: "key-1",
+        key: SECRET,
+        lastUsedAt: ago(API_KEY_LAST_USED_THROTTLE_MS),
+      },
       NOW,
     );
     expect(wrote).toBe(true);
@@ -82,7 +99,7 @@ describe("recordApiKeyUse", () => {
   // statement repeats the test so a burst that all read the same stale value
   // still results in one actual row change.
   it("repeats the staleness test in the statement, for concurrent writers", async () => {
-    await recordApiKeyUse({ id: "key-1", lastUsedAt: null }, NOW);
+    await recordApiKeyUse({ id: "key-1", key: SECRET, lastUsedAt: null }, NOW);
 
     const staleBefore = new Date(NOW - API_KEY_LAST_USED_THROTTLE_MS);
     expect(lastCall()?.where.OR).toEqual([
@@ -95,14 +112,39 @@ describe("recordApiKeyUse", () => {
     updateMany.mockRejectedValueOnce(new Error("connection reset"));
 
     await expect(
-      recordApiKeyUse({ id: "key-1", lastUsedAt: null }, NOW),
+      recordApiKeyUse({ id: "key-1", key: SECRET, lastUsedAt: null }, NOW),
     ).resolves.toBe(true);
   });
 
   it("is a silent no-op when the caller did not select an id", async () => {
-    const wrote = await recordApiKeyUse({ id: "", lastUsedAt: null }, NOW);
+    const wrote = await recordApiKeyUse(
+      { id: "", key: SECRET, lastUsedAt: null },
+      NOW,
+    );
 
     expect(wrote).toBe(false);
     expect(updateMany).not.toHaveBeenCalled();
+  });
+
+  it("is a silent no-op when the caller did not select the key", async () => {
+    const wrote = await recordApiKeyUse(
+      { id: "key-1", key: "", lastUsedAt: null },
+      NOW,
+    );
+
+    expect(wrote).toBe(false);
+    expect(updateMany).not.toHaveBeenCalled();
+  });
+
+  // The rotation race. `regenerateApiKey` swaps the secret and clears
+  // `lastUsedAt` on the SAME row, so a write pinned only to the id would match
+  // the `IS NULL` arm *because of the rotation* and stamp the brand-new secret
+  // as used — an operator who just rotated a leak would read "Last used just
+  // now" on a key nobody has ever held. Pinning the value is what prevents it.
+  it("pins the write to the secret that authenticated, not just the row", async () => {
+    await recordApiKeyUse({ id: "key-1", key: SECRET, lastUsedAt: null }, NOW);
+
+    expect(lastCall()?.where.key).toBe(SECRET);
+    expect(lastCall()?.where.id).toBe("key-1");
   });
 });

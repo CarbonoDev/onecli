@@ -3,8 +3,11 @@ import type { Metadata } from "next";
 import { PageHeader } from "@dashboard/page-header";
 import { PolicyEditor } from "@/lib/policy-editor";
 
+// "Global Policy", matching the org shell's nav item and the breadcrumb. The
+// name carries its own scope now that the project shell sits beside it — the
+// bare "Policy" was unambiguous only while there was one flat nav.
 export const metadata: Metadata = {
-  title: "Policy",
+  title: "Global Policy",
 };
 
 /**
@@ -23,7 +26,7 @@ export default function PolicyPage() {
   return (
     <div className="flex flex-1 flex-col gap-6">
       <PageHeader
-        title="Policy"
+        title="Global Policy"
         description="Organization rules apply to every project — the stricter of the organization and project levels wins."
       />
       <Suspense>

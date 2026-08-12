@@ -5,8 +5,10 @@ import { PageHeader } from "@dashboard/page-header";
 export default function TeamLoading() {
   return (
     <div className="flex flex-1 flex-col gap-6">
+      {/* Verbatim from `page.tsx` — this fallback renders the real heading, so
+          any drift flashes one title and then swaps to another. */}
       <PageHeader
-        title="Team"
+        title="Members"
         description="Manage your organization's members and invite teammates."
       />
       <div className="space-y-4">

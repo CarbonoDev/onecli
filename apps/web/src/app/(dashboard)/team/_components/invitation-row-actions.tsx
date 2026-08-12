@@ -51,8 +51,9 @@ export const InvitationRowActions = ({
         variant="ghost"
         size="icon"
         className="size-8"
-        title="Revoke invitation"
-        // The icon is a bare `×`; destructive actions need the target named.
+        // The icon is a bare `×`; destructive actions need the target named,
+        // and the tooltip says the same words as the accessible name.
+        title={`Revoke the invitation for ${invitation.email}`}
         aria-label={`Revoke the invitation for ${invitation.email}`}
         onClick={() => setConfirmOpen(true)}
         disabled={revoke.isPending}

@@ -4,6 +4,7 @@ import { Card } from "@onecli/ui/components/card";
 import { Skeleton } from "@onecli/ui/components/skeleton";
 import { useOrgMembersList } from "@/hooks/use-org-members";
 import { useInvitations } from "@/hooks/use-invitations";
+import type { InvitationRow } from "@/lib/api";
 import { LocalModeNotice } from "./local-mode-notice";
 import { AdminOnlyNotice } from "./admin-only-notice";
 import { MembersTable } from "./members-table";
@@ -12,6 +13,27 @@ import {
   isInactiveInvitation,
 } from "./inactive-invitations";
 import { InvitationsErrorNotice } from "./invitations-error-notice";
+
+/**
+ * Lowercased email → the admin who invited them, taken from ACCEPTED
+ * invitations. Those rows are rendered nowhere (the person is a member row
+ * already), and `invitedByEmail` is the one fact on them that no other surface
+ * in the product carries — `/activity` is the gateway request log, not an org
+ * event log — so it is indexed here and folded into the member's own row.
+ * A re-invited address keeps its most recent inviter.
+ */
+const buildInviterIndex = (invitations: InvitationRow[]) => {
+  const latest = new Map<string, InvitationRow>();
+  for (const row of invitations) {
+    if (row.status !== "accepted") continue;
+    const key = row.email.toLowerCase();
+    const current = latest.get(key);
+    if (!current || current.createdAt < row.createdAt) latest.set(key, row);
+  }
+  return new Map(
+    [...latest].map(([email, row]) => [email, row.invitedByEmail]),
+  );
+};
 
 export interface TeamContentProps {
   /** Threaded from the RSC page (server-only auth mode); false = local mode. */
@@ -60,8 +82,18 @@ export const TeamContent = ({ teamEnabled }: TeamContentProps) => {
 
   return (
     <div className="space-y-6">
-      <MembersTable members={members.data ?? []} invitations={pending} />
-      {invitations.isError && <InvitationsErrorNotice />}
+      <MembersTable
+        members={members.data ?? []}
+        invitations={pending}
+        invitationsLoading={invitations.isPending}
+        invitedBy={buildInviterIndex(allInvitations)}
+      />
+      {/* `data === undefined` separates a first load that failed (nothing to
+          show, the rows really are missing) from a failed REFETCH, which keeps
+          the previous rows on screen and only makes them stale. */}
+      {invitations.isError && (
+        <InvitationsErrorNotice stale={invitations.data !== undefined} />
+      )}
       {inactive.length > 0 && <InactiveInvitations invitations={inactive} />}
     </div>
   );

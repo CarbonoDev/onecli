@@ -2,13 +2,13 @@
 
 import { Badge } from "@onecli/ui/components/badge";
 import { TableCell, TableRow } from "@onecli/ui/components/table";
-import type { InvitationRow as InvitationRowData } from "@/lib/api";
+import type { InvitationRow } from "@/lib/api";
 import { MemberAvatar } from "./member-avatar";
 import { InvitationRowActions } from "./invitation-row-actions";
 
-export interface InvitationRowProps {
+export interface InvitedMemberRowProps {
   /** PENDING only — a lapsed or revoked invitation is not a member-to-be. */
-  invitation: InvitationRowData;
+  invitation: InvitationRow;
 }
 
 /**
@@ -31,7 +31,7 @@ const formatExpiry = (expiresAt: string) => {
  * (`Badge variant="outline"` + amber classNames) rather than a new Badge
  * variant — `packages/ui` stays shadcn territory.
  */
-export const InvitationRow = ({ invitation }: InvitationRowProps) => (
+export const InvitedMemberRow = ({ invitation }: InvitedMemberRowProps) => (
   <TableRow>
     <TableCell className="py-2.5">
       <div className="flex items-center gap-3">

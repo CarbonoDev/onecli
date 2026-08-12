@@ -9,6 +9,14 @@ import { MemberRowActions } from "./member-row-actions";
 export interface MemberRowProps {
   member: OrgMemberListRow;
   isYou: boolean;
+  /**
+   * Who invited this member, from their accepted invitation. That invitation
+   * is deliberately not rendered as a row of its own (it would be the same
+   * human twice), and no other surface in the product shows an admin who
+   * brought someone in — there is no org event log — so the fact rides along
+   * here instead of disappearing with the row.
+   */
+  invitedBy?: string;
 }
 
 const formatJoined = (joinedAt: string) =>
@@ -24,12 +32,13 @@ const formatJoined = (joinedAt: string) =>
  * destructive thing it can do is suspend — which is not removal and must not
  * be dressed up as it.
  */
-export const MemberRow = ({ member, isYou }: MemberRowProps) => {
+export const MemberRow = ({ member, isYou, invitedBy }: MemberRowProps) => {
   const suspended = member.status === "suspended";
   // The email only needs its own line when the first line shows a name.
   const details = [
     member.name ? member.email : null,
     `Joined ${formatJoined(member.joinedAt)}`,
+    invitedBy ? `Invited by ${invitedBy}` : null,
   ]
     .filter((part): part is string => part !== null)
     .join(" · ");

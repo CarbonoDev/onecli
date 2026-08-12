@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { UserPlus } from "lucide-react";
 import { Button } from "@onecli/ui/components/button";
+import { Skeleton } from "@onecli/ui/components/skeleton";
 import {
   Table,
   TableBody,
@@ -14,13 +15,10 @@ import {
 } from "@onecli/ui/components/table";
 import { TableCard } from "@/components/table-card";
 import { useAuth } from "@/providers/auth-provider";
-import type {
-  InvitationRow as InvitationRowData,
-  OrgMemberListRow,
-} from "@/lib/api";
+import type { InvitationRow, OrgMemberListRow } from "@/lib/api";
 import { InviteDialog } from "./invite-dialog";
 import { MemberRow } from "./member-row";
-import { InvitationRow } from "./invitation-row";
+import { InvitedMemberRow } from "./invited-member-row";
 
 export interface MembersTableProps {
   members: OrgMemberListRow[];
@@ -30,14 +28,28 @@ export interface MembersTableProps {
    * would duplicate the person; expired/revoked ones are history and live in
    * their own table below.
    */
-  invitations: InvitationRowData[];
+  invitations: InvitationRow[];
+  /**
+   * The invitations query is still in flight. It is a SEPARATE query from the
+   * members one and reliably the slower of the two (it drains every page and
+   * accepted invitations are kept forever), so this table renders before it
+   * settles — and must not assert an invited count it doesn't have yet.
+   */
+  invitationsLoading?: boolean;
+  /** Lowercased member email → who invited them (from accepted invitations). */
+  invitedBy?: ReadonlyMap<string, string>;
 }
 
 /** "1 member" / "3 members" — the count must never read as a plural of one. */
 const countLabel = (n: number, noun: string) =>
   `${n} ${n === 1 ? noun : `${noun}s`}`;
 
-export const MembersTable = ({ members, invitations }: MembersTableProps) => {
+export const MembersTable = ({
+  members,
+  invitations,
+  invitationsLoading = false,
+  invitedBy,
+}: MembersTableProps) => {
   const { user } = useAuth();
   const [inviteOpen, setInviteOpen] = useState(false);
 
@@ -47,13 +59,6 @@ export const MembersTable = ({ members, invitations }: MembersTableProps) => {
   const viewerEmail = user?.email?.toLowerCase();
   const isYou = (row: OrgMemberListRow) =>
     viewerEmail !== undefined && row.email.toLowerCase() === viewerEmail;
-
-  // Invited people are NOT members yet, so they are never folded into the
-  // members count — they get their own clause or none at all.
-  const summary =
-    invitations.length > 0
-      ? `${countLabel(members.length, "member")} · ${invitations.length} invited`
-      : countLabel(members.length, "member");
 
   return (
     <div className="space-y-3">
@@ -79,16 +84,6 @@ export const MembersTable = ({ members, invitations }: MembersTableProps) => {
             </TableRow>
           </TableHeader>
           <TableBody>
-            {members.length === 0 && invitations.length === 0 && (
-              <TableRow className="hover:bg-transparent">
-                <TableCell
-                  colSpan={3}
-                  className="text-muted-foreground py-8 text-center"
-                >
-                  No members yet.
-                </TableCell>
-              </TableRow>
-            )}
             {/* Two row types share one tbody, so the keys carry a type prefix:
                 a future id-format change can't collide across them. */}
             {members.map((member) => (
@@ -96,19 +91,48 @@ export const MembersTable = ({ members, invitations }: MembersTableProps) => {
                 key={`m-${member.userId}`}
                 member={member}
                 isYou={isYou(member)}
+                invitedBy={invitedBy?.get(member.email.toLowerCase())}
               />
             ))}
             {invitations.map((invitation) => (
-              <InvitationRow
+              <InvitedMemberRow
                 key={`i-${invitation.id}`}
                 invitation={invitation}
               />
             ))}
+            {/* A placeholder row while invitations load: the alternative is a
+                table that silently reads as "nobody is invited" and then grows
+                rows under whoever was reading it. */}
+            {invitationsLoading && (
+              <TableRow className="hover:bg-transparent">
+                <TableCell className="py-2.5">
+                  <div className="flex items-center gap-3">
+                    <Skeleton className="size-7 rounded-full" />
+                    <div className="space-y-1.5">
+                      <Skeleton className="h-3.5 w-40" />
+                      <Skeleton className="h-3 w-56" />
+                    </div>
+                  </div>
+                </TableCell>
+                <TableCell>
+                  <Skeleton className="h-3.5 w-14" />
+                </TableCell>
+                <TableCell />
+              </TableRow>
+            )}
           </TableBody>
           <TableFooter className="bg-transparent font-normal">
             <TableRow className="hover:bg-transparent">
               <TableCell colSpan={3} className="text-muted-foreground text-xs">
-                {summary}
+                {/* Invited people are NOT members, so they never join the
+                    members count — and while the invitations query is in
+                    flight the clause is a skeleton rather than a silent zero. */}
+                {countLabel(members.length, "member")}
+                {invitationsLoading ? (
+                  <Skeleton className="ml-2 inline-block h-3 w-20 align-middle" />
+                ) : (
+                  invitations.length > 0 && ` · ${invitations.length} invited`
+                )}
               </TableCell>
             </TableRow>
           </TableFooter>

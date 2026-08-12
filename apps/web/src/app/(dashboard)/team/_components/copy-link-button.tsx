@@ -7,9 +7,10 @@ import { useCopyToClipboard } from "@/hooks/use-copy-to-clipboard";
 export interface CopyLinkButtonProps {
   token: string;
   /**
-   * Accessible name. Several of these sit in one table, so the caller names
-   * the row ("Copy the invite link for a@b.c") — "Copy invite link" alone
-   * would give every row the same name.
+   * Accessible name AND tooltip — they must be the same string (WCAG 2.5.3).
+   * Several of these sit in one table, so the caller names the row ("Copy the
+   * invite link for a@b.c"); "Copy invite link" alone would give every row the
+   * same name.
    */
   label?: string;
 }
@@ -28,7 +29,7 @@ export const CopyLinkButton = ({
       variant="ghost"
       size="icon"
       className="size-8"
-      title="Copy invite link"
+      title={label}
       aria-label={label}
       onClick={() => copy(`${window.location.origin}/join/${token}`)}
     >

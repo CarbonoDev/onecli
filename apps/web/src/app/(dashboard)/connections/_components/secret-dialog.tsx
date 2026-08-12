@@ -568,6 +568,7 @@ export const SecretDialog = ({
               <div className="flex items-center gap-2">
                 {!isEdit && !defaultType && (
                   <button
+                    aria-label="Back to secret type"
                     onClick={() => setStep("type")}
                     className="text-muted-foreground hover:text-foreground -ml-1 rounded-md p-1 transition-colors"
                   >

@@ -338,6 +338,7 @@ export const AppsTab = ({
           {localSearch && (
             <button
               type="button"
+              aria-label="Clear search"
               onClick={() => {
                 setLocalSearch("");
                 updateParam("q", null);

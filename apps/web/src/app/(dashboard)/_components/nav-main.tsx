@@ -56,7 +56,13 @@ export const NavMain = ({ items, backLink }: NavMainProps) => {
     <SidebarGroup className="group-data-[collapsible=icon]:items-center group-data-[collapsible=icon]:px-0">
       {backLink && (
         <>
-          <SidebarMenu>
+          {/* role="list" is NOT redundant: SidebarMenu renders a <ul>, Tailwind
+              v4 preflight sets `list-style: none` on it, and WebKit drops the
+              implicit list role when it does — so on Safari/VoiceOver the nav
+              announces no item count. Passed as a prop (SidebarMenu spreads
+              {...props}), so the shadcn component itself is untouched. Do not
+              strip as redundant ARIA. */}
+          <SidebarMenu role="list">
             <SidebarMenuItem>
               <SidebarMenuButton
                 asChild
@@ -76,7 +82,8 @@ export const NavMain = ({ items, backLink }: NavMainProps) => {
       {groups.map((group, i) => (
         <div key={i}>
           {i > 0 && <SidebarSeparator className="my-2" />}
-          <SidebarMenu>
+          {/* role="list": see the note on the back-link SidebarMenu above. */}
+          <SidebarMenu role="list">
             {group.map((item) => (
               <SidebarMenuItem key={item.url}>
                 <SidebarMenuButton

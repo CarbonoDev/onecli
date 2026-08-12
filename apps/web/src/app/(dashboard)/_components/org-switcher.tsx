@@ -95,7 +95,11 @@ export const OrgSwitcher = () => {
   const label = current?.name ?? "Select organization";
 
   return (
-    <SidebarMenu>
+    /* role="list" is NOT redundant: SidebarMenu renders a <ul>, Tailwind v4
+       preflight sets `list-style: none` on it, and WebKit drops the implicit
+       list role when it does. Passed as a prop, so the shadcn component is
+       untouched. Do not strip as redundant ARIA. */
+    <SidebarMenu role="list">
       <SidebarMenuItem>
         <DropdownMenu>
           <DropdownMenuTrigger asChild>

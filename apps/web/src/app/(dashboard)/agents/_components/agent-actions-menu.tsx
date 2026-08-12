@@ -95,7 +95,7 @@ export const AgentActionsMenu = ({
         <DropdownMenuTrigger asChild>
           <Button variant="ghost" size="icon" className="size-7">
             <MoreHorizontal className="size-4" />
-            <span className="sr-only">Agent actions</span>
+            <span className="sr-only">Actions for {agent.name}</span>
           </Button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end">

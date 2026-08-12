@@ -24,10 +24,20 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from "@onecli/ui/components/alert-dialog";
+import { apiKeyLastUsed } from "@onecli/api/lib/api-key-activity";
 import { useCopyToClipboard } from "@/hooks/use-copy-to-clipboard";
 import { queryKeys } from "@/lib/api/keys";
 import { maskSecret } from "@/lib/mask-secret";
 import { getApiKey, regenerateApiKey } from "@/lib/actions/api-key";
+
+/**
+ * The honest limit of the usage reading, on hover for the arms that assert an
+ * absence. Only a *successful* authentication is recorded — a rejected key,
+ * and an org key that never named a project, both leave nothing behind — so
+ * these labels can never be read as "nobody has tried this key".
+ */
+const NO_USAGE_CAVEAT =
+  "Only successful authentications are recorded, so this does not mean the key was never presented.";
 
 export const ApiKeyCard = () => {
   const queryClient = useQueryClient();
@@ -40,18 +50,34 @@ export const ApiKeyCard = () => {
   // effect with an empty dep array would keep displaying the PREVIOUS
   // project's key next to a Regenerate button that acts on the current one.
   // `scope()`-prefixed, so the switch's cookie write re-keys it on its own.
-  const { data: apiKey = "", isPending: loading } = useQuery({
+  const { data, isPending: loading } = useQuery({
     queryKey: queryKeys.apiKey.current(),
-    queryFn: () => getApiKey().then((result) => result.apiKey ?? ""),
+    // Wrapped, never passed bare: react-query hands its queryFn a context
+    // object, and a server action would try to serialize it as an argument.
+    queryFn: () => getApiKey(),
   });
 
+  const apiKey = data?.apiKey ?? "";
   const truncatedKey = apiKey ? maskSecret(apiKey) : "";
+  // Only meaningful once the key itself has loaded — there is no usage to
+  // report for a project that has no key.
+  const lastUsed = data
+    ? apiKeyLastUsed(data.lastUsedAt, data.createdAt)
+    : null;
 
   const handleRegenerate = async () => {
     setRegenerating(true);
     try {
       const result = await regenerateApiKey();
-      queryClient.setQueryData(queryKeys.apiKey.current(), result.apiKey);
+      // Rotation retires the old secret, so its usage history goes with it —
+      // the service clears `lastUsedAt`, and mirroring that here keeps the
+      // card from attributing the OLD key's activity to the new one. The row
+      // keeps its original `createdAt`, so this matches what a refetch says.
+      queryClient.setQueryData(queryKeys.apiKey.current(), {
+        apiKey: result.apiKey,
+        lastUsedAt: null,
+        createdAt: data?.createdAt ?? new Date().toISOString(),
+      });
       setRevealed(true);
       toast.success("API key regenerated");
     } catch {
@@ -143,6 +169,25 @@ export const ApiKeyCard = () => {
             </AlertDialogContent>
           </AlertDialog>
         </div>
+
+        {/* What makes a leak detectable at all: whether this key is still
+            being presented, and how recently. Same idiom as the agent card —
+            one line of text with the freshness dot INSIDE it, never a second
+            status chip. Skipped entirely when there is no key to describe. */}
+        {!loading && apiKey && lastUsed && (
+          <p
+            className="text-muted-foreground mt-2 inline-flex items-center gap-1.5 text-xs"
+            title={lastUsed.exactAt?.toLocaleString() ?? NO_USAGE_CAVEAT}
+          >
+            {lastUsed.fresh && (
+              <span
+                aria-hidden
+                className="bg-brand size-1.5 shrink-0 rounded-full"
+              />
+            )}
+            {lastUsed.label}
+          </p>
+        )}
       </CardContent>
     </Card>
   );

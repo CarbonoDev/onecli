@@ -1,0 +1,12 @@
+-- When this API key was last seen on a *successful* authentication.
+--
+-- Until now a leaked key was not merely long-lived — it was undetectable:
+-- nothing recorded whether a key was still in circulation, so a key that
+-- leaked months ago looked identical to one that had never been used.
+--
+-- Nullable with no backfill: every existing key starts at NULL, which the UI
+-- reads honestly as "never used" only for keys minted since the column landed
+-- (an older key is reported as having no recent activity instead of a false
+-- "never"). Writes are throttled to at most one per key per throttle window,
+-- so this column is never on the per-request write path.
+ALTER TABLE "api_keys" ADD COLUMN "last_used_at" TIMESTAMP(3);

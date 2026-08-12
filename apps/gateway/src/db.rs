@@ -1,8 +1,10 @@
 //! Direct database access via SQLx.
 //!
 //! Used when `DATABASE_URL` is set to query the PostgreSQL database directly,
-//! bypassing the Next.js API. Vault connection state is managed by the gateway;
-//! all other tables are read-only (Prisma / Next.js remains the writer).
+//! bypassing the Next.js API. Prisma / Next.js owns the schema, but the gateway
+//! is a writer too, not a read-only consumer: it manages `vault_connections`
+//! and `app_connections`, records `secrets`, `budget_spends` and
+//! `request_logs`, and stamps `api_keys.last_used_at` on authentication.
 
 use anyhow::{Context, Result};
 use sqlx::postgres::PgPoolOptions;
@@ -143,12 +145,72 @@ pub(crate) async fn find_default_project_id_by_user(
     Ok(row.map(|(id,)| id))
 }
 
-/// Look up an API key (`oc_...`) and return its user_id and project_id.
+/// How stale `api_keys.last_used_at` may get before an authentication writes it
+/// forward.
+///
+/// MUST move together with `API_KEY_LAST_USED_THROTTLE_MS` in
+/// `packages/api/src/services/api-key-service.ts` — the two authentication
+/// paths write the same column, and nothing but this comment ties them. It is
+/// bound as a parameter rather than inlined as an SQL literal so the value has
+/// exactly one home on this side.
+const LAST_USED_THROTTLE_MINUTES: i32 = 15;
+
+/// Look up an API key (`oc_...`) and return its user_id and project_id,
+/// stamping `last_used_at` in the same statement.
+///
+/// The gateway is the second place a project key authenticates (the Hono API
+/// is the other), so it has to record use too — a key that leaked and is only
+/// ever pointed at the gateway would otherwise look untouched.
+///
+/// The write is a data-modifying CTE rather than a follow-up query on purpose:
+/// Postgres runs it exactly once regardless of whether the primary query reads
+/// it, so recording usage costs the same ONE round trip the lookup already
+/// cost — no second statement, no write on the response path. `matched` is
+/// referenced twice so PG12+ materializes it; the UPDATE reads *from* it and
+/// cannot feed back into the returned row.
+///
+/// The update pins `k.key = $1`, not just the row id. Without it, rotation
+/// races the write: `regenerateApiKey` swaps in a new secret and clears
+/// `last_used_at` on the SAME row, so a request that authenticated with the
+/// OLD secret milliseconds earlier would land afterwards, match the
+/// `IS NULL` arm precisely *because* rotation just cleared it, and stamp the
+/// brand-new secret as used. An operator rotating a leaked key would refresh
+/// the card and read "Last used just now" on a secret nobody has ever held.
+///
+/// `project_id IS NOT NULL` fences out org keys (`oc_org_*`), which reach here
+/// too because the caller only checks the `oc_` prefix. They never
+/// authenticated on this path — the row failed to decode into `ApiKeyRow` and
+/// fell through to session auth — so they must not be recorded as if they had.
+/// Filtering them in SQL keeps that outcome identical and drops a spurious
+/// decode warning.
+///
+/// `NOW() AT TIME ZONE 'UTC'` rather than the bare `NOW()` its neighbours use:
+/// `last_used_at` is a `timestamp WITHOUT time zone` that Prisma fills with UTC
+/// values, and a bare `NOW()` would be cast using the session's TimeZone — so
+/// a non-UTC session would write a value that the TypeScript path, and the
+/// throttle comparison right below, both read as skewed.
 pub(crate) async fn find_api_key(pool: &PgPool, key: &str) -> Result<Option<ApiKeyRow>> {
     sqlx::query_as::<_, ApiKeyRow>(
-        r#"SELECT user_id, project_id FROM api_keys WHERE key = $1 LIMIT 1"#,
+        r#"WITH matched AS (
+               SELECT id, user_id, project_id
+                 FROM api_keys
+                WHERE key = $1 AND project_id IS NOT NULL
+                LIMIT 1
+           ), touched AS (
+               UPDATE api_keys k
+                  SET last_used_at = NOW() AT TIME ZONE 'UTC'
+                 FROM matched m
+                WHERE k.id = m.id
+                  AND k.key = $1
+                  AND (k.last_used_at IS NULL
+                       OR k.last_used_at
+                          < (NOW() AT TIME ZONE 'UTC')
+                            - make_interval(mins => $2))
+           )
+           SELECT user_id, project_id FROM matched"#,
     )
     .bind(key)
+    .bind(LAST_USED_THROTTLE_MINUTES)
     .fetch_optional(pool)
     .await
     .context("querying api_keys by key")

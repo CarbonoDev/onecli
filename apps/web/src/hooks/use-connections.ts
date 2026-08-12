@@ -10,10 +10,16 @@ import { queryKeys } from "@/lib/api/keys";
 // routes invalidate it server-side (withAudit), so there is no client-side
 // gateway call here.
 
-export const useConnections = (scope: PageScope = "project") =>
+export const useConnections = (scope: PageScope = "project", enabled = true) =>
   useQuery({
     queryKey: queryKeys.connections.list(scope),
     queryFn: () => connections.list(scope),
+    enabled,
+    // `/v1/org/connections` is admin-gated: a member's 403 is a deterministic
+    // role boundary, not a transport blip, and retrying it three times only
+    // delays the notice the page renders. `undefined` leaves project reads on
+    // the library default.
+    retry: scope === "organization" ? false : undefined,
   });
 
 export const useVaultConnections = (enabled = true) =>

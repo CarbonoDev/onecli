@@ -33,7 +33,7 @@ import {
 import { Badge } from "@onecli/ui/components/badge";
 import { updateSecret as defaultUpdateSecret } from "@/lib/actions/secrets";
 import { useQueryClient } from "@tanstack/react-query";
-import { secrets } from "@/lib/api";
+import { secrets, type PageScope } from "@/lib/api";
 import { queryKeys } from "@/lib/api/keys";
 import type { CreateSecretInput } from "@onecli/api/validations/secret";
 import type { SecretActions } from "./types";
@@ -202,6 +202,13 @@ interface SecretDialogProps {
   /** Filter which types appear in TypeStep. */
   allowedTypes?: SecretType[];
   secretActions?: SecretActions;
+  /**
+   * Which scope this secret belongs to. Only `organization` changes anything:
+   * a 1Password reference resolves through a PROJECT's 1Password connection,
+   * so `secret-service.ts` rejects `valueSource: "onepassword"` outside project
+   * scope — offering the picker there is offering a guaranteed 400.
+   */
+  pageScope?: PageScope;
 }
 
 export const SecretDialog = ({
@@ -213,6 +220,7 @@ export const SecretDialog = ({
   defaultType,
   allowedTypes,
   secretActions,
+  pageScope = "project",
 }: SecretDialogProps) => {
   const isEdit = !!secret;
   const invalidateCache = useInvalidateGatewayCache();
@@ -245,8 +253,11 @@ export const SecretDialog = ({
   const [pickerOpen, setPickerOpen] = useState(false);
 
   // Only poll 1Password connectivity while the dialog is open; deduped across
-  // every mounted SecretDialog via the shared query key.
-  const { isReady: opConnected } = useOnePasswordReady(open);
+  // every mounted SecretDialog via the shared query key. Never at org scope —
+  // the API rejects an org-scoped 1Password value outright.
+  const onePasswordAllowed = pageScope === "project";
+  const { isReady: opReady } = useOnePasswordReady(open && onePasswordAllowed);
+  const opConnected = opReady && onePasswordAllowed;
 
   // The value source is implied by whether a 1Password field is chosen — no
   // separate mode toggle. OAuth file upload only applies to a typed OpenAI

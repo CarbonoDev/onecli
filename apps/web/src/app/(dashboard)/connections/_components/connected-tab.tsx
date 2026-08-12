@@ -4,23 +4,24 @@ import { useMemo, useState } from "react";
 import { useRouter, usePathname } from "next/navigation";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { connectionsPath } from "@/lib/navigation";
-import { ChevronRight, KeyRound } from "lucide-react";
+import { ChevronRight, KeyRound, ShieldAlert } from "lucide-react";
 import { Badge } from "@onecli/ui/components/badge";
+import { Button } from "@onecli/ui/components/button";
 import { Card } from "@onecli/ui/components/card";
 import { cn } from "@onecli/ui/lib/utils";
 import { Skeleton } from "@onecli/ui/components/skeleton";
-import { apiGet, type PageScope } from "@/lib/api";
+import { apiGet, secretsPath, type PageScope } from "@/lib/api";
 import { queryKeys } from "@/lib/api/keys";
 import { useConnections, useVaultConnections } from "@/hooks/use-connections";
 import { getApp } from "@onecli/api/apps/registry";
 import { useAppMessages } from "@/hooks/use-app-connected";
 import { extractLabel } from "@onecli/api/services/connection-service";
+import { EmptyState } from "@/components/empty-state";
 import { AppIcon } from "./app-icon";
 import { SecretDialog } from "./secret-dialog";
+import { defaultSecretActionsFor } from "./secret-actions";
 import type { SecretActions } from "./types";
 import { labelForScope, type ScopeLabelMap } from "./scope-label";
-
-const defaultGetSecrets_ = () => apiGet<SecretItem[]>("/v1/secrets");
 
 interface ConnectedItem {
   id: string;
@@ -70,7 +71,7 @@ interface ConnectedTabProps {
 }
 
 export const ConnectedTab = ({
-  getSecrets = defaultGetSecrets_,
+  getSecrets,
   basePath,
   secretActions,
   pageScope = "project",
@@ -83,12 +84,18 @@ export const ConnectedTab = ({
     ConnectedItem["secretData"] | null
   >(null);
 
+  // Org scope writes over HTTP (`/v1/org/secrets`); project scope keeps the
+  // audited server actions the dialog defaults to on its own.
+  const actions = secretActions ?? defaultSecretActionsFor(pageScope);
+
   const connectionsQuery = useConnections(pageScope);
   // The extra "connected" key segment keeps this apart from the tab bar's
   // secrets query, whose injected fetcher may differ (partner-merged list).
   const secretsQuery = useQuery({
-    queryKey: [...queryKeys.secrets.list(), pageScope, "connected"],
-    queryFn: getSecrets,
+    queryKey: [...queryKeys.secrets.list(pageScope), "connected"],
+    queryFn: getSecrets ?? (() => apiGet<SecretItem[]>(secretsPath(pageScope))),
+    // Admin-gated at org scope: a member's 403 is deterministic, not retryable.
+    retry: pageScope === "organization" ? false : undefined,
   });
   const vaultsQuery = useVaultConnections(pageScope === "project");
 
@@ -218,20 +225,51 @@ export const ConnectedTab = ({
     );
   }
 
+  // A member reaching an org page gets a deterministic 403 on both reads. Not a
+  // plan gate and not an error state — a role boundary, so it says who can do
+  // this and stops. (Only org scope: a project read failing is a real error and
+  // keeps its existing empty rendering.)
+  if (
+    pageScope === "organization" &&
+    (connectionsQuery.isError || secretsQuery.isError)
+  ) {
+    return (
+      <EmptyState
+        variant="card"
+        icon={ShieldAlert}
+        title="Admins only"
+        description="Organization connections are managed by organization admins. Ask an admin if you need one added or changed."
+      />
+    );
+  }
+
   if (items.length === 0) {
     return (
-      <div className="flex flex-col items-center justify-center py-12 text-center">
-        <p className="text-sm text-muted-foreground">
-          No connected services yet. Head to the{" "}
-          <button
-            onClick={() => router.push(connectionsPath({ pathname, basePath }))}
-            className="text-brand hover:underline font-medium"
-          >
-            Apps
-          </button>{" "}
-          tab to get started.
-        </p>
-      </div>
+      <EmptyState
+        icon={KeyRound}
+        things="connected services"
+        // Org scope deliberately gets no Apps link: connecting an app at
+        // organization scope is not available yet, so pointing there would be
+        // a dead end.
+        description={
+          pageScope === "organization"
+            ? "Add a custom secret or an LLM key to share it with every project in the organization."
+            : "Connect an app or add a secret to see it here."
+        }
+        action={
+          pageScope === "organization" ? undefined : (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() =>
+                router.push(connectionsPath({ pathname, basePath }))
+              }
+            >
+              Browse apps
+            </Button>
+          )
+        }
+      />
     );
   }
 
@@ -307,7 +345,8 @@ export const ConnectedTab = ({
         }}
         onSaved={refreshItems}
         secret={editingSecret ?? undefined}
-        secretActions={secretActions}
+        secretActions={actions}
+        pageScope={pageScope}
       />
     </>
   );

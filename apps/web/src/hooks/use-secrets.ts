@@ -19,8 +19,11 @@ export const useSecrets = () =>
 // it.
 export const useScopedSecrets = (scope: PageScope = "project") =>
   useQuery({
-    queryKey: [...queryKeys.secrets.list(), scope, "policy-target"],
+    queryKey: [...queryKeys.secrets.list(scope), "policy-target"],
     queryFn: () => secrets.listScoped(scope),
+    // Admin-gated at org scope: a member's 403 is deterministic, not a
+    // transport blip. `undefined` leaves project reads on the library default.
+    retry: scope === "organization" ? false : undefined,
   });
 
 export const useCreateSecret = () => {

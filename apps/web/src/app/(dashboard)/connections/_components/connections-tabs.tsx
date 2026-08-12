@@ -11,37 +11,26 @@ import {
   AnimatedTabTrigger,
 } from "@onecli/ui/components/animated-tabs";
 import { Badge } from "@onecli/ui/components/badge";
-import { secrets as secretsApi, type PageScope } from "@/lib/api";
+import { apiGet, secretsPath, type PageScope } from "@/lib/api";
 import { queryKeys } from "@/lib/api/keys";
 import { useConnections, useVaultConnections } from "@/hooks/use-connections";
-
-const getTabRoutes = (pathname: string): Record<string, string> => {
-  const idx = pathname.indexOf("/connections");
-  const base =
-    idx >= 0 ? pathname.slice(0, idx + "/connections".length) : "/connections";
-  return {
-    apps: base,
-    custom: `${base}/custom`,
-    llms: `${base}/llms`,
-    budgets: `${base}/budgets`,
-    vaults: `${base}/vaults`,
-    connected: `${base}/connected`,
-  };
-};
-
-const pathToTab = (pathname: string): string => {
-  const segment = pathname.split("/connections")[1]?.replace(/^\//, "") || "";
-  if (segment === "custom") return "custom";
-  if (segment === "llms") return "llms";
-  if (segment === "budgets") return "budgets";
-  if (segment === "vaults") return "vaults";
-  if (segment === "connected") return "connected";
-  return "apps";
-};
+import { activeTabFor, isConnectionsTab, tabRoutesFor } from "./tab-routes";
 
 interface ConnectionsTabsProps {
   getSecrets?: () => Promise<unknown[]>;
   showVaults?: boolean;
+  /**
+   * Spend budgets are per-project. The org page passes `false`; there is no
+   * organization budget surface to route to.
+   */
+  showBudgets?: boolean;
+  /**
+   * Whether the `Connected` tab carries an inventory count. The count sums
+   * project-only inventory and costs two admin-gated reads at org scope, so the
+   * org page passes `false` and both queries are skipped rather than 403ing on
+   * every page load for a member.
+   */
+  showConnectedCount?: boolean;
   basePath?: string;
   pageScope?: PageScope;
 }
@@ -49,31 +38,26 @@ interface ConnectionsTabsProps {
 export const ConnectionsTabs = ({
   getSecrets,
   showVaults = true,
+  showBudgets = true,
+  showConnectedCount = true,
   basePath,
   pageScope = "project",
 }: ConnectionsTabsProps) => {
   const pathname = usePathname();
   const router = useRouter();
   const queryClient = useQueryClient();
-  const activeTab = basePath
-    ? pathToTab(pathname.replace(basePath, "/connections"))
-    : pathToTab(pathname);
-  const tabRoutes = basePath
-    ? {
-        apps: basePath,
-        custom: `${basePath}/custom`,
-        llms: `${basePath}/llms`,
-        budgets: `${basePath}/budgets`,
-        vaults: `${basePath}/vaults`,
-        connected: `${basePath}/connected`,
-      }
-    : getTabRoutes(pathname);
+  const activeTab = activeTabFor(pathname, basePath);
+  const tabRoutes = tabRoutesFor(pathname, basePath);
   const [, startTransition] = useTransition();
 
-  const { data: connectionsList = [] } = useConnections(pageScope);
+  const { data: connectionsList = [] } = useConnections(
+    pageScope,
+    showConnectedCount,
+  );
   const { data: secretsList = [] } = useQuery({
-    queryKey: [...queryKeys.secrets.list(), pageScope],
-    queryFn: getSecrets ?? secretsApi.list,
+    queryKey: queryKeys.secrets.list(pageScope),
+    queryFn: getSecrets ?? (() => apiGet<unknown[]>(secretsPath(pageScope))),
+    enabled: showConnectedCount,
   });
   const { data: vaultsList = [] } = useVaultConnections(
     showVaults && pageScope === "project",
@@ -95,9 +79,11 @@ export const ConnectionsTabs = ({
       router.push(connectionsPath({ pathname, basePath }, `/apps/${provider}`)),
   });
 
+  // `AnimatedTabs` hands back a bare string, so narrow before indexing — an
+  // unknown value is ignored rather than routed to `undefined`.
   const handleTabChange = (value: string) => {
-    const href = tabRoutes[value];
-    if (href) startTransition(() => router.push(href));
+    if (!isConnectionsTab(value)) return;
+    startTransition(() => router.push(tabRoutes[value]));
   };
 
   return (
@@ -107,7 +93,9 @@ export const ConnectionsTabs = ({
           <AnimatedTabTrigger value="apps">Apps</AnimatedTabTrigger>
           <AnimatedTabTrigger value="custom">Custom</AnimatedTabTrigger>
           <AnimatedTabTrigger value="llms">LLMs</AnimatedTabTrigger>
-          <AnimatedTabTrigger value="budgets">Budgets</AnimatedTabTrigger>
+          {showBudgets && (
+            <AnimatedTabTrigger value="budgets">Budgets</AnimatedTabTrigger>
+          )}
           {showVaults && (
             <AnimatedTabTrigger value="vaults">
               <span className="sm:hidden">Vaults</span>
@@ -120,7 +108,7 @@ export const ConnectionsTabs = ({
           className="flex items-center gap-2"
         >
           Connected
-          {connectedCount > 0 && (
+          {showConnectedCount && connectedCount > 0 && (
             <Badge variant="secondary" className="text-[10px] px-1.5 py-0">
               {connectedCount}
             </Badge>

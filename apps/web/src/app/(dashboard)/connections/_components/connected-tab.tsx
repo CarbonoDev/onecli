@@ -4,7 +4,7 @@ import { useMemo, useState } from "react";
 import { useRouter, usePathname } from "next/navigation";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { connectionsPath } from "@/lib/navigation";
-import { ChevronRight, KeyRound, ShieldAlert } from "lucide-react";
+import { ChevronRight, KeyRound, Lock } from "lucide-react";
 import { Badge } from "@onecli/ui/components/badge";
 import { Button } from "@onecli/ui/components/button";
 import { Card } from "@onecli/ui/components/card";
@@ -229,6 +229,10 @@ export const ConnectedTab = ({
   // plan gate and not an error state — a role boundary, so it says who can do
   // this and stops. (Only org scope: a project read failing is a real error and
   // keeps its existing empty rendering.)
+  //
+  // `Lock`, matching the /groups and /team admin-only notices. The lock here
+  // reads as "you can't do this", not "buy a bigger plan" — there are no plan
+  // tiers to sell, and three admin-only cards must not disagree on iconography.
   if (
     pageScope === "organization" &&
     (connectionsQuery.isError || secretsQuery.isError)
@@ -236,7 +240,7 @@ export const ConnectedTab = ({
     return (
       <EmptyState
         variant="card"
-        icon={ShieldAlert}
+        icon={Lock}
         title="Admins only"
         description="Organization connections are managed by organization admins. Ask an admin if you need one added or changed."
       />

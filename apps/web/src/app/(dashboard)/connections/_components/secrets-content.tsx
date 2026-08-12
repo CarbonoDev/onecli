@@ -3,7 +3,7 @@
 import { useEffect, useState, useRef } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
 import { useQuery } from "@tanstack/react-query";
-import { Plus, KeyRound, ShieldAlert } from "lucide-react";
+import { Plus, KeyRound, Lock } from "lucide-react";
 import { apiGet, secretsPath, type PageScope } from "@/lib/api";
 import { queryKeys } from "@/lib/api/keys";
 import { Button } from "@onecli/ui/components/button";
@@ -158,11 +158,15 @@ export const SecretsContent = ({
   // plan gate and not an error state — a role boundary, so it says who can do
   // this and stops. (Only org scope: a project read failing is a real error and
   // keeps its existing empty rendering.)
+  //
+  // `Lock`, matching the /groups and /team admin-only notices. The lock here
+  // reads as "you can't do this", not "buy a bigger plan" — there are no plan
+  // tiers to sell, and three admin-only cards must not disagree on iconography.
   if (isError && pageScope === "organization") {
     return (
       <EmptyState
         variant="card"
-        icon={ShieldAlert}
+        icon={Lock}
         title="Admins only"
         description={
           typeFilter === "llm"

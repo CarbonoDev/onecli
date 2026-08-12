@@ -226,10 +226,10 @@ const NAV_BREADCRUMB_OVERRIDES: Record<string, string> = {
   "/projects": "All projects",
 };
 
-// Later entries win. The settings sub-nav sits after the two nav lists on
-// purpose: where both name the same url the sidebar says "Project Settings"
-// (it has no other context) while the crumb is already under `Settings ›`, so
-// the sub-nav's "Project" is the one that reads correctly there.
+// Later entries win. The rail sits after the two nav lists on purpose:
+// `/settings/organization` is named by both, and the sidebar's "Organization
+// Settings" would read as a repetition under a crumb that already says
+// `Settings ›`. The rail's plain "Organization" is the one that fits.
 const NAV_BREADCRUMB_LABELS: Record<string, string> = {
   ...Object.fromEntries(
     [

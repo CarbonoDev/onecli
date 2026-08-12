@@ -5,8 +5,12 @@ import { getAuthMode } from "@/lib/auth/auth-mode";
 import { resolveProjectContext } from "@/lib/actions/resolve-user";
 import { ProjectSettingsContent } from "./_components/project-settings-content";
 
+// "Project Settings", matching the project shell's nav item and the breadcrumb
+// leaf. It used to be the bare "Project" because it was a rail entry, where
+// the surrounding rail supplied the "settings" half; standalone, it has to say
+// so itself.
 export const metadata: Metadata = {
-  title: "Project",
+  title: "Project Settings",
 };
 
 export default async function ProjectSettingsPage() {
@@ -21,8 +25,10 @@ export default async function ProjectSettingsPage() {
 
   return (
     <div className="flex flex-1 flex-col gap-4">
+      {/* Keep in sync with `loading.tsx`, which renders this same header so
+          the heading doesn't change while the cards resolve. */}
       <PageHeader
-        title="Project"
+        title="Project Settings"
         description="Rename this project, choose who can use it, or delete it."
       />
       <Suspense>

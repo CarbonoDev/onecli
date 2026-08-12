@@ -348,17 +348,12 @@ vi.mock("@onecli/db", () => {
     createdAt?: boolean;
     createdByUserId?: boolean;
     createdByUserEmail?: boolean;
-    createdByUser?: { select: { name?: boolean; email?: boolean } };
   }
 
   /**
-   * Project a project row. Two behaviours are load-bearing:
-   *
-   * `createdByUser` is an OPTIONAL relation, and `created_by_user_id` is
-   * `ON DELETE SET NULL`: deleting the creator nulls the id, so the join finds
-   * nothing and reads as null rather than throwing. That is the case the owner
-   * email fallback exists for. Counts do NOT come from here — see
-   * `countsByProject` and the `groupBy` on each child delegate.
+   * Project a project row. Scalars only — the owner is the stored
+   * `createdByUserEmail` column, with no `users` join to model, and the counts
+   * come from the `groupBy` on each child delegate rather than from here.
    */
   const pickProject = (row: ProjectRow, select?: ProjectSelect) => {
     if (!select) return { ...row };
@@ -373,12 +368,6 @@ vi.mock("@onecli/db", () => {
       "createdByUserEmail",
     ] as const) {
       if (select[key]) picked[key] = row[key];
-    }
-    if (select.createdByUser) {
-      const user = store.users.find((u) => u.id === row.createdByUserId);
-      picked.createdByUser = user
-        ? { name: user.name, email: user.email }
-        : null;
     }
     return picked;
   };
@@ -1072,11 +1061,7 @@ interface ProjectBody {
   createdAt: string;
   agentCount: number;
   resourceCount: number;
-  owner: {
-    id: string | null;
-    name: string | null;
-    email: string | null;
-  } | null;
+  ownerEmail: string | null;
 }
 
 interface AccessBody {
@@ -1221,17 +1206,15 @@ describe("GET /projects (list)", () => {
       // 2 agents; 1 secret + 1 app connection = 2 resources.
       agentCount: 2,
       resourceCount: 2,
-      owner: { id: MEMBER, name: null, email: "member@example.com" },
+      ownerEmail: "member@example.com",
     });
-    // `projectRowSelect` also reads the raw creator columns; `toProjectRow`
-    // must fold them into `owner` rather than pass them through, and the org
-    // id and the `_count` envelope must not leak either.
+    // `projectSelect` still reads `createdByUserId` (resolveAuthority needs
+    // it) and `projectRowSelect` reads the raw email column; `toProjectRow`
+    // must rename the one and drop the other, and the org id must not leak.
     for (const leaked of [
       "createdByUserId",
       "createdByUserEmail",
-      "createdByUser",
       "organizationId",
-      "_count",
     ]) {
       expect(Object.keys(first ?? {})).not.toContain(leaked);
     }
@@ -1254,50 +1237,35 @@ describe("GET /projects (list)", () => {
     ]);
   });
 
-  it("falls back to the STORED email once the creator is DELETED", async () => {
-    // The exact shape a departed owner takes, and the reason the
-    // denormalized column is read at all. `created_by_user_id` is
-    // `ON DELETE SET NULL`, so deleting the user nulls the ID TOO — there is
-    // no dangling-id state to test, and `owner` must survive on the stored
-    // email alone.
+  it("keeps the owner email once the creator is DELETED", async () => {
+    // Why the card reads the denormalized column instead of joining `users`.
+    // `created_by_user_id` is `ON DELETE SET NULL`, so deleting the creator
+    // takes the id and the joinable row with it; `created_by_user_email`
+    // stays, and the owner line survives with no special case.
     store.users = store.users.filter((u) => u.id !== OWNER);
     const row = projectRow("proj-2");
     if (row) row.createdByUserId = null; // the FK's SET NULL
 
     const [, beta] = (await (await list()).json()) as ProjectBody[];
-    expect(beta?.owner).toEqual({
-      id: null,
-      name: null,
-      email: "owner@example.com",
-    });
+    expect(beta?.ownerEmail).toBe("owner@example.com");
   });
 
   it("reports a null owner for a project that records no creator at all", async () => {
-    // Both columns null — nothing to attribute the card to, so the client
-    // renders no owner line rather than an empty one.
+    // Nothing to attribute the card to, so the client renders no owner line
+    // rather than an empty one.
     const row = projectRow("proj-4");
-    if (row) {
-      row.createdByUserId = null;
-      row.createdByUserEmail = null;
-    }
+    if (row) row.createdByUserEmail = null;
     const rows = (await (await list()).json()) as ProjectBody[];
-    expect(rows.find((p) => p.id === "proj-4")?.owner).toBeNull();
+    expect(rows.find((p) => p.id === "proj-4")?.ownerEmail).toBeNull();
   });
 
-  it("prefers the live name and email over the stored copy", async () => {
-    // The stored email is a snapshot; the joined user row is the truth when
-    // it still exists.
+  it("reports the STORED email, not the creator's current one", async () => {
+    // Provenance, not live identity: this is a column on the project row, so
+    // a later email change does not rewrite history on the card.
     const user = store.users.find((u) => u.id === MEMBER);
-    if (user) {
-      user.name = "Renamed Member";
-      user.email = "renamed@example.com";
-    }
+    if (user) user.email = "renamed@example.com";
     const [first] = (await (await list()).json()) as ProjectBody[];
-    expect(first?.owner).toEqual({
-      id: MEMBER,
-      name: "Renamed Member",
-      email: "renamed@example.com",
-    });
+    expect(first?.ownerEmail).toBe("member@example.com");
   });
 
   it("costs the same number of reads for 4 projects as for 24", async () => {
@@ -1403,11 +1371,7 @@ describe("POST /projects (create)", () => {
     ).json()) as ProjectBody;
     expect(body.agentCount).toBe(1); // the default agent, seeded in the same write
     expect(body.resourceCount).toBe(0);
-    expect(body.owner).toEqual({
-      id: MEMBER,
-      name: null,
-      email: "member@example.com",
-    });
+    expect(body.ownerEmail).toBe("member@example.com");
   });
 
   it("makes the new project immediately manageable by its creator", async () => {
@@ -1600,7 +1564,7 @@ describe("GET /v1/projects/:projectId", () => {
       createdAt: at(0).toISOString(),
       agentCount: 2,
       resourceCount: 2,
-      owner: { id: MEMBER, name: null, email: "member@example.com" },
+      ownerEmail: "member@example.com",
     });
   });
 

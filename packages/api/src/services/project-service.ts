@@ -27,27 +27,6 @@ import { CAPS } from "../lib/env";
 //   3. writes are conditional `updateMany`/`deleteMany` so a lost race is a
 //      404, not the P2025 500 a bare `update()`/`delete()` would surface.
 
-/**
- * Whoever a project is attributed to — its creator, so the projects grid can
- * render `Owned by <name>`.
- *
- * Every field is nullable and that is not defensiveness — it is the schema.
- * `created_by_user_id` is `ON DELETE SET NULL`, so DELETING THE CREATOR nulls
- * the id and drops the relation while leaving `createdByUserEmail` behind.
- * That denormalized column is exactly why it exists: `{ id: null, name: null,
- * email: "…" }` is the shape a departed owner takes, and the email is what the
- * card renders once the name is gone. (A dangling id with no user row is NOT a
- * reachable state — the FK forbids it.)
- *
- * `owner` itself is null only when the project records no creator AT ALL. The
- * client rule is therefore: render `name`, else `email`, else no owner line.
- */
-export interface ProjectOwner {
-  id: string | null;
-  name: string | null;
-  email: string | null;
-}
-
 /** A project row in the client's `Project` shape (`createdAt` as ISO string). */
 export interface ProjectRow {
   id: string;
@@ -79,7 +58,26 @@ export interface ProjectRow {
    * Agents are NOT included — the grid renders them as their own noun.
    */
   resourceCount: number;
-  owner: ProjectOwner | null;
+  /**
+   * Who the grid attributes the card to — `Owned by <email>`, omitted when
+   * null.
+   *
+   * The DENORMALIZED `createdByUserEmail` column verbatim, deliberately not a
+   * join to the live user. Three things follow, all of them simplifications:
+   *
+   *  · it survives a deleted account. `created_by_user_id` is
+   *    `ON DELETE SET NULL`, so the id goes and this column stays — the owner
+   *    line needs no special case for a departed creator;
+   *  · it opens no disclosure surface. Reading a column already on the project
+   *    row is not the same as joining `users` unfenced, which is a thing
+   *    `listProjectAccess` takes care to scope;
+   *  · it costs no statement. The join would be a second query for every list.
+   *
+   * The trade is that a user who changes their email keeps the old one on the
+   * card until the project is re-created. Accepted: this is provenance, not
+   * live identity.
+   */
+  ownerEmail: string | null;
 }
 
 /** What a delete actually removed. */
@@ -119,6 +117,9 @@ const projectSelect = {
  * rename), so all four endpoints return the one `ProjectRow` shape and the web
  * client's single `Project` type stays honest about every one of them.
  *
+ * Four statements serve a list of any size: this one, plus the three grouped
+ * counts below.
+ *
  * The counts are NOT here. Prisma's `_count` would fold them into this same
  * statement, which reads like the cheap option and is not: it compiles to
  * `LEFT JOIN (SELECT project_id, COUNT(*) … GROUP BY project_id)` with no
@@ -130,8 +131,11 @@ const projectSelect = {
  */
 const projectRowSelect = {
   ...projectSelect,
+  // This column IS the owner — there is deliberately no `createdByUser` join.
+  // The card renders the stored email, so the live user row buys nothing and
+  // would cost a statement: Prisma loads a relation as its own batched
+  // `users WHERE id IN (…)` read, on every list.
   createdByUserEmail: true,
-  createdByUser: { select: { name: true, email: true } },
 } as const;
 
 /** A project's own inventory, as the card splits it. */
@@ -146,9 +150,7 @@ interface ProjectRowSource {
   name: string | null;
   slug: string | null;
   createdAt: Date;
-  createdByUserId: string | null;
   createdByUserEmail: string | null;
-  createdByUser: { name: string | null; email: string } | null;
 }
 
 /**
@@ -209,19 +211,6 @@ const countsByProject = async (
   return counts;
 };
 
-const toOwner = (row: ProjectRowSource): ProjectOwner | null => {
-  // Nothing recorded at all — an unattributed project, not a departed owner.
-  // The client shows no owner line rather than "Owned by null".
-  if (!row.createdByUserId && !row.createdByUserEmail) return null;
-  return {
-    id: row.createdByUserId,
-    name: row.createdByUser?.name ?? null,
-    // Live email first (a user may have changed it since); the stored one is
-    // the survivor once the relation is gone.
-    email: row.createdByUser?.email ?? row.createdByUserEmail,
-  };
-};
-
 const toProjectRow = (
   row: ProjectRowSource,
   counts: ProjectCounts,
@@ -232,7 +221,7 @@ const toProjectRow = (
   createdAt: row.createdAt.toISOString(),
   agentCount: counts.agents,
   resourceCount: counts.resources,
-  owner: toOwner(row),
+  ownerEmail: row.createdByUserEmail,
 });
 
 /** N rows plus their inventory, in three grouped counts however large N is. */

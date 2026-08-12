@@ -50,7 +50,6 @@ export type {
   CreatedSecret,
   Connection,
   Project,
-  ProjectOwner,
   Organization,
   CreatedOrganization,
   SessionInfo,

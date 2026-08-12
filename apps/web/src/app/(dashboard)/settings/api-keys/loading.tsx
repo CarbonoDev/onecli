@@ -8,7 +8,7 @@ export default function ApiKeysLoading() {
       <PageHeader
         title="API Keys"
         // Must match page.tsx exactly, or the copy changes as the card loads.
-        description="OneCLI issues one personal API key per project. Copy it for the CLI, or regenerate it if it leaks."
+        description="OneCLI issues one personal API key per project. Copy it for the CLI, or regenerate it if it leaks. “Never used” means no successful authentication since usage tracking began; “No recent activity” means the key predates tracking, so earlier use is unknown."
       />
       <Card>
         <CardHeader>

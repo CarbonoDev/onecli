@@ -36,6 +36,15 @@ import { getApiKey, regenerateApiKey } from "@/lib/actions/api-key";
  * absence. Only a *successful* authentication is recorded — a rejected key,
  * and an org key that never named a project, both leave nothing behind — so
  * these labels can never be read as "nobody has tried this key".
+ *
+ * This carries the caveat ALONE on /overview, where the card renders with no
+ * page description, so it has to stand on its own. It divides the work with
+ * the /settings/api-keys description: that page glosses what each absence
+ * label CLAIMS ("Never used" vs "No recent activity", which differ by whether
+ * the key predates tracking); this states what the recording MISSES, which is
+ * the same for both arms and is why neither is evidence of an untried key.
+ * Keep them complementary — do not move this sentence back into the page
+ * description.
  */
 const NO_USAGE_CAVEAT =
   "Only successful authentications are recorded, so this does not mean the key was never presented.";

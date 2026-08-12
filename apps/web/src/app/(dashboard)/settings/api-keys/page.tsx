@@ -15,11 +15,17 @@ export default function ApiKeysPage() {
         // exactly one and Regenerate rotates it in place. "Manage your API
         // keys" promised a list that does not exist.
         //
-        // The last sentence is the honest limit of the usage reading, stated
-        // where an operator investigating a leak will actually see it: only
-        // successful authentications are recorded, so "Never used" is not
-        // evidence that nobody has tried the key.
-        description="OneCLI issues one personal API key per project. Copy it for the CLI, or regenerate it if it leaks. Usage records successful authentications only — a key that was presented and rejected leaves no trace, so “Never used” does not mean “never presented”."
+        // The last sentence glosses BOTH absence labels the card can render
+        // (`lastActivity` in @onecli/api/lib/last-activity), because a
+        // description that explains only "Never used" is unreadable to the
+        // majority of keys — those minted before API_KEY_USAGE_TRACKED_SINCE
+        // — which see "No recent activity" instead.
+        //
+        // What is deliberately NOT here: that a rejected key leaves no trace
+        // at all. That belongs on the label itself, and the card already
+        // hovers it (NO_USAGE_CAVEAT). Repeating it would make this a
+        // paragraph and say nothing the hover doesn't.
+        description="OneCLI issues one personal API key per project. Copy it for the CLI, or regenerate it if it leaks. “Never used” means no successful authentication since usage tracking began; “No recent activity” means the key predates tracking, so earlier use is unknown."
       />
       <ApiKeyCard />
     </div>

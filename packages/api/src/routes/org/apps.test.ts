@@ -843,18 +843,6 @@ describe("the PROJECT surface is unchanged", () => {
     });
   });
 
-  it("GET /v1/apps/:provider still resolves — the extracted routes don't shadow it", async () => {
-    // Route ORDER: `/configured` and the `/:provider/config*` handlers are
-    // registered from one call now, ahead of the `/:provider` param route.
-    // A single-segment path can't be swallowed by a two-segment one, and this
-    // pins that.
-    const res = await app.request("/v1/apps/notion", asProject);
-    expect(res.status).toBe(200);
-    expect((await res.json()) as { id: string }).toEqual(
-      expect.objectContaining({ id: "notion" }),
-    );
-  });
-
   it("the project blocklist still shows the inherited ORG block, locked", async () => {
     // The project router's two-key read scope is what surfaces an org-level
     // block in a project, and the org arm overrides the project's own view.
@@ -865,6 +853,73 @@ describe("the PROJECT surface is unchanged", () => {
     const states = (await res.json()) as BlocklistState[];
     expect(states.find((s) => s.hostId === "npm")).toEqual(
       expect.objectContaining({ ruleId: "rule-org", scope: "organization" }),
+    );
+  });
+});
+
+// The `/apps/:provider/config*` and `/apps/:provider/blocklist*` handlers moved
+// from ~line 842 of `routes/apps.ts` to ~line 192, which puts them AHEAD of
+// every other `/:provider/...` registration. Hono resolves two patterns that
+// match the same path by registration order, so the move is the most
+// mechanically risky part of the extraction. No pattern below overlaps a moved
+// one — each has a distinct literal second segment, or one fewer segment — and
+// these pins hold that true. Each asserts a response only its OWN handler can
+// produce: the moved config GET always answers 200 with a config-status object,
+// so a 400, a 302, or an app-detail body proves it did not win the match.
+describe("route ordering — the moved registrations shadow nothing", () => {
+  const asProject = {
+    headers: {
+      Authorization: `Bearer ${PROJECT_KEY}`,
+      "X-Project-Id": PROJECT,
+    },
+  };
+
+  it("GET /v1/apps/:provider reaches the app-detail handler", async () => {
+    const res = await app.request("/v1/apps/notion", asProject);
+    expect(res.status).toBe(200);
+    expect((await res.json()) as { id: string }).toEqual(
+      expect.objectContaining({ id: "notion" }),
+    );
+  });
+
+  it("GET /v1/apps/:provider/authorize reaches the OAuth redirect handler", async () => {
+    const res = await app.request("/v1/apps/gitlab/authorize", asProject);
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({
+      error: "GitLab is not configured. Missing required credentials.",
+    });
+  });
+
+  it("GET /v1/apps/:provider/callback reaches the OAuth callback handler", async () => {
+    // Unauthenticated by design, and it redirects rather than answering JSON.
+    const res = await app.request("/v1/apps/gitlab/callback");
+    expect(res.status).toBe(302);
+    expect(res.headers.get("location")).toContain(
+      "/app-connect/gitlab?status=error&message=Missing%20state%20parameter",
+    );
+  });
+
+  it("POST /v1/apps/:provider/connect reaches the direct-connect handler", async () => {
+    const res = await app.request("/v1/apps/gitlab/connect", {
+      ...asProject,
+      method: "POST",
+    });
+    expect(res.status).toBe(400);
+    // Distinct from the config POST's own 400s ("does not support app
+    // configuration" / "Invalid request body").
+    expect(await res.json()).toEqual({
+      error: 'Provider "gitlab" uses OAuth flow, not direct credentials',
+    });
+  });
+
+  it("GET /v1/apps/:provider/permission-definition reaches the catalog handler", async () => {
+    const res = await app.request(
+      "/v1/apps/notion/permission-definition",
+      asProject,
+    );
+    expect(res.status).toBe(200);
+    expect((await res.json()) as { provider: string }).toEqual(
+      expect.objectContaining({ provider: "notion" }),
     );
   });
 });

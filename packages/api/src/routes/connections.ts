@@ -51,7 +51,22 @@ const findOwnedConnection = (own: ConnectionOwnership, connectionId: string) =>
       id: connectionId,
       OR: [
         ...(own.projectId ? [{ projectId: own.projectId }] : []),
-        ...(own.organizationId ? [{ organizationId: own.organizationId }] : []),
+        // `scope` is pinned here, not just `organizationId`. A project row
+        // carries a null `organizationId` today (`scopeCreate` writes exactly
+        // one key), so the id alone would be enough — but that is an invariant
+        // held in `connection-service`, and if anything ever denormalizes the
+        // org id onto a project row this arm would start matching it. The write
+        // would still be refused a layer down by `scopeOwnership`, yet the
+        // `isOrg === false` branch below would first call `requireProjectId` on
+        // a router that may have no project context. Fence it at the route.
+        ...(own.organizationId
+          ? [
+              {
+                organizationId: own.organizationId,
+                scope: "organization" as const,
+              },
+            ]
+          : []),
       ],
     },
     select: { scope: true, provider: true },

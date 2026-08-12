@@ -431,6 +431,23 @@ describe("PATCH / DELETE /v1/org/connections/:id", () => {
     expect(store.connections.map((c) => c.id)).toContain("c-foreign");
   });
 
+  it("404s a PROJECT row even if it carries a denormalized organizationId", async () => {
+    // `scopeCreate` writes exactly one scope key, so no row looks like this
+    // today — but the ownership lookup must not DEPEND on that invariant
+    // holding in `connection-service`. Its org arm pins `scope`, so a project
+    // row can never enter this surface no matter what its org column says.
+    store.connections.push(
+      connection("c-project-denorm", {
+        scope: "project",
+        projectId: PROJECT,
+        organizationId: ORG,
+      }),
+    );
+    expect((await rename("c-project-denorm", "x")).status).toBe(404);
+    expect((await disconnect("c-project-denorm")).status).toBe(404);
+    expect(store.connections.map((c) => c.id)).toContain("c-project-denorm");
+  });
+
   it("400s a blank label", async () => {
     expect((await rename("c-org", "   ")).status).toBe(400);
   });
@@ -504,5 +521,88 @@ describe("the PROJECT surface is unchanged", () => {
       },
     });
     expect(res.status).toBe(404);
+  });
+});
+
+// `/v1/apps/connections/:id` are legacy aliases kept for deployed CLIs. They
+// call `disconnectOwnedConnection`/`renameOwnedConnection` WITHOUT an ownership
+// argument, so they ride the default — `projectConnectionOwnership(auth)` —
+// which is the one mechanism the parameterization introduced that nothing else
+// exercises. Drop the default and these break while `/v1/connections/*` keeps
+// passing.
+describe("legacy /v1/apps/connections aliases", () => {
+  const asProject = (extra: Record<string, string> = {}) => ({
+    Authorization: `Bearer ${PROJECT_KEY}`,
+    "X-Project-Id": PROJECT,
+    ...extra,
+  });
+
+  it("PATCH renames the project's own row", async () => {
+    const res = await app.request("/v1/apps/connections/c-project", {
+      method: "PATCH",
+      headers: asProject({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ label: "renamed via alias" }),
+    });
+    expect(res.status).toBe(200);
+    expect(store.connections.find((c) => c.id === "c-project")!.label).toBe(
+      "renamed via alias",
+    );
+  });
+
+  it("PATCH still reaches the org's rows, as it always has", async () => {
+    const res = await app.request("/v1/apps/connections/c-org", {
+      method: "PATCH",
+      headers: asProject({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ label: "org via alias" }),
+    });
+    expect(res.status).toBe(200);
+    expect(store.connections.find((c) => c.id === "c-org")!.label).toBe(
+      "org via alias",
+    );
+    // An org row disconnected/renamed through the project alias still audits —
+    // and flushes — against the ORG, not the project.
+    expect(store.audits[0]).toEqual(
+      expect.objectContaining({
+        organizationId: ORG,
+        action: "update",
+        service: "app-connection",
+        metadata: { connectionId: "c-org", scope: "organization" },
+      }),
+    );
+  });
+
+  it("DELETE disconnects the project's own row and audits against the project", async () => {
+    const res = await app.request("/v1/apps/connections/c-project", {
+      method: "DELETE",
+      headers: asProject(),
+    });
+    expect(res.status).toBe(204);
+    expect(store.connections.map((c) => c.id)).not.toContain("c-project");
+    expect(store.audits[0]).toEqual(
+      expect.objectContaining({
+        projectId: PROJECT,
+        action: "disconnect",
+        service: "app-connection",
+        metadata: { connectionId: "c-project" },
+      }),
+    );
+  });
+
+  it("404s another org's row", async () => {
+    const res = await app.request("/v1/apps/connections/c-foreign", {
+      method: "DELETE",
+      headers: asProject(),
+    });
+    expect(res.status).toBe(404);
+    expect(store.connections.map((c) => c.id)).toContain("c-foreign");
+  });
+
+  it("400s a blank label", async () => {
+    const res = await app.request("/v1/apps/connections/c-project", {
+      method: "PATCH",
+      headers: asProject({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ label: "  " }),
+    });
+    expect(res.status).toBe(400);
   });
 });

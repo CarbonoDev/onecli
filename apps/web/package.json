@@ -14,7 +14,6 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@aws-amplify/adapter-nextjs": "^1.7.2",
     "@aws-sdk/client-kms": "^3.1014.0",
     "@aws-sdk/client-secrets-manager": "^3.1014.0",
     "@dnd-kit/core": "^6.3.1",
@@ -24,7 +23,6 @@
     "@onecli/db": "workspace:*",
     "@onecli/ui": "workspace:*",
     "@tanstack/react-query": "^5",
-    "aws-amplify": "^6.16.2",
     "hono": "^4.12.0",
     "input-otp": "^1.4.2",
     "ioredis": "^5.10.1",
@@ -39,7 +37,6 @@
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
     "sonner": "^2.0.7",
-    "stripe": "^20.4.0",
     "zod": "^4.3.6"
   },
   "devDependencies": {

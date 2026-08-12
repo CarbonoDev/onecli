@@ -7,7 +7,8 @@ export default function ApiKeysLoading() {
     <div className="flex flex-1 flex-col gap-4">
       <PageHeader
         title="API Keys"
-        description="Manage your API keys for OneCLI services."
+        // Must match page.tsx exactly, or the copy changes as the card loads.
+        description="OneCLI issues one personal API key per project. Copy it for the CLI, or regenerate it if it leaks."
       />
       <Card>
         <CardHeader>

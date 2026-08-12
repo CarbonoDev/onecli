@@ -86,7 +86,12 @@ export const ProfileForm = () => {
         </div>
         <div className="grid gap-2">
           <Label htmlFor="email">Email</Label>
-          <Input id="email" value={email} disabled />
+          {/* readOnly, not disabled: the Input base carries
+              `disabled:opacity-50`, which rendered a real address at half
+              opacity — indistinguishable from the placeholder above, so the
+              field read as empty. readOnly keeps it non-editable while
+              staying focusable, selectable and copyable. */}
+          <Input id="email" value={email} readOnly className="bg-muted" />
           <p className="text-muted-foreground text-xs">
             Email is managed by your Google account.
           </p>

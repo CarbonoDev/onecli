@@ -11,7 +11,10 @@ export default function ApiKeysPage() {
     <div className="flex flex-1 flex-col gap-4">
       <PageHeader
         title="API Keys"
-        description="Manage your API keys for OneCLI services."
+        // One key per (user, project) is the product: `ensureApiKey` mints
+        // exactly one and Regenerate rotates it in place. "Manage your API
+        // keys" promised a list that does not exist.
+        description="OneCLI issues one personal API key per project. Copy it for the CLI, or regenerate it if it leaks."
       />
       <ApiKeyCard />
     </div>

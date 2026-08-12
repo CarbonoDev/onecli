@@ -31,12 +31,13 @@ import { CAPS } from "../lib/env";
  * Whoever a project is attributed to — its creator, so the projects grid can
  * render `Owned by <name>`.
  *
- * Every field is nullable and that is not defensiveness. `createdByUserId` and
- * `createdByUserEmail` are both OPTIONAL columns — every creation path sets
- * them today, but rows predating the columns need not — and `createdByUser` is
- * an optional relation, so a deleted user leaves the id and the DENORMALIZED
- * email behind with no row to join. That email is exactly why the column
- * exists: it is what the client renders once the name is gone.
+ * Every field is nullable and that is not defensiveness — it is the schema.
+ * `created_by_user_id` is `ON DELETE SET NULL`, so DELETING THE CREATOR nulls
+ * the id and drops the relation while leaving `createdByUserEmail` behind.
+ * That denormalized column is exactly why it exists: `{ id: null, name: null,
+ * email: "…" }` is the shape a departed owner takes, and the email is what the
+ * card renders once the name is gone. (A dangling id with no user row is NOT a
+ * reachable state — the FK forbids it.)
  *
  * `owner` itself is null only when the project records no creator AT ALL. The
  * client rule is therefore: render `name`, else `email`, else no owner line.
@@ -59,16 +60,21 @@ export interface ProjectRow {
    * This project's own resource inventory: its secrets PLUS its app
    * connections, as one number ("14 resources" on the card).
    *
-   * Deliberately NOT `getResourceCounts` (counts-service.ts). That one serves
-   * a single project's dashboard tiles and folds in the ORG-scoped secrets and
-   * connections every project shares. On a comparison grid that would add the
-   * same constant to every card, so an empty project and a stocked one would
-   * read alike. A card counts only rows that carry its own `projectId`.
+   * OWN means rows carrying this project's `projectId` and nothing else. It
+   * excludes the ORG-scoped secrets and connections every project inherits,
+   * because on a comparison grid those add the SAME constant to every card —
+   * an empty project and a stocked one would read alike.
    *
-   * No status or type filter, deliberately: a project-scoped `listSecrets` /
-   * `listConnections` filters on `projectId` alone (see `scopeWhere`), so this
-   * is exactly the number of rows the user finds after clicking through. A
-   * card that says 14 over a page that lists 12 is worse than no number.
+   * Three numbers in this product legitimately differ, and a reader debugging
+   * "the card says 14 but I count 17" needs all three:
+   *
+   *  · HERE (the card) — own rows only, no status or type filter.
+   *  · The Secrets / Connections PAGES — the routes pass both ids, so
+   *    `scopeWhere` takes its `OR` branch and lists own PLUS inherited
+   *    org-scoped rows. The pages already separate the two into own and
+   *    inherited sections, which is the vocabulary this count borrows.
+   *  · The overview TILES (`getResourceCounts`) — inherited rows folded in
+   *    AND connections filtered to `status: "connected"`, split by kind.
    *
    * Agents are NOT included — the grid renders them as their own noun.
    */
@@ -113,42 +119,29 @@ const projectSelect = {
  * rename), so all four endpoints return the one `ProjectRow` shape and the web
  * client's single `Project` type stays honest about every one of them.
  *
- * Cost is CONSTANT in the number of projects — verified against Postgres, not
- * assumed. The list costs exactly two statements however many cards it feeds:
- *
- *  1. the rows, with all three `_count`s as GROUPED `LEFT JOIN`s in the same
- *     SELECT (`GROUP BY project_id` per child table, joined on `projects.id`);
- *  2. one batched `users WHERE id IN (…)` for the owner names.
- *
- * The second statement is the price of a NAME: `createdByUserEmail` alone
- * needs no join, but the card reads `Owned by <name>`. It is one query, not
- * one per project — dropping the relation to save it would cost the name.
+ * The counts are NOT here. Prisma's `_count` would fold them into this same
+ * statement, which reads like the cheap option and is not: it compiles to
+ * `LEFT JOIN (SELECT project_id, COUNT(*) … GROUP BY project_id)` with no
+ * predicate, so Postgres seq-scans and hash-aggregates the WHOLE of `agents`,
+ * `secrets` and `app_connections` — every organization's rows — before joining
+ * away all but the caller's. The org filter cannot be pushed through a grouped
+ * subquery. `countsByProject` below pays three extra round trips to get an
+ * index scan instead.
  */
 const projectRowSelect = {
   ...projectSelect,
   createdByUserEmail: true,
   createdByUser: { select: { name: true, email: true } },
-  _count: { select: { agents: true, secrets: true, appConnections: true } },
 } as const;
 
-const toOwner = (row: {
-  createdByUserId: string | null;
-  createdByUserEmail: string | null;
-  createdByUser: { name: string | null; email: string } | null;
-}): ProjectOwner | null => {
-  // Nothing recorded — an unattributed project (a seeded default), not a
-  // deleted user. The client shows no owner line rather than "Owned by null".
-  if (!row.createdByUserId && !row.createdByUserEmail) return null;
-  return {
-    id: row.createdByUserId,
-    name: row.createdByUser?.name ?? null,
-    // Live email first (a user may have changed it since); the stored one is
-    // the survivor when the relation is gone.
-    email: row.createdByUser?.email ?? row.createdByUserEmail,
-  };
-};
+/** A project's own inventory, as the card splits it. */
+interface ProjectCounts {
+  agents: number;
+  resources: number;
+}
 
-const toProjectRow = (row: {
+/** The shape `projectRowSelect` yields — the counts arrive separately. */
+interface ProjectRowSource {
   id: string;
   name: string | null;
   slug: string | null;
@@ -156,16 +149,111 @@ const toProjectRow = (row: {
   createdByUserId: string | null;
   createdByUserEmail: string | null;
   createdByUser: { name: string | null; email: string } | null;
-  _count: { agents: number; secrets: number; appConnections: number };
-}): ProjectRow => ({
+}
+
+/**
+ * Inventory for exactly `projectIds`, as THREE grouped counts.
+ *
+ * Three statements, not one per project — the count is grouped, so it stays
+ * constant in the number of cards.
+ *
+ * The point of doing it here rather than as a `_count` on the select is the
+ * PREDICATE. Each statement carries `project_id IN (…)`, so the planner can
+ * reach it through the `project_id` index on every one of the three tables
+ * (verified with EXPLAIN: `Bitmap Index Scan` on `agents_project_id_*`,
+ * `secrets_project_id_idx`, `app_connections_project_id_provider_idx`). On a
+ * small table it will still choose a seq scan, and that is fine — the
+ * difference is that an index is a CANDIDATE at all. The `_count` form emits
+ * `WHERE 1=1` inside a grouped subquery, which no index can serve at any size.
+ *
+ * A project absent from a result simply owns none of that kind; the caller
+ * reads a missing entry as zero. Org-scoped rows carry a NULL `project_id` and
+ * can never match the `IN`, which is what keeps inherited resources out of the
+ * card by construction rather than by filtering afterwards.
+ */
+const countsByProject = async (
+  projectIds: string[],
+): Promise<Map<string, ProjectCounts>> => {
+  const counts = new Map<string, ProjectCounts>();
+  // No projects, no statements: an empty `IN ()` is three pointless round
+  // trips on the common "member with no bindings" path.
+  if (projectIds.length === 0) return counts;
+
+  const where = { projectId: { in: projectIds } };
+  const [agents, secrets, connections] = await Promise.all([
+    db.agent.groupBy({ by: ["projectId"], where, _count: { _all: true } }),
+    db.secret.groupBy({ by: ["projectId"], where, _count: { _all: true } }),
+    db.appConnection.groupBy({
+      by: ["projectId"],
+      where,
+      _count: { _all: true },
+    }),
+  ]);
+
+  const tally = (
+    rows: { projectId: string | null; _count: { _all: number } }[],
+    key: keyof ProjectCounts,
+  ) => {
+    for (const row of rows) {
+      if (!row.projectId) continue;
+      const entry = counts.get(row.projectId) ?? { agents: 0, resources: 0 };
+      entry[key] += row._count._all;
+      counts.set(row.projectId, entry);
+    }
+  };
+
+  tally(agents, "agents");
+  // Both child kinds land on the SAME number — "resources" is their sum.
+  tally(secrets, "resources");
+  tally(connections, "resources");
+  return counts;
+};
+
+const toOwner = (row: ProjectRowSource): ProjectOwner | null => {
+  // Nothing recorded at all — an unattributed project, not a departed owner.
+  // The client shows no owner line rather than "Owned by null".
+  if (!row.createdByUserId && !row.createdByUserEmail) return null;
+  return {
+    id: row.createdByUserId,
+    name: row.createdByUser?.name ?? null,
+    // Live email first (a user may have changed it since); the stored one is
+    // the survivor once the relation is gone.
+    email: row.createdByUser?.email ?? row.createdByUserEmail,
+  };
+};
+
+const toProjectRow = (
+  row: ProjectRowSource,
+  counts: ProjectCounts,
+): ProjectRow => ({
   id: row.id,
   name: row.name,
   slug: row.slug,
   createdAt: row.createdAt.toISOString(),
-  agentCount: row._count.agents,
-  resourceCount: row._count.secrets + row._count.appConnections,
+  agentCount: counts.agents,
+  resourceCount: counts.resources,
   owner: toOwner(row),
 });
+
+/** N rows plus their inventory, in three grouped counts however large N is. */
+const toProjectRows = async (
+  rows: ProjectRowSource[],
+): Promise<ProjectRow[]> => {
+  const counts = await countsByProject(rows.map((row) => row.id));
+  return rows.map((row) =>
+    toProjectRow(row, counts.get(row.id) ?? { agents: 0, resources: 0 }),
+  );
+};
+
+/** The single-row twin (get / create / rename), same shape, same counts. */
+const toSingleProjectRow = async (row: ProjectRowSource): Promise<ProjectRow> =>
+  toProjectRow(
+    row,
+    (await countsByProject([row.id])).get(row.id) ?? {
+      agents: 0,
+      resources: 0,
+    },
+  );
 
 /**
  * Resolve a project WITHIN the caller's org. A cross-org (or unknown) id reads
@@ -268,17 +356,17 @@ export const getProject = async (
     select: projectRowSelect,
   });
   if (!row) throw new ServiceError("NOT_FOUND", "Project not found.");
-  return toProjectRow(row);
+  return toSingleProjectRow(row);
 };
 
 const listAllProjects = async (organizationId: string): Promise<ProjectRow[]> =>
-  (
+  toProjectRows(
     await db.project.findMany({
       where: { organizationId },
       select: projectRowSelect,
       orderBy: [{ createdAt: "asc" }, { id: "asc" }],
-    })
-  ).map(toProjectRow);
+    }),
+  );
 
 /**
  * Every project in `organizationId` the caller may USE, oldest first.
@@ -318,7 +406,7 @@ export const listProjects = async (
     return listAllProjects(organizationId);
   }
 
-  return (
+  return toProjectRows(
     await db.project.findMany({
       where: {
         organizationId,
@@ -330,8 +418,8 @@ export const listProjects = async (
       },
       select: projectRowSelect,
       orderBy: [{ createdAt: "asc" }, { id: "asc" }],
-    })
-  ).map(toProjectRow);
+    }),
+  );
 };
 
 /** Prisma's unique-constraint code, same test as `org-group-service.ts`. */
@@ -451,7 +539,7 @@ export const createProject = async (
     );
   }
 
-  return toProjectRow(row);
+  return toSingleProjectRow(row);
 };
 
 /**
@@ -481,7 +569,7 @@ export const renameProject = async (
     select: projectRowSelect,
   });
   if (!row) throw new ServiceError("NOT_FOUND", "Project not found.");
-  return toProjectRow(row);
+  return toSingleProjectRow(row);
 };
 
 /**

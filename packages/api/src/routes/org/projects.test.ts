@@ -349,20 +349,16 @@ vi.mock("@onecli/db", () => {
     createdByUserId?: boolean;
     createdByUserEmail?: boolean;
     createdByUser?: { select: { name?: boolean; email?: boolean } };
-    _count?: {
-      select: { agents?: boolean; secrets?: boolean; appConnections?: boolean };
-    };
   }
 
   /**
    * Project a project row. Two behaviours are load-bearing:
    *
-   *  · `createdByUser` is an OPTIONAL relation — a dangling `createdByUserId`
-   *    (deleted user) reads as null, it does not throw. That is the case the
-   *    owner fallback exists for.
-   *  · `_count` counts only rows carrying THIS project's id, which is what
-   *    makes the card numbers comparable across projects — org-scoped rows
-   *    (projectId null) are never folded in.
+   * `createdByUser` is an OPTIONAL relation, and `created_by_user_id` is
+   * `ON DELETE SET NULL`: deleting the creator nulls the id, so the join finds
+   * nothing and reads as null rather than throwing. That is the case the owner
+   * email fallback exists for. Counts do NOT come from here — see
+   * `countsByProject` and the `groupBy` on each child delegate.
    */
   const pickProject = (row: ProjectRow, select?: ProjectSelect) => {
     if (!select) return { ...row };
@@ -384,16 +380,6 @@ vi.mock("@onecli/db", () => {
         ? { name: user.name, email: user.email }
         : null;
     }
-    if (select._count) {
-      const owned = (rows: ChildRow[]) =>
-        rows.filter((r) => r.projectId === row.id).length;
-      const counts: Record<string, number> = {};
-      if (select._count.select.agents) counts.agents = owned(store.agents);
-      if (select._count.select.secrets) counts.secrets = owned(store.secrets);
-      if (select._count.select.appConnections)
-        counts.appConnections = owned(store.appConnections);
-      picked._count = counts;
-    }
     return picked;
   };
 
@@ -404,6 +390,30 @@ vi.mock("@onecli/db", () => {
   ) => ({
     count: async ({ where }: { where: { projectId: string } }) =>
       read().filter((row) => row.projectId === where.projectId).length,
+    /**
+     * The grouped count `countsByProject` issues. Modelled faithfully in the
+     * two ways that matter: a project owning none of this kind is ABSENT from
+     * the result (never a zero row), and an org-scoped row (projectId null)
+     * can never satisfy the `IN`, so it is invisible to every card.
+     */
+    groupBy: async ({
+      where,
+    }: {
+      by: readonly ["projectId"];
+      where: { projectId: { in: string[] } };
+      _count: { _all: true };
+    }) => {
+      const wanted = new Set(where.projectId.in);
+      const tally = new Map<string, number>();
+      for (const row of read()) {
+        if (row.projectId === null || !wanted.has(row.projectId)) continue;
+        tally.set(row.projectId, (tally.get(row.projectId) ?? 0) + 1);
+      }
+      return [...tally].map(([projectId, n]) => ({
+        projectId,
+        _count: { _all: n },
+      }));
+    },
     deleteMany: async ({ where }: { where: { projectId: string } }) => {
       const before = read().length;
       write(read().filter((row) => row.projectId !== where.projectId));
@@ -1244,23 +1254,27 @@ describe("GET /projects (list)", () => {
     ]);
   });
 
-  it("falls back to the STORED email when the creator's user row is gone", async () => {
-    // `createdByUser` is an optional relation: a deleted user leaves the id
-    // and the denormalized email behind. The card must still say who, so
-    // `owner` stays non-null with a null name.
+  it("falls back to the STORED email once the creator is DELETED", async () => {
+    // The exact shape a departed owner takes, and the reason the
+    // denormalized column is read at all. `created_by_user_id` is
+    // `ON DELETE SET NULL`, so deleting the user nulls the ID TOO — there is
+    // no dangling-id state to test, and `owner` must survive on the stored
+    // email alone.
+    store.users = store.users.filter((u) => u.id !== OWNER);
     const row = projectRow("proj-2");
-    if (row) row.createdByUserId = "user-deleted";
+    if (row) row.createdByUserId = null; // the FK's SET NULL
+
     const [, beta] = (await (await list()).json()) as ProjectBody[];
     expect(beta?.owner).toEqual({
-      id: "user-deleted",
+      id: null,
       name: null,
       email: "owner@example.com",
     });
   });
 
   it("reports a null owner for a project that records no creator at all", async () => {
-    // The seeded-default shape (bootstrapOrganization predates a human
-    // actor): both columns null, so there is nothing to attribute the card to.
+    // Both columns null — nothing to attribute the card to, so the client
+    // renders no owner line rather than an empty one.
     const row = projectRow("proj-4");
     if (row) {
       row.createdByUserId = null;
@@ -1286,25 +1300,51 @@ describe("GET /projects (list)", () => {
     });
   });
 
-  it("stays ONE query for the whole list — no per-project count round trip", async () => {
-    // The N+1 guard, and the reason `_count` is in the select rather than a
-    // loop: with four projects on the wire, the counts must cost zero extra
-    // reads, not eight.
-    const findMany = vi.spyOn(db.project, "findMany");
-    const counts = [
-      vi.spyOn(db.agent, "count"),
-      vi.spyOn(db.secret, "count"),
-      vi.spyOn(db.appConnection, "count"),
-    ];
+  it("costs the same number of reads for 4 projects as for 24", async () => {
+    // The N+1 guard, written so it CAN fail: it compares two different list
+    // sizes rather than asserting a constant the current source trivially
+    // satisfies. A per-project count loop passes the 4-project case and fails
+    // the 24-project one.
+    //
+    // Scope note: this pins the shape of the code (grouped counts, not a
+    // loop), which is all a hand-rolled db mock can honestly witness — it
+    // issues no SQL. That the grouped counts are also index-scoped in
+    // Postgres was verified separately with EXPLAIN; see `countsByProject`.
+    const reads = async () => {
+      const spies = [
+        vi.spyOn(db.project, "findMany"),
+        vi.spyOn(db.agent, "groupBy"),
+        vi.spyOn(db.secret, "groupBy"),
+        vi.spyOn(db.appConnection, "groupBy"),
+        vi.spyOn(db.agent, "count"),
+        vi.spyOn(db.secret, "count"),
+        vi.spyOn(db.appConnection, "count"),
+      ];
+      await list();
+      const total = spies.reduce((n, spy) => n + spy.mock.calls.length, 0);
+      for (const spy of spies) spy.mockRestore();
+      return total;
+    };
 
-    const rows = (await (await list()).json()) as ProjectBody[];
+    const forFour = await reads();
 
-    expect(rows).toHaveLength(4);
-    expect(findMany).toHaveBeenCalledTimes(1);
-    for (const spy of counts) expect(spy).not.toHaveBeenCalled();
+    for (let n = 0; n < 20; n++) {
+      store.projects.push({
+        id: `many-${n}`,
+        organizationId: ORG,
+        name: `Many ${n}`,
+        slug: `many-${n}`,
+        createdByUserId: ADMIN,
+        createdByUserEmail: "admin@example.com",
+        createdAt: at(200 + n),
+      });
+      store.agents.push({ id: `ag-many-${n}`, projectId: `many-${n}` });
+    }
 
-    findMany.mockRestore();
-    for (const spy of counts) spy.mockRestore();
+    expect(await listIds()).toHaveLength(24);
+    // 1 list + 3 grouped counts, at both sizes.
+    expect(forFour).toBe(4);
+    expect(await reads()).toBe(forFour);
   });
 
   it("agrees with GET /:projectId — everything listed is readable, and vice versa", async () => {

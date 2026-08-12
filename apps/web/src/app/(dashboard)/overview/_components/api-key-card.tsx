@@ -26,6 +26,7 @@ import {
 } from "@onecli/ui/components/alert-dialog";
 import { useCopyToClipboard } from "@/hooks/use-copy-to-clipboard";
 import { queryKeys } from "@/lib/api/keys";
+import { maskSecret } from "@/lib/mask-secret";
 import { getApiKey, regenerateApiKey } from "@/lib/actions/api-key";
 
 export const ApiKeyCard = () => {
@@ -44,9 +45,7 @@ export const ApiKeyCard = () => {
     queryFn: () => getApiKey().then((result) => result.apiKey ?? ""),
   });
 
-  const truncatedKey = apiKey
-    ? `${apiKey.slice(0, 6)}${"•".repeat(12)}${apiKey.slice(-4)}`
-    : "";
+  const truncatedKey = apiKey ? maskSecret(apiKey) : "";
 
   const handleRegenerate = async () => {
     setRegenerating(true);

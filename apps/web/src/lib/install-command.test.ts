@@ -3,8 +3,10 @@ import { describe, expect, it } from "vitest";
 import {
   CODING_TOOLS,
   buildCliInstallCommand,
+  buildManualInstallCommand,
   buildRunCommand,
 } from "./install-command";
+import { maskSecret } from "./mask-secret";
 
 const PROD = {
   apiUrl: "https://api.onecli.sh",
@@ -54,6 +56,83 @@ describe("buildCliInstallCommand", () => {
     ).toBe(
       'curl -fsSL "https://api.onecli.sh/v1/install/cli?key=oc_key&agent=writer-bot" | sh',
     );
+  });
+});
+
+describe("buildManualInstallCommand", () => {
+  it("no context yet — placeholder key, no api-host line", () => {
+    expect(buildManualInstallCommand()).toBe(
+      [
+        "curl -fsSL onecli.sh/cli/install | sh",
+        "onecli auth login --api-key oc_...",
+      ].join("\n"),
+    );
+  });
+
+  it("with context — pins the api host and signs in with the real key", () => {
+    expect(buildManualInstallCommand(DEV)).toBe(
+      [
+        "curl -fsSL onecli.sh/cli/install | sh",
+        "onecli config set api-host https://api.dev.onecli.sh",
+        "onecli auth login --api-key oc_key",
+      ].join("\n"),
+    );
+  });
+
+  it("a pinned agent adds the config line", () => {
+    expect(
+      buildManualInstallCommand(DEV, { agentIdentifier: "writer-bot" }),
+    ).toBe(
+      [
+        "curl -fsSL onecli.sh/cli/install | sh",
+        "onecli config set api-host https://api.dev.onecli.sh",
+        "onecli auth login --api-key oc_key",
+        "onecli config set agent writer-bot",
+      ].join("\n"),
+    );
+  });
+});
+
+// D1: step 2 renders a masked twin of whichever command it shows. Neither
+// builder may leak the raw key once handed a masked one — the display path
+// must never be able to put a full key on screen.
+describe("masked-key output leaks nothing", () => {
+  const REAL_KEY = `oc_${"abcdef01".repeat(8)}`;
+  const RAW_KEY_PATTERN = /oc_[0-9a-f]{64}/;
+  const maskedCtx = { ...PROD, apiKey: maskSecret(REAL_KEY) };
+
+  it("the real-key command does contain a raw key (the thing we mask)", () => {
+    expect(buildCliInstallCommand({ ...PROD, apiKey: REAL_KEY })).toMatch(
+      RAW_KEY_PATTERN,
+    );
+    expect(buildManualInstallCommand({ ...PROD, apiKey: REAL_KEY })).toMatch(
+      RAW_KEY_PATTERN,
+    );
+  });
+
+  it("buildCliInstallCommand emits no raw key when masked", () => {
+    const masked = buildCliInstallCommand(maskedCtx, { tool: "claude-code" });
+    expect(masked).not.toMatch(RAW_KEY_PATTERN);
+    expect(masked).not.toContain(REAL_KEY);
+    expect(masked).toContain("•");
+  });
+
+  it("buildManualInstallCommand emits no raw key when masked", () => {
+    const masked = buildManualInstallCommand(maskedCtx, {
+      agentIdentifier: "writer-bot",
+    });
+    expect(masked).not.toMatch(RAW_KEY_PATTERN);
+    expect(masked).not.toContain(REAL_KEY);
+    expect(masked).toContain("•");
+  });
+
+  it("masking only replaces the key — the command shape is byte-identical", () => {
+    const real = buildCliInstallCommand(
+      { ...PROD, apiKey: REAL_KEY },
+      { tool: "claude-code" },
+    );
+    const masked = buildCliInstallCommand(maskedCtx, { tool: "claude-code" });
+    expect(real.replaceAll(REAL_KEY, maskSecret(REAL_KEY))).toBe(masked);
   });
 });
 

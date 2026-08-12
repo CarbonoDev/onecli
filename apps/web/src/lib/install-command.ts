@@ -84,6 +84,25 @@ export const buildCliInstallCommand = (
   return `curl -fsSL "${ctx.apiUrl}/v1/install/cli?${params.join("&")}" | sh`;
 };
 
+// Shown while the install info is still loading, so the manual block keeps its
+// shape instead of jumping a line when the real key arrives.
+export const MANUAL_KEY_PLACEHOLDER = "oc_...";
+
+// Self-host / OSS: the one-liner endpoint is cloud-only, so the same setup is
+// spelled out manually. `ctx` is undefined until the install info resolves.
+export const buildManualInstallCommand = (
+  ctx?: InstallCommandContext,
+  options: { agentIdentifier?: string } = {},
+): string =>
+  [
+    "curl -fsSL onecli.sh/cli/install | sh",
+    ...(ctx ? [`onecli config set api-host ${ctx.apiUrl}`] : []),
+    `onecli auth login --api-key ${ctx?.apiKey ?? MANUAL_KEY_PLACEHOLDER}`,
+    ...(options.agentIdentifier
+      ? [`onecli config set agent ${options.agentIdentifier}`]
+      : []),
+  ].join("\n");
+
 export const buildRunCommand = (
   runAlias: string,
   agentIdentifier?: string,

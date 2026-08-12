@@ -130,12 +130,6 @@ export const getOrganizationUsage = async (
   // demands an explicit `orderBy` and widens `_count` to `true | {...}`).
   // Assigning first keeps the precise per-call type; `$transaction` then just
   // sequences the already-typed promises.
-  // The two queries are hoisted into consts rather than written inline in the
-  // array: Prisma's `groupBy` return type is inferred from the argument
-  // literal, and inside `$transaction([...])` that inference collapses (it
-  // demands an explicit `orderBy` and widens `_count` to `true | {...}`).
-  // Assigning first keeps the precise per-call type; `$transaction` then just
-  // sequences the already-typed promises.
   const totalsQuery = db.requestLog.groupBy({
     by: ["agentId"],
     where,

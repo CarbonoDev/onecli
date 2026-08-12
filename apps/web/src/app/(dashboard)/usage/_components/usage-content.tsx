@@ -39,6 +39,14 @@ export const UsageContent = () => {
     // just the 403 a project-scoped credential earns. Naming the auth cause
     // unconditionally would misdiagnose a transport blip as a permissions
     // problem, so only a real 403 gets the auth wording (and the lock).
+    //
+    // The route can also answer 401, which falls to the neutral branch. That is
+    // deliberate and effectively unreachable: `(dashboard)/layout.tsx` redirects
+    // to `/auth/login` whenever the session isn't authenticated, so an expired
+    // session never sits on this page. The residual case is a valid session
+    // naming an org the user isn't a member of, which the org switcher cannot
+    // normally produce — and "reload to try again" is the right advice there
+    // anyway, since the switcher's next read repairs the selection.
     const forbidden =
       usage.error instanceof ApiError && usage.error.status === 403;
     return forbidden ? (

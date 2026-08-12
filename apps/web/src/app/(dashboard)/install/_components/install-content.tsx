@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { PageHeader } from "@dashboard/page-header";
 import { TryDemoCommand } from "@/app/(dashboard)/_components/try-demo-command";
@@ -10,6 +11,7 @@ import { IS_CLOUD } from "@/lib/env";
 import {
   CODING_TOOLS,
   buildCliInstallCommand,
+  buildManualInstallCommand,
   buildRunCommand,
 } from "@/lib/install-command";
 import { AgentContextSelect } from "./agent-context-select";
@@ -80,14 +82,15 @@ export const InstallContent = () => {
 
   // Self-host / OSS: the one-liner endpoint is cloud-only, so spell the same
   // setup out manually (with this project's real key once loaded).
-  const manualCommand = [
-    "curl -fsSL onecli.sh/cli/install | sh",
-    ...(installInfo
-      ? [`onecli config set api-host ${installInfo.apiUrl}`]
-      : []),
-    `onecli auth login --api-key ${installInfo?.apiKey ?? "oc_..."}`,
-    ...(pinIdentifier ? [`onecli config set agent ${pinIdentifier}`] : []),
-  ].join("\n");
+  const manualCommand = buildManualInstallCommand(installInfo, {
+    agentIdentifier: pinIdentifier,
+  });
+
+  // Both branches of step 2 embed the project API key verbatim, so the block
+  // renders masked until the user reveals it. Undefined — never "" — while the
+  // key is still loading: the command then shows the `oc_...` placeholder and
+  // there is nothing to mask.
+  const installSecret = installInfo?.apiKey || undefined;
 
   return (
     <>
@@ -126,7 +129,22 @@ export const InstallContent = () => {
                 : "Install the CLI, point it at this instance, and sign in."
             }
           >
-            <TryDemoCommand command={installCommand ?? manualCommand} />
+            <TryDemoCommand
+              command={installCommand ?? manualCommand}
+              secret={installSecret}
+            />
+            {/* Only once there IS a key: while the query is pending the block
+                shows the `oc_...` placeholder, and warning about a key that
+                isn't on screen yet is just noise. */}
+            {installSecret && (
+              <p className="text-muted-foreground mt-2 text-xs">
+                This command carries your project API key. Rotate it in{" "}
+                <Link href="/settings/api-keys" className="underline">
+                  Settings → API keys
+                </Link>{" "}
+                if it is ever shared.
+              </p>
+            )}
             {installCommand && pinIdentifier && (
               <p className="text-muted-foreground mt-2 text-xs">
                 Already have the CLI?{" "}

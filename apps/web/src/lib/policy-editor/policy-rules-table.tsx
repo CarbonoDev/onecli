@@ -59,6 +59,11 @@ export interface PolicyRulesTableProps {
   editable: boolean;
   identityName: (id: string) => string;
   emptyLabel: string;
+  /** `rules` is the result of an active search. Decides which empty state is
+   * honest when a Default row is pinned below: "no rules yet" would be a lie,
+   * but "no rules match …" is still true and still needed — without it a
+   * search that matches nothing looks like it silently failed. */
+  filtered?: boolean;
   /** The scope's terminal Default Rule, rendered as the section's last row. */
   defaultRule: PolicyRuleV2 | null;
   scope: PageScope;
@@ -98,6 +103,7 @@ export const PolicyRulesTable = ({
   editable,
   identityName,
   emptyLabel,
+  filtered = false,
   defaultRule,
   scope,
   diffState,
@@ -258,7 +264,7 @@ export const PolicyRulesTable = ({
                   );
                 })}
               </SortableContext>
-              {rules.length === 0 && (
+              {rules.length === 0 && (filtered || !defaultRule) && (
                 <TableRow className="hover:bg-transparent">
                   <TableCell
                     colSpan={COLS}

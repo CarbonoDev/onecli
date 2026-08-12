@@ -54,6 +54,10 @@ export const ToolPills = ({ value, onChange }: ToolPillsProps) => {
               width={16}
               height={16}
               className="rounded-[3px]"
+              // The tool icons are SVGs, which the Next image optimizer
+              // rejects with a 400 — that is what the fallback below was
+              // masking. Serve them straight from `public/`.
+              unoptimized
               onError={() =>
                 setIconErrors((prev) => new Set([...prev, tool.id]))
               }

@@ -201,21 +201,22 @@ model Project {
   createdAt          DateTime @default(now()) @map("created_at")
   updatedAt          DateTime @updatedAt @map("updated_at")
 
-  createdByUser    User?             @relation("ProjectCreator", fields: [createdByUserId], references: [id])
-  organization     Organization      @relation(fields: [organizationId], references: [id])
-  apiKeys          ApiKey[]
-  agents           Agent[]
-  secrets          Secret[]
-  policyRules      PolicyRule[]
-  policyRulesV2    PolicyRuleV2[]
-  auditLogs        AuditLog[]
-  vaultConnections VaultConnection[]
-  onboardingSurvey OnboardingSurvey?
-  appConnections   AppConnection[]
-  appConfigs       AppConfig[]
-  budgets          Budget[] // cloud-only: per-secret spend budgets for this project (inert in OSS)
-  accessBindings   ProjectAccess[]
-  invitations      Invitation[]
+  createdByUser           User?                           @relation("ProjectCreator", fields: [createdByUserId], references: [id])
+  organization            Organization                    @relation(fields: [organizationId], references: [id])
+  apiKeys                 ApiKey[]
+  agents                  Agent[]
+  secrets                 Secret[]
+  policyRules             PolicyRule[]
+  policyRulesV2           PolicyRuleV2[]
+  auditLogs               AuditLog[]
+  vaultConnections        VaultConnection[]
+  onboardingSurvey        OnboardingSurvey?
+  appConnections          AppConnection[]
+  appConfigs              AppConfig[]
+  budgets                 Budget[] // cloud-only: per-secret spend budgets for this project (inert in OSS)
+  accessBindings          ProjectAccess[]
+  invitations             Invitation[]
+  agentDefaultConnections ProjectAgentDefaultConnection[]
 
   @@unique([organizationId, slug])
   @@index([organizationId])
@@ -242,29 +243,30 @@ model User {
   createdAt             DateTime  @default(now()) @map("created_at")
   updatedAt             DateTime  @updatedAt @map("updated_at")
 
-  organizationMemberships       OrganizationMember[]
-  sentInvitations               Invitation[]                  @relation("InvitationCreator")
-  apiKeys                       ApiKey[]
-  auditLogs                     AuditLog[]
-  createdProjects               Project[]                     @relation("ProjectCreator")
-  onboardingSurveys             OnboardingSurvey[]
-  createdAgentSecrets           AgentSecret[]                 @relation("AgentSecretCreator")
-  updatedAgentSecrets           AgentSecret[]                 @relation("AgentSecretUpdater")
-  provisionedAs                 UserProvision?                @relation("ProvisionedUser")
-  createdProvisions             UserProvision[]               @relation("ProvisionCreator")
-  partnerMemberships            PartnerMember[]
-  partnerPlaceholderClaim       PartnerClaim?                 @relation("PartnerPlaceholder")
-  createdDomains                OrganizationDomain[]          @relation("OrganizationDomainCreator")
-  createdSsoConnections         OrganizationSsoConnection[]   @relation("OrganizationSsoConnectionCreator")
-  createdScimTokens             OrganizationScimToken[]       @relation("OrganizationScimTokenCreator")
-  groupMemberships              GroupMember[]                 @relation("GroupMemberUser")
-  createdGroupMembers           GroupMember[]                 @relation("GroupMemberCreator")
-  projectAccess                 ProjectAccess[]               @relation("ProjectAccessUser")
-  createdProjectAccess          ProjectAccess[]               @relation("ProjectAccessCreator")
-  createdPolicyRulesV2          PolicyRuleV2[]                @relation("PolicyRuleV2Creator")
-  policyRuleIdentities          PolicyRuleIdentity[]          @relation("PolicyRuleIdentityUser")
-  appAvailabilityRuleIdentities AppAvailabilityRuleIdentity[] @relation("AppAvailabilityRuleIdentityUser")
-  createdAppAvailabilityRules   AppAvailabilityRule[]         @relation("AppAvailabilityRuleCreator")
+  organizationMemberships        OrganizationMember[]
+  sentInvitations                Invitation[]                    @relation("InvitationCreator")
+  apiKeys                        ApiKey[]
+  auditLogs                      AuditLog[]
+  createdProjects                Project[]                       @relation("ProjectCreator")
+  onboardingSurveys              OnboardingSurvey[]
+  createdAgentSecrets            AgentSecret[]                   @relation("AgentSecretCreator")
+  updatedAgentSecrets            AgentSecret[]                   @relation("AgentSecretUpdater")
+  provisionedAs                  UserProvision?                  @relation("ProvisionedUser")
+  createdProvisions              UserProvision[]                 @relation("ProvisionCreator")
+  partnerMemberships             PartnerMember[]
+  partnerPlaceholderClaim        PartnerClaim?                   @relation("PartnerPlaceholder")
+  createdDomains                 OrganizationDomain[]            @relation("OrganizationDomainCreator")
+  createdSsoConnections          OrganizationSsoConnection[]     @relation("OrganizationSsoConnectionCreator")
+  createdScimTokens              OrganizationScimToken[]         @relation("OrganizationScimTokenCreator")
+  groupMemberships               GroupMember[]                   @relation("GroupMemberUser")
+  createdGroupMembers            GroupMember[]                   @relation("GroupMemberCreator")
+  projectAccess                  ProjectAccess[]                 @relation("ProjectAccessUser")
+  createdProjectAccess           ProjectAccess[]                 @relation("ProjectAccessCreator")
+  createdPolicyRulesV2           PolicyRuleV2[]                  @relation("PolicyRuleV2Creator")
+  policyRuleIdentities           PolicyRuleIdentity[]            @relation("PolicyRuleIdentityUser")
+  appAvailabilityRuleIdentities  AppAvailabilityRuleIdentity[]   @relation("AppAvailabilityRuleIdentityUser")
+  createdAppAvailabilityRules    AppAvailabilityRule[]           @relation("AppAvailabilityRuleCreator")
+  createdAgentDefaultConnections ProjectAgentDefaultConnection[] @relation("ProjectAgentDefaultConnectionCreator")
 
   @@map("users")
 }
@@ -631,29 +633,30 @@ model OnboardingSurvey {
 // ── App connections ──────────────────────────────────────────────────────
 
 model AppConnection {
-  id                  String               @id @default(uuid())
-  scope               String               @default("project") // "project" | "organization" (partner reserved)
-  projectId           String?              @map("project_id")
-  organizationId      String?              @map("organization_id")
-  partnerId           String?              @map("partner_id") // cloud-only, reserved for future partner-level app connections (inert)
+  id                  String                          @id @default(uuid())
+  scope               String                          @default("project") // "project" | "organization" (partner reserved)
+  projectId           String?                         @map("project_id")
+  organizationId      String?                         @map("organization_id")
+  partnerId           String?                         @map("partner_id") // cloud-only, reserved for future partner-level app connections (inert)
   // The AppConfig whose credentials minted this connection (OAuth refresh
   // tokens are bound to that client). Null = platform/env credentials, a
   // connection method that needs no config, or minted before this link.
-  appConfigId         String?              @map("app_config_id")
+  appConfigId         String?                         @map("app_config_id")
   provider            String // "github", "gmail", "google-calendar", "google-drive", etc.
-  label               String?              @map("label") // auto-populated from metadata (email/username)
-  status              String               @default("connected")
-  credentials         String?              @map("credentials") // encrypted JSON (access_token, refresh_token, etc.)
-  scopes              String[]             @default([])
+  label               String?                         @map("label") // auto-populated from metadata (email/username)
+  status              String                          @default("connected")
+  credentials         String?                         @map("credentials") // encrypted JSON (access_token, refresh_token, etc.)
+  scopes              String[]                        @default([])
   metadata            Json? // non-secret info (username, org, email)
-  connectedAt         DateTime             @default(now()) @map("connected_at")
-  updatedAt           DateTime             @updatedAt @map("updated_at")
-  project             Project?             @relation(fields: [projectId], references: [id])
-  organization        Organization?        @relation(fields: [organizationId], references: [id])
-  partner             Partner?             @relation(fields: [partnerId], references: [id])
-  appConfig           AppConfig?           @relation(fields: [appConfigId], references: [id], onDelete: SetNull)
+  connectedAt         DateTime                        @default(now()) @map("connected_at")
+  updatedAt           DateTime                        @updatedAt @map("updated_at")
+  project             Project?                        @relation(fields: [projectId], references: [id])
+  organization        Organization?                   @relation(fields: [organizationId], references: [id])
+  partner             Partner?                        @relation(fields: [partnerId], references: [id])
+  appConfig           AppConfig?                      @relation(fields: [appConfigId], references: [id], onDelete: SetNull)
   agentAppConnections AgentAppConnection[]
   policyRuleTargets   PolicyRuleTarget[]
+  agentDefaults       ProjectAgentDefaultConnection[]
 
   @@index([projectId, provider])
   @@index([organizationId, provider])
@@ -684,6 +687,37 @@ model AgentAppConnection {
 
   @@id([agentId, appConnectionId])
   @@map("agent_app_connections")
+}
+
+// Project-level template: which connections a brand-new agent in this project
+// should be granted automatically, applied once at creation (`afterCreateAgent`
+// hook) via the same `setConnectionGrant` path the manual attach UI uses — this
+// table stores INTENT (a template), never the grant itself. An explicit,
+// project-scoped allowlist by construction: there is deliberately no
+// "grant everything" entry, matching the attach model's move away from
+// `secretMode: "all"` (see the comment on `Agent.secretMode`). Deleting a
+// project or connection cascades — a stale template row pointing at a gone
+// connection can't express anything.
+model ProjectAgentDefaultConnection {
+  id              String   @id @default(uuid())
+  projectId       String   @map("project_id")
+  connectionId    String   @map("connection_id")
+  access          String // "full" | "custom" — mirrors ConnectionGrantInput
+  allow           String[] @default([])
+  ask             String[] @default([])
+  resources       Json? // session policy restriction; null = unrestricted
+  createdByUserId String?  @map("created_by_user_id")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  project       Project       @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  connection    AppConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+  createdByUser User?         @relation("ProjectAgentDefaultConnectionCreator", fields: [createdByUserId], references: [id], onDelete: SetNull)
+
+  @@unique([projectId, connectionId])
+  @@index([projectId])
+  @@index([connectionId])
+  @@map("project_agent_default_connections")
 }
 
 model AppConfig {

@@ -374,6 +374,21 @@ export interface AgentGrantConnection {
   resources: GrantResources | null;
 }
 
+/** The project-level template: what a brand-new agent in this project is
+ * granted automatically, applied once at creation time. Same shape as
+ * `AgentGrantConnection` minus `connectionId`'s agent context — this is
+ * INTENT for future agents, not a live grant on an existing one. */
+export interface ProjectAgentDefault {
+  connectionId: string;
+  provider: string;
+  label: string | null;
+  scope: "project" | "organization";
+  access: "full" | "custom";
+  allow: string[];
+  ask: string[];
+  resources: GrantResources | null;
+}
+
 export interface AgentGrantSecret {
   secretId: string;
   name: string;

@@ -3,6 +3,7 @@ import * as secrets from "./secrets";
 import * as policy from "./policy";
 import * as connections from "./connections";
 import * as grants from "./grants";
+import * as agentDefaults from "./agent-defaults";
 import * as projects from "./projects";
 import * as organizations from "./organizations";
 import * as session from "./session";
@@ -26,6 +27,7 @@ export {
   policy,
   connections,
   grants,
+  agentDefaults,
   projects,
   organizations,
   session,
@@ -89,6 +91,7 @@ export type {
   AgentGrantsSummary,
   AgentWithGrantsSummary,
   GrantsSummaryEntry,
+  ProjectAgentDefault,
 } from "./types";
 export type { CreatePolicyRuleInput, UpdatePolicyRuleInput } from "./policy";
 export type {

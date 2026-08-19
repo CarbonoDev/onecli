@@ -2,6 +2,7 @@ import type { CreateApiAppOptions } from "@onecli/api";
 import { ossNewProjectPolicySeeder } from "@onecli/api/services/policy-oss-cutover";
 import { ossRoleResolver } from "@onecli/api/services/org-role-resolver";
 import { registerOssOrgRoutes } from "@onecli/api/routes/org";
+import { applyProjectAgentDefaults } from "@onecli/api/services/agent-default-connections-service";
 
 /**
  * The OSS edition's API wiring. Every EE edition ALIASES THIS FILE AWAY
@@ -25,9 +26,20 @@ import { registerOssOrgRoutes } from "@onecli/api/routes/org";
  * theirs. Registering these routes in the shared `app.ts` instead would put
  * edition-specific paths in an upstream-merged file and let Hono's
  * first-registration-wins silently shadow an EE route.
+ *
+ * `resourceHooks.afterCreateAgent` applies the project's default-connections
+ * template to every brand-new agent (`agent-default-connections-service.ts`) —
+ * the OSS answer to "an agent shouldn't be born with zero access and no way to
+ * tell." `beforeCreateAgent` stays a no-op: OSS has no agent quota to gate.
  */
 export const eeOverrides: CreateApiAppOptions | undefined = {
   newOrgPolicySeeder: ossNewProjectPolicySeeder,
   roleResolver: ossRoleResolver,
   eeRoutes: registerOssOrgRoutes,
+  resourceHooks: {
+    beforeCreateAgent: async () => {},
+    beforeCreateSecret: async () => {},
+    afterCreateAgent: (organizationId, projectId, agentId) =>
+      applyProjectAgentDefaults({ projectId, organizationId }, agentId),
+  },
 };

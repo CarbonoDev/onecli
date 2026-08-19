@@ -44,6 +44,7 @@ import {
   connectionReflectRoutes,
 } from "./routes/policy-reflect";
 import { agentGrantsRoutes, connectionGrantsRoutes } from "./routes/grants";
+import { agentDefaultsRoutes } from "./routes/agent-defaults";
 import {
   removedAgentEquipmentRoutes,
   removedConnectionAgentRoutes,
@@ -152,6 +153,9 @@ export const createApiApp = (
   // into source:"grant" policy rules, composed onto the same base paths.
   app.route("/agents", agentGrantsRoutes());
   app.route("/connections", connectionGrantsRoutes());
+  // Project-level "which connections should a new agent start with" template,
+  // applied at agent-creation time by the `afterCreateAgent` resource hook.
+  app.route("/agent-defaults", agentDefaultsRoutes());
   app.route("/vaults", vaultRoutes());
   app.route("/gateway-url", gatewayUrlRoutes());
   app.route("/gateway", gatewayCaRoutes());

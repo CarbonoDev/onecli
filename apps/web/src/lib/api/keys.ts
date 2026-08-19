@@ -81,6 +81,9 @@ export const queryKeys = {
     byProvider: (provider: string) =>
       [...queryKeys.connections.all(), "provider", provider] as const,
   },
+  agentDefaults: {
+    all: () => ["agent-defaults", ...scope()] as const,
+  },
   projects: {
     all: () => ["projects", ...scope()] as const,
     detail: (projectId: string) =>

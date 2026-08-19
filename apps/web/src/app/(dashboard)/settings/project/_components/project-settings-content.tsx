@@ -7,6 +7,7 @@ import { useProjectAccess } from "@/hooks/use-project-access";
 import { useOrgMembersList } from "@/hooks/use-org-members";
 import { ProjectNameCard } from "./project-name-card";
 import { ProjectAccessCard } from "./project-access-card";
+import { AgentDefaultsCard } from "./agent-defaults-card";
 import { DeleteProjectCard } from "./delete-project-card";
 import { ReadOnlyNotice } from "../../_components/read-only-notice";
 
@@ -94,6 +95,7 @@ export const ProjectSettingsContent = ({
         isOrgAdmin={isOrgAdmin}
         sharingEnabled={sharingEnabled}
       />
+      <AgentDefaultsCard canManage={canManage} />
       <DeleteProjectCard project={project.data} canManage={canManage} />
     </>
   );

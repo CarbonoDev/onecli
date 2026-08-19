@@ -79,6 +79,16 @@ export const agentRoutes = () => {
       parsed.data.name,
       parsed.data.identifier,
     );
+    // Best-effort, post-commit: apply the project's default-connections
+    // template (OSS) so a brand-new agent doesn't start with zero access.
+    // `createAgent` above already 409s on an existing identifier, so this only
+    // ever runs once per agent, on genuine first creation — never re-applied
+    // on a later idempotent `ensureAgent` call for the same identifier.
+    await getResourceHooks().afterCreateAgent?.(
+      auth.organizationId,
+      projectId,
+      agent.id,
+    );
     invalidateGatewayCache(c.req.raw);
     return c.json(agent, 201);
   });
